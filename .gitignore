@@ -1,0 +1,4 @@
+native/build/
+*.pdb
+*.lib
+__pycache__/
