@@ -272,10 +272,10 @@ static void TC hook_padData(void *self, unsigned slot)
 {
     unsigned g = gp();
     if (padfix && g && slot < 2) {
-        unsigned old = rd32(g + 0x870);
-        wr32(g + 0x870, slot);
+        unsigned old = *(volatile unsigned *)(g + 0x870);
+        *(volatile unsigned *)(g + 0x870) = slot;
         orig_padData(self, slot);
-        wr32(g + 0x870, old);
+        *(volatile unsigned *)(g + 0x870) = old;
         padfix_calls++;
         return;
     }
@@ -289,10 +289,10 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
         fn(unit);
         return;
     }
-    unsigned old = rd32(g + 0x870);
-    wr32(g + 0x870, (unsigned)c->pad);
+    unsigned old = *(volatile unsigned *)(g + 0x870);
+    *(volatile unsigned *)(g + 0x870) = (unsigned)c->pad;
     fn(unit);
-    wr32(g + 0x870, old);
+    *(volatile unsigned *)(g + 0x870) = old;
     c->swaps++;
 }
 
