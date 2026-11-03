@@ -173,25 +173,44 @@ static void input_remote_set(int slot, const r1_input_t *rec)
 __declspec(dllexport) void r1in_remote_set(int slot, const r1_input_t *rec) { input_remote_set(slot, rec); }
 
 /* ---- the capture ---- */
-static hk_t hk_pad, hk_upd, hk_pd;
+static hk_t hk_pad, hk_upd, hk_pd, hk_own;
 static void (FC *orig_updatePad)(unsigned unit);
 static void (FC *orig_unitUpdate)(unsigned unit);
 static void (TC *orig_padData)(void *self, unsigned slot);
+/* own slot (client plays the partner): FUN_0087E1B0(sCoopManager) = `+0xF4 in {1,2} ? +0xF8 : 0` is the offline branch of FUN_00882D60, which ~190 callers use as "the
+ * local player's slot" (doors, enemies, items, cutscenes, HUD, camera); FUN_0067AF10 finds the local player unit by it. We answer with our slot instead and touch no
+ * sCoopManager field, so the Raid state (+0xF4/+0xF8, game mode) stays as the game left it. */
+static unsigned (FC *orig_own)(unsigned self);
+static volatile int own_on;
+static volatile unsigned own_slot;
+static unsigned FC hook_own(unsigned self)
+{
+    if (own_on)
+        return own_slot;
+    return orig_own(self);
+}
 
 #define MAXCAP 4
 typedef struct {
     int active;
     unsigned unit, ctl_obj;
     int saved_ctl, saved_kind;
+    int pad;   /* pad slot the unit reads while it is updated */
     unsigned swaps, writes;
 } capu_t;
 static capu_t caps[MAXCAP];
+/* The role: which pad slot plays which character. maps[e] is for the player unit whose slot field (+0xE2C) is e (0 = the main character, 1 = the partner in the
+ * episodes seen so far): en = take it over, pad = the pad slot its input comes from. A unit that is recreated (load, checkpoint, area change) is taken again
+ * the first time one of the hooks sees it. */
 static struct {
-    volatile int armed;   /* the role: capture every AI partner (kind 2, class uPl<>) the hooks see */
-    int slot, mode;
+    volatile int armed;
+    int mode;
+    struct {
+        int en, pad;
+    } maps[2];
     float dz;
     unsigned captures;
-} role = {.dz = 0.24f, .slot = 1, .mode = 2};
+} role = {.dz = 0.24f, .mode = 2};
 static volatile int padfix;
 static unsigned padfix_calls;
 
@@ -203,7 +222,7 @@ static capu_t *cap_find(unsigned unit)
     return NULL;
 }
 
-static capu_t *cap_take(unsigned unit)
+static capu_t *cap_take(unsigned unit, int pad)
 {
     unsigned co = ctl_obj_of(unit);
     if (!co)
@@ -212,13 +231,13 @@ static capu_t *cap_take(unsigned unit)
         if (!caps[i].active) {
             capu_t *c = &caps[i];
             memset(c, 0, sizeof *c);
-            c->unit = unit, c->ctl_obj = co;
+            c->unit = unit, c->ctl_obj = co, c->pad = pad;
             c->saved_ctl = (int)rd32(co + 0x34), c->saved_kind = (int)rd32(unit + 0xE30);
             wr32(co + 0x34, 1);
             wr32(unit + 0xE30, 1);
             c->active = 1;
             role.captures++;
-            A->log("plug_cap: captured unit %08x (slot field %u): control type %d -> 1, kind %d -> 1, pad slot %d mode %d", unit, rd32(unit + 0xE2C), c->saved_ctl, c->saved_kind, role.slot, role.mode);
+            A->log("plug_cap: captured unit %08x (slot field %u): control type %d -> 1, kind %d -> 1, pad slot %d mode %d", unit, rd32(unit + 0xE2C), c->saved_ctl, c->saved_kind, pad, role.mode);
             return c;
         }
     return NULL;
@@ -228,11 +247,13 @@ static capu_t *cap_take(unsigned unit)
 static capu_t *cap_for(unsigned unit)
 {
     capu_t *c = cap_find(unit);
-    if (c)
+    if (c || !role.armed)
         return c;
-    if (!role.armed || rd32(unit + 0xE30) != 2 || !is_player_class(unit))
+    /* hot path (every update of every unit of the game): plain reads of the unit's own memory first, the class name only for candidates */
+    unsigned e = *(volatile unsigned *)(unit + 0xE2C), kind = *(volatile unsigned *)(unit + 0xE30);
+    if (e > 1 || !role.maps[e].en || (kind != 1 && kind != 2) || !is_player_class(unit))
         return NULL;
-    return cap_take(unit);
+    return cap_take(unit, role.maps[e].pad);
 }
 
 static void cap_release(capu_t *c)
@@ -268,7 +289,7 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
         return;
     }
     unsigned old = rd32(g + 0x870);
-    wr32(g + 0x870, (unsigned)role.slot);
+    wr32(g + 0x870, (unsigned)c->pad);
     fn(unit);
     wr32(g + 0x870, old);
     c->swaps++;
@@ -287,7 +308,7 @@ static float dead(float v, float dz)
 static void write_group(unsigned unit, capu_t *c)
 {
     r1_input_t rec;
-    input_get(role.slot, &rec);
+    input_get(c->pad, &rec);
     float lx = rec.lx / 32767.0f, ly = rec.ly / 32767.0f, rx = rec.rx / 32767.0f, ry = rec.ry / 32767.0f;
     float mag = sqrtf(lx * lx + ly * ly);
     float mv_x = 0, mv_y = 0;
@@ -338,6 +359,7 @@ static void cap_off_all(char *out, int size)
 {
     int n = 0, o = 0;
     role.armed = 0;
+    memset(role.maps, 0, sizeof role.maps);
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active) {
             if (o < size - 120)
@@ -368,33 +390,58 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         int slot = 1, mode = 2;
         sscanf(arg, "%15s %39s %d %d", sub, who, &slot, &mode);
         if (!strcmp(sub, "on")) {
-            /* "cap on partner|Parker|Jill|<hexaddr> [padslot=1] [mode]": arms the ROLE (every AI partner the hooks see is taken) and takes the named unit now */
-            if (role.armed) {
-                snprintf(out, size, "capture already on (cap off first)");
-                return 1;
-            }
+            /* "cap on partner|main|Parker|Jill|<hexaddr> [padslot=1] [mode]": the character of that unit plays on that pad slot from now on (the ROLE: it is taken
+             * again whenever the game recreates it); `cap map <unit slot 0|1> <pad slot>` adds the other character (e.g. Jill on pad 1 while Parker plays on pad 0) */
             unsigned unit = find_unit(who);
             if (!unit || !is_player_class(unit) || !ctl_obj_of(unit)) {
                 snprintf(out, size, "no such unit '%s' (cap on partner|main|Parker|Jill|<hexaddr> [padslot=1] [mode 2 swap whole update|0 swap updatePad|1 write group])", who);
                 return 1;
             }
-            role.slot = slot, role.mode = mode, role.armed = 1;
+            unsigned e = rd32(unit + 0xE2C);
+            if (e > 1) {
+                snprintf(out, size, "unit %08x has slot field %u (expected 0 or 1)", unit, e);
+                return 1;
+            }
+            role.mode = mode, role.maps[e].en = 1, role.maps[e].pad = slot, role.armed = 1;
             capu_t *c = cap_find(unit);
             if (!c)
-                c = cap_take(unit);
-            snprintf(out, size, "capture ON: unit %08x pad slot %d mode %d (padfix %s), role armed: %s", unit, slot, mode, padfix ? "on" : "off", c ? "yes" : "no free slot");
+                c = cap_take(unit, slot);
+            snprintf(out, size, "capture ON: unit %08x (slot field %u) plays on pad slot %d, mode %d (padfix %s), role armed; %s", unit, e, slot, mode, padfix ? "on" : "off", c ? "taken now" : "no free capture entry");
+        } else if (!strcmp(sub, "map")) {
+            int e = atoi(who), pad = slot;
+            if (e < 0 || e > 1 || pad < 0 || pad > 1) {
+                snprintf(out, size, "usage: cap map <unit slot field 0|1> <pad slot 0|1>");
+                return 1;
+            }
+            role.maps[e].en = 1, role.maps[e].pad = pad, role.armed = 1;
+            snprintf(out, size, "units with slot field %d now play on pad slot %d (taken when the hooks see them)", e, pad);
         } else if (!strcmp(sub, "off")) {
             cap_off_all(out, size);
         } else if (!strcmp(sub, "dz")) {
             role.dz = (float)atof(who);
             snprintf(out, size, "dead zone %.2f", role.dz);
         } else {
-            int o = snprintf(out, size, "role %s slot %d mode %d, %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d\n", role.armed ? "ARMED" : "off", role.slot, role.mode, role.captures,
-                             padfix ? "on" : "off", padfix_calls, hk_pad.on, hk_upd.on, hk_pd.on);
+            int o = snprintf(out, size, "role %s mode %d maps: unit slot 0 -> %s%d, unit slot 1 -> %s%d; %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d\n", role.armed ? "ARMED" : "off",
+                             role.mode, role.maps[0].en ? "pad " : "(off) ", role.maps[0].pad, role.maps[1].en ? "pad " : "(off) ", role.maps[1].pad, role.captures, padfix ? "on" : "off", padfix_calls, hk_pad.on,
+                             hk_upd.on, hk_pd.on);
             for (int i = 0; i < MAXCAP; i++)
                 if (caps[i].active)
-                    o += snprintf(out + o, size - o, "unit %08x ctlobj %08x saved ctl %d kind %d now ctl %u kind %u, %u swaps, %u group writes\n", caps[i].unit, caps[i].ctl_obj, caps[i].saved_ctl, caps[i].saved_kind,
-                                  rd32(caps[i].ctl_obj + 0x34), rd32(caps[i].unit + 0xE30), caps[i].swaps, caps[i].writes);
+                    o += snprintf(out + o, size - o, "unit %08x (slot field %u) pad %d ctlobj %08x saved ctl %d kind %d now ctl %u kind %u, %u swaps, %u group writes\n", caps[i].unit, rd32(caps[i].unit + 0xE2C), caps[i].pad,
+                                  caps[i].ctl_obj, caps[i].saved_ctl, caps[i].saved_kind, rd32(caps[i].ctl_obj + 0x34), rd32(caps[i].unit + 0xE30), caps[i].swaps, caps[i].writes);
+        }
+        return 1;
+    }
+    if (!strcmp(name, "own")) {   /* own <slot 0|1> | own off */
+        if (!hk_own.on) {
+            snprintf(out, size, "own-slot hook not installed");
+            return 1;
+        }
+        if (!strcmp(arg, "off") || !arg[0]) {
+            own_on = 0;
+            snprintf(out, size, "own slot: game default (0 offline)");
+        } else {
+            own_slot = (unsigned)atoi(arg), own_on = 1;
+            snprintf(out, size, "own slot overridden: %u", own_slot);
         }
         return 1;
     }
@@ -443,7 +490,9 @@ static void on_exit_(void)
     if (role.armed || caps[0].active || caps[1].active || caps[2].active || caps[3].active)
         cap_off_all(tmp, sizeof tmp);
     padfix = 0;
+    own_on = 0;
     dbg_cleanup();
+    hook_remove(&hk_own);
     hook_remove(&hk_pad);
     hook_remove(&hk_upd);
     hook_remove(&hk_pd);
@@ -462,6 +511,9 @@ __declspec(dllexport) int plug_init(const r1_api_t *api, r1_plug_t *out)
         orig_unitUpdate = (void (FC *)(unsigned))hk_upd.tramp;
     if (hook_install(&hk_pd, 0x88A470, b_pd, 6, (void *)hook_padData))
         orig_padData = (void (TC *)(void *, unsigned))hk_pd.tramp;
+    static const unsigned char b_own[] = {0x8B, 0x81, 0xF4, 0x00, 0x00, 0x00};
+    if (hook_install(&hk_own, 0x87E1B0, b_own, 6, (void *)hook_own))
+        orig_own = (unsigned (FC *)(unsigned))hk_own.tramp;
     A->log("plug_cap: loaded (api v%u), hooks updatePad %d unitUpdate %d padData %d", A->version, hk_pad.on, hk_upd.on, hk_pd.on);
     src[0].kind = R1_SRC_PAD, src[0].arg = 0;
     src[1].kind = R1_SRC_PAD, src[1].arg = 1;
