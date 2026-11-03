@@ -117,10 +117,20 @@ static HRESULT WINAPI hook_Present(IDirect3DDevice9 *dev, const RECT *s, const R
     return real_Present(dev, s, d, w, r);
 }
 
+static void log_pp(const char *what, const D3DPRESENT_PARAMETERS *pp)
+{
+    if (!pp)
+        return;
+    r1_log("%s: %ux%u fmt=%d buffers=%u msaa=%d/%lu swap=%d hwnd=%p windowed=%d depth=%d/%d flags=0x%lx refresh=%u interval=0x%x thread %lu", what, pp->BackBufferWidth,
+           pp->BackBufferHeight, pp->BackBufferFormat, pp->BackBufferCount, pp->MultiSampleType, pp->MultiSampleQuality, pp->SwapEffect, (void *)pp->hDeviceWindow, pp->Windowed,
+           pp->EnableAutoDepthStencil, pp->AutoDepthStencilFormat, pp->Flags, pp->FullScreen_RefreshRateInHz, pp->PresentationInterval, GetCurrentThreadId());
+}
+
 static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
-    if (testmode_force_windowed() && pp && !pp->Windowed) {
-        pp->Windowed = TRUE;
+    log_pp("device Reset asked", pp);
+    if (testmode_force_windowed() && pp) {
+        pp->Windowed = TRUE;                   /* a test instance never goes exclusive full screen; windowed needs refresh 0 */
         pp->FullScreen_RefreshRateInHz = 0;
     }
     HRESULT hr = real_Reset(dev, pp);
@@ -134,7 +144,8 @@ static HRESULT WINAPI hook_CreateDevice(IDirect3D9 *d3d, UINT adapter, D3DDEVTYP
 {
     UINT use = (UINT)testmode_adapter_pick(d3d, focus, adapter);
     int was_full = pp && !pp->Windowed;
-    if (testmode_force_windowed() && pp && !pp->Windowed) {   /* a test instance never goes exclusive full screen */
+    log_pp("CreateDevice asked", pp);
+    if (testmode_force_windowed() && pp) {   /* a test instance never goes exclusive full screen */
         pp->Windowed = TRUE;
         pp->FullScreen_RefreshRateInHz = 0;
     }

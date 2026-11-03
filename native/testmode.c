@@ -526,6 +526,10 @@ static DialogBoxParamW_t real_DialogBoxParamW;
 static int WINAPI hook_MessageBoxA(HWND w, LPCSTR text, LPCSTR cap, UINT type)
 {
     r1_log("MessageBoxA \"%s\": %s", cap ? cap : "", text ? text : "");
+    if (background) {   /* a test instance never shows a modal box on the owner's desktop: logged, answered OK at once */
+        r1_log("MessageBoxA: not shown (REV1_BACKGROUND), answered 1");
+        return 1;
+    }
     int r = real_MessageBoxA(w, text, cap, type);
     r1_log("MessageBoxA answered %d", r);
     return r;
@@ -756,4 +760,31 @@ void testmode_install(void)
         real_GetForegroundWindow = (GetForegroundWindow_t)r1_patch_iat("USER32.dll", "GetForegroundWindow", (void *)hook_GetForegroundWindow);
     r1_log("test mode: pos=%d,%d (%s) size=%dx%d (%s) background=%d adapter=%s", win_x, win_y, have_pos ? "on" : "off", win_w, win_h,
            have_size ? "on" : "off", background, adapter_mode[0] ? adapter_mode : "game's");
+}
+
+/* The state the game would get from XInputGetState(user): a synthetic pad (console pad/padhold) first, else the real one (when allowed); 1 = connected */
+int testmode_pad_peek(int user, void *out)
+{
+    XINPUT_GAMEPAD *g = (XINPUT_GAMEPAD *)out;
+    if (user < 0 || user > 3)
+        return 0;
+    if (synth[user].active) {
+        if (synth[user].until && (LONG)(GetTickCount() - synth[user].until) >= 0) {
+            memset(&synth[user].pad, 0, sizeof synth[user].pad);
+            synth[user].until = 0;
+            synth[user].packet++;
+            InterlockedExchange(&synth[user].active, synth[user].base_active);
+        }
+        if (synth[user].active) {
+            *g = synth[user].pad;
+            return 1;
+        }
+    }
+    if (!real_XInputGetState || (background && !pads_allowed && !really_in_front()))
+        return 0;
+    XINPUT_STATE st;
+    if (real_XInputGetState((DWORD)user, &st) != ERROR_SUCCESS)
+        return 0;
+    *g = st.Gamepad;
+    return 1;
 }

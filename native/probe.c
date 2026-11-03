@@ -234,162 +234,61 @@ static void camera_cmd(char *out, int size)
     unsigned root = rd32(0x11E00B8);
     char cn[96] = "?";
     classes_object_name(root, cn, sizeof cn);
-    unsigned mgr = root + 0xCE0;
+    unsigned mgr = rd32(root + 0xCE0);   /* a pointer to the uCameraManage */
     char mn[96] = "?";
     classes_object_name(mgr, mn, sizeof mn);
-    snprintf(out, size, "camera root [0x11E00B8] = %08x (%s)\nmanager root+0xCE0 = %08x (%s): target +0x74=%08x +0x78=%08x camera index(+0xCC)=%d cams(+0xE4)=%08x fov(+0x3C)=%.3f", root, cn, mgr, mn, rd32(mgr + 0x74),
+    snprintf(out, size, "camera root [0x11E00B8] = %08x (%s)\nmanager [root+0xCE0] = %08x (%s): target +0x74=%08x +0x78=%08x camera index(+0xCC)=%d cams(+0xE4)=%08x fov(+0x3C)=%.3f", root, cn, mgr, mn, rd32(mgr + 0x74),
              rd32(mgr + 0x78), (int)rd32(mgr + 0xCC), rd32(mgr + 0xE4), rdf(mgr + 0x3C));
 }
 
-/* ---- inline hook machinery (as Revelations 2 trace.c) ---- */
-static void *make_tramp(unsigned target, const unsigned char *expect, int n)
+/* ---- hot-loadable plug-in (console "plug load <dll>" / "plug unload" / "plug status"; commands for it: "P <name> <args>") ---- */
+static HMODULE plug_mod;
+static r1_plug_t plug;
+static char plug_path[260];
+
+static const r1_api_t api = {1, r1_log, r1_safe_read, testmode_pad_peek, classes_object_name, d3d_frames};
+
+static void plug_unload(char *out, int size)
 {
-    unsigned char cur[16];
-    if (n < 5 || n > 12 || !r1_safe_read((void *)target, cur, (unsigned)n) || memcmp(cur, expect, (size_t)n) != 0) {
-        r1_log("probe: bytes at %08x differ from the expected build, not patching", target);
-        return NULL;
-    }
-    unsigned char *t = VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!t)
-        return NULL;
-    memcpy(t, cur, (size_t)n);
-    t[n] = 0xE9;
-    *(int *)(t + n + 1) = (int)((target + (unsigned)n) - (unsigned)(t + n + 5));
-    return t;
-}
-
-static int patch_jmp(unsigned target, int n, void *hook)
-{
-    DWORD old;
-    if (!VirtualProtect((void *)target, (SIZE_T)n, PAGE_EXECUTE_READWRITE, &old))
-        return 0;
-    unsigned char *p = (unsigned char *)target;
-    for (int i = 5; i < n; i++)
-        p[i] = 0x90;
-    *(int *)(p + 1) = (int)((unsigned)hook - (target + 5));
-    p[0] = 0xE9;
-    VirtualProtect((void *)target, (SIZE_T)n, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), (void *)target, (SIZE_T)n);
-    return 1;
-}
-
-/* ---- stage 3: partner capture ---- */
-typedef void (FC *UpdatePad_t)(unsigned unit);
-static UpdatePad_t orig_updatePad;
-static volatile unsigned updatepad_calls;
-static unsigned up_seen[8];
-static int n_up_seen;
-
-static struct {
-    volatile int on;
-    unsigned unit;
-    int slot;          /* pad slot the unit reads while captured (sGamePad+0x870 during its updatePad) */
-    int mode;          /* 0 = swap the slot, 1 = write the pad group from the console values after updatePad */
-    int saved_ctl, saved_kind;
-    unsigned ctl_obj;
-    float mv[2], rot[2], aim[2];
-    unsigned char run, aimflag;
-    unsigned swaps;
-} cap;
-
-static void FC hook_updatePad(unsigned unit)
-{
-    updatepad_calls++;
-    if (n_up_seen < 8) {
-        int seen = 0;
-        for (int i = 0; i < n_up_seen; i++)
-            seen |= up_seen[i] == unit;
-        if (!seen)
-            up_seen[n_up_seen++] = unit;
-    }
-    if (cap.on && unit == cap.unit) {
-        unsigned gp = rd32(R1_GAMEPAD_PTR);
-        if (cap.mode == 0 && gp) {
-            unsigned old = rd32(gp + 0x870);
-            wr32(gp + 0x870, (unsigned)cap.slot);
-            orig_updatePad(unit);
-            wr32(gp + 0x870, old);
-            cap.swaps++;
-            return;
-        }
-        orig_updatePad(unit);
-        if (cap.mode == 1) {
-            wrf(unit + 0x1138, cap.mv[0]), wrf(unit + 0x113C, cap.mv[1]);
-            wrf(unit + 0x1140, cap.rot[0]), wrf(unit + 0x1144, cap.rot[1]);
-            wrf(unit + 0x1148, cap.aim[0]), wrf(unit + 0x114C, cap.aim[1]);
-            wr8(unit + 0x1150, cap.run), wr8(unit + 0x1151, cap.aimflag);
-        }
+    if (!plug_mod) {
+        snprintf(out, size, "no plug-in loaded");
         return;
     }
-    orig_updatePad(unit);
+    if (plug.on_exit)
+        plug.on_exit();
+    memset(&plug, 0, sizeof plug);
+    FreeLibrary(plug_mod);
+    plug_mod = NULL;
+    snprintf(out, size, "plug-in %s unloaded", plug_path);
 }
 
-void probe_install(void)
+static void plug_load(const char *path, char *out, int size)
 {
-    static int done;
-    if (done || !r1_text_decrypted())
+    if (plug_mod)
+        plug_unload(out, size);
+    HMODULE m = LoadLibraryA(path);
+    if (!m) {
+        snprintf(out, size, "LoadLibrary failed (%lu): %s", GetLastError(), path);
         return;
-    done = 1;
-    static const unsigned char b_up[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8};
-    void *t = make_tramp(R1_UPDATEPAD, b_up, 6);
-    if (t) {
-        orig_updatePad = (UpdatePad_t)t;
-        patch_jmp(R1_UPDATEPAD, 6, (void *)hook_updatePad);
     }
-    r1_log("probe: updatePad hook (passes through unless 'cap on') %s", orig_updatePad ? "installed" : "NOT installed");
-}
-
-static void cap_cmd(const char *arg, char *out, int size)
-{
-    char sub[16] = "", who[40] = "";
-    int slot = 1, mode = 0;
-    sscanf(arg, "%15s %39s %d %d", sub, who, &slot, &mode);
-    if (!strcmp(sub, "on")) {
-        unsigned unit = find_unit(who);
-        char cn[96];
-        if (!unit || !classes_object_name(unit, cn, sizeof cn)) {
-            snprintf(out, size, "no such unit '%s' (cap on parker|jill|<hexaddr> [padslot=1] [mode 0 swap|1 write])", who);
-            return;
-        }
-        if (!orig_updatePad) {
-            snprintf(out, size, "updatePad hook not installed");
-            return;
-        }
-        if (cap.on)
-            snprintf(out, size, "capture already on for %08x (cap off first)", cap.unit);
-        cap.unit = unit, cap.slot = slot, cap.mode = mode, cap.swaps = 0;
-        cap.ctl_obj = unit_ctl_obj(unit);
-        cap.saved_ctl = unit_ctl(unit), cap.saved_kind = (int)rd32(unit + 0xE30);
-        if (!cap.ctl_obj) {
-            snprintf(out, size, "unit has no controller object ([[unit+0xE80]+0x38] is null)");
-            return;
-        }
-        wr32(cap.ctl_obj + 0x34, 1);   /* control type 1: updatePad reads the input manager */
-        wr32(unit + 0xE30, 1);         /* kind 1: "player" (weapons, aiming tests) */
-        cap.on = 1;
-        snprintf(out, size, "capture ON: %s %08x reads pad slot %d (%s), control type %d -> 1, kind %d -> 1", cn, unit, slot, mode ? "console values written after updatePad" : "slot swap during updatePad",
-                 cap.saved_ctl, cap.saved_kind);
-    } else if (!strcmp(sub, "off")) {
-        if (cap.on && cap.ctl_obj) {
-            cap.on = 0;
-            wr32(cap.ctl_obj + 0x34, (unsigned)cap.saved_ctl);
-            wr32(cap.unit + 0xE30, (unsigned)cap.saved_kind);
-            snprintf(out, size, "capture OFF: %08x control type back to %d, kind %d (%u slot swaps done)", cap.unit, cap.saved_ctl, cap.saved_kind, cap.swaps);
-        } else
-            snprintf(out, size, "capture was off");
-    } else if (!strcmp(sub, "set")) {   /* cap set mx my rx ry ax ay run aim : mode 1 values */
-        float v[6] = {0};
-        int r = 0, a = 0;
-        sscanf(arg, "%*s %f %f %f %f %f %f %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &r, &a);
-        cap.mv[0] = v[0], cap.mv[1] = v[1], cap.rot[0] = v[2], cap.rot[1] = v[3], cap.aim[0] = v[4], cap.aim[1] = v[5], cap.run = (unsigned char)r, cap.aimflag = (unsigned char)a;
-        snprintf(out, size, "mode-1 values set");
-    } else {
-        snprintf(out, size, "capture %s: unit %08x pad slot %d mode %d, saved ctl %d kind %d, ctl obj %08x, %u swaps; updatePad called %u times for units:", cap.on ? "ON" : "off", cap.unit, cap.slot,
-                 cap.mode, cap.saved_ctl, cap.saved_kind, cap.ctl_obj, cap.swaps, updatepad_calls);
-        int o = (int)strlen(out);
-        for (int i = 0; i < n_up_seen; i++)
-            o += snprintf(out + o, size - o, " %08x", up_seen[i]);
+    int (*init)(const r1_api_t *, r1_plug_t *) = (int (*)(const r1_api_t *, r1_plug_t *))GetProcAddress(m, "plug_init");
+    if (!init) {
+        FreeLibrary(m);
+        snprintf(out, size, "no plug_init export in %s", path);
+        return;
     }
+    memset(&plug, 0, sizeof plug);
+    int rc = init(&api, &plug);
+    if (rc) {
+        memset(&plug, 0, sizeof plug);
+        FreeLibrary(m);
+        snprintf(out, size, "plug_init returned %d", rc);
+        return;
+    }
+    plug_mod = m;
+    snprintf(plug_path, sizeof plug_path, "%s", path);
+    r1_log("plug: %s loaded", path);
+    snprintf(out, size, "plug-in %s loaded", path);
 }
 
 /* ---- black box: one line per interval in the log (REV1_PROBELOG=<seconds> or console probelog) ---- */
@@ -404,6 +303,8 @@ static void probe_frame(void)
         r1_log("probe: game mode [[0x1169108]+0x24]+0x20 changed %d -> %d (pass %u)", (int)last_mode, (int)mode, lt_frames());
         last_mode = mode;
     }
+    if (plug.on_frame)
+        plug.on_frame();
     if (!probelog_ms)
         return;
     DWORD now = GetTickCount();
@@ -417,13 +318,20 @@ static void probe_frame(void)
         unit_line(l[i].unit, line, sizeof line, 0);
         r1_log("bb: list %d %s", l[i].list, line);
     }
-    r1_log("bb: sGamePad cur=%d en=%u cap=%s", (int)rd32(rd32(R1_GAMEPAD_PTR) + 0x870), rd8(rd32(R1_GAMEPAD_PTR) + 0x882), cap.on ? "ON" : "off");
+    r1_log("bb: sGamePad cur=%d en=%u", (int)rd32(rd32(R1_GAMEPAD_PTR) + 0x870), rd8(rd32(R1_GAMEPAD_PTR) + 0x882));
+}
+
+static void probe_frame(void);
+void probe_install(void)
+{
+    lt_add_frame_cb(probe_frame);
+    r1_log("probe: ready (no inline hooks in the main DLL; capture experiments are a hot-loadable plug-in, see plug_cap.c)");
 }
 
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "cap", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -435,10 +343,9 @@ void probe_run(const char *cmd, char *out, int size)
     char name[32] = "", arg[360] = "";
     sscanf(cmd, "%31s %359[^\r\n]", name, arg);
     out[0] = 0;
-    static int cb_added;
-    if (!cb_added) {
-        cb_added = 1;
-        lt_add_frame_cb(probe_frame);
+    static int env_done;
+    if (!env_done) {
+        env_done = 1;
         char v[16];
         if (r1_env("REV1_PROBELOG", v, sizeof v) && atoi(v) > 0)
             probelog_ms = (unsigned)atoi(v) * 1000;
@@ -457,8 +364,18 @@ void probe_run(const char *cmd, char *out, int size)
         gamepad_cmd(out, size);
     } else if (!strcmp(name, "camera")) {
         camera_cmd(out, size);
-    } else if (!strcmp(name, "cap")) {
-        cap_cmd(arg, out, size);
+    } else if (!strcmp(name, "plug")) {   /* plug load <dll path> | plug unload | plug status */
+        if (!strncmp(arg, "load ", 5))
+            plug_load(arg + 5, out, size);
+        else if (!strcmp(arg, "unload"))
+            plug_unload(out, size);
+        else
+            snprintf(out, size, "plug-in: %s", plug_mod ? plug_path : "none loaded (plug load <dll>)");
+    } else if (!strcmp(name, "P")) {   /* P <name> <args>: a command of the plug-in */
+        char pn[32] = "", pa[300] = "";
+        sscanf(arg, "%31s %299[^\r\n]", pn, pa);
+        if (!plug.on_cmd || !plug.on_cmd(pn, pa, out, size))
+            snprintf(out, size, plug.on_cmd ? "plug-in: unknown command %s" : "no plug-in loaded", pn);
     } else if (!strcmp(name, "ctl")) {   /* ctl <unit> <type> [kind]: write control type (and E30) */
         char w[40] = "";
         int type = -1, kind = -1;
@@ -479,7 +396,7 @@ void probe_run(const char *cmd, char *out, int size)
         probelog_ms = sec > 0 ? (unsigned)sec * 1000 : 0;
         snprintf(out, size, "black box every %d s in the log (0 = off)", sec);
     } else if (!strcmp(name, "ltinfo")) {
-        snprintf(out, size, "logic hook installed, passes %u, thread %lu, updatePad calls %u", lt_frames(), GetCurrentThreadId(), updatepad_calls);
+        snprintf(out, size, "logic hook installed, passes %u, thread %lu", lt_frames(), GetCurrentThreadId());
     } else if (!strcmp(name, "call")) {
         char cv[16], fa[16];
         unsigned a[8] = {0};

@@ -46,6 +46,7 @@ void testmode_pad_human(int game_user);
 void testmode_pad_pretend(int user, int active, const void *xinput_gamepad);
 DWORD testmode_pad_activity(void);
 void testmode_dinput_stats(char *out, int size);
+int testmode_pad_peek(int user, void *xinput_gamepad_out);                    /* what XInputGetState(user) would give the game: synthetic first, else real; 1 = connected */
 void testmode_xinput_sites(char *out, int size);                              /* which XInput users the game polls, from which call sites */
 
 /* inject.c: synthetic keyboard / mouse for test runs */
@@ -84,7 +85,24 @@ void lt_add_frame_cb(lt_frame_cb cb);
 /* probe.c: stage 1/2 live probes and the stage 3 partner capture; commands run on the game thread */
 void probe_run(const char *cmd, char *out, int size);
 int probe_is_game_cmd(const char *name);
-void probe_install(void);                                              /* inline hooks into the game (after the first Present) */
+void probe_install(void);
+
+/* Hot-loadable plug-in (console "plug load <dll>", "plug unload"): lets the capture experiments change without restarting the game. The DLL exports
+ *   int plug_init(const r1_api_t *api, r1_plug_t *out)
+ * and fills `out`; the main DLL calls the entries on the game thread. */
+typedef struct {
+    unsigned version;
+    void (*log)(const char *fmt, ...);
+    int (*safe_read)(const void *addr, void *out, unsigned size);
+    int (*pad_peek)(int user, void *xinput_gamepad_out);
+    int (*object_name)(unsigned obj, char *out, int size);
+    unsigned (*frames)(void);
+} r1_api_t;
+typedef struct {
+    int (*on_cmd)(const char *name, const char *arg, char *out, int size);   /* console "P <name> <arg>", on the game thread; returns 1 when handled */
+    void (*on_frame)(void);                                   /* once per logic pass, on the game thread */
+    void (*on_exit)(void);                                    /* before the DLL is unloaded: remove inline hooks here */
+} r1_plug_t;
 
 /* classes.c: class-name walker (vtable[4] -> DTI), object scan */
 void classes_name(unsigned obj, char *out, int size);
