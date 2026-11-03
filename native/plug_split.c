@@ -120,8 +120,9 @@ static int vertical = 1;       /* 1: side by side (modes 4 / 5), 0: top / bottom
 static int follow = 1;         /* mgr1 target follows the partner */
 static int have_saved;
 static struct { unsigned cam, act, mode, disp, layer, mode0, act0; } sv;
-static unsigned n_pass, n_reasserted, n_nocam, n_raid;
+static unsigned n_pass, n_reasserted, n_nocam, n_raid, n_susp;
 static unsigned last_cam2, last_mgr1;
+static int suspended;          /* viewport 0 shows something else than the gameplay camera (cutscene / title camera): whole view meanwhile */
 
 static void remember(unsigned r)
 {
@@ -170,6 +171,23 @@ static void apply(void)
     }
     remember(r);
     unsigned v2 = vp_addr(r, VP_SECOND), v0 = vp_addr(r, 0);
+    /* The demo scheduler (cutscenes) and the title put their own camera object on viewport 0 (0x891E07: it keeps the old one in this+0x38 and restores it
+     * afterwards). While viewport 0 does not show manager 0, the view is whole: layout 0 and viewport 2 off; the split comes back by itself. */
+    if (rd32(v0 + 4) != mgr0) {
+        if (!suspended) {
+            suspended = 1;
+            n_susp++;
+            A->log("plug_split: viewport 0 camera %08x is not manager 0 (%08x): whole view until it is back", rd32(v0 + 4), mgr0);
+        }
+        wr8(v2 + 0x10, 0);
+        wr8(v0 + 0x13, sv.mode0);
+        wr8(v2 + 0x13, sv.mode);
+        return;
+    }
+    if (suspended) {
+        suspended = 0;
+        A->log("plug_split: viewport 0 shows manager 0 again: split resumes");
+    }
     int fix = 0;
     if (rd32(v2 + 4) != want)
         wr32(v2 + 4, want), fix++;
@@ -253,8 +271,9 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
     char sub[32] = "", a1[32] = "", a2[32] = "", a3[32] = "";
     sscanf(arg ? arg : "", "%31s %31s %31s %31s", sub, a1, a2, a3);
     if (!strcmp(sub, "") || !strcmp(sub, "status")) {
-        snprintf(out, (size_t)size, "split %s: camera %s, layout %s, follow %s; passes %u, re-asserted %u, no-camera passes %u, raid stops %u; vp2 camera %08x (mgr1 %08x)", on ? "ON" : "off",
-                 src_mgr1 ? "mgr1 (partner)" : "dup (same as vp0)", vertical ? "side by side" : "top/bottom", follow ? "on" : "off", n_pass, n_reasserted, n_nocam, n_raid, last_cam2, last_mgr1);
+        snprintf(out, (size_t)size, "split %s%s: camera %s, layout %s, follow %s; passes %u, re-asserted %u, no-camera passes %u, suspended %u times, raid stops %u; vp2 camera %08x (mgr1 %08x)", on ? "ON" : "off",
+                 suspended ? " (suspended: viewport 0 is not the gameplay camera)" : "", src_mgr1 ? "mgr1 (partner)" : "dup (same as vp0)", vertical ? "side by side" : "top/bottom", follow ? "on" : "off", n_pass,
+                 n_reasserted, n_nocam, n_susp, n_raid, last_cam2, last_mgr1);
         return 1;
     }
     if (!strcmp(sub, "probe"))
@@ -274,7 +293,8 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
             snprintf(out, (size_t)size, "refused: Raid / game mode != 0");
             return 1;
         }
-        n_pass = n_reasserted = n_nocam = 0;
+        n_pass = n_reasserted = n_nocam = n_susp = 0;
+        suspended = 0;
         on = 1;
         apply();
         snprintf(out, (size_t)size, "split ON (%s, %s); camera objects: mgr0 %08x mgr1 %08x", src_mgr1 ? "mgr1" : "dup", vertical ? "side by side" : "top/bottom", rd32(root() + 0xCE0), rd32(root() + 0xCE4));
