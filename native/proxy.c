@@ -6,7 +6,8 @@
  * loader maps it before the stub's entry point runs), we only patch import slots / COM vtables.
  * Unlike Revelations 2 the .text of rerev.exe is NOT encrypted on disk (entropy 6.41, the stub only covers .bind), so game
  * code can be read and patterns matched as soon as the DLL is loaded; still no game code is touched before the first
- * DirectInput8Create (the game's own start-up) and nothing is hooked in this skeleton.
+ * Present (inline hooks: logic-thread hook lt.c, updatePad probe.c). Test modes (window on monitor 2, background, mute, shots,
+ * console, synthetic input) are driven by REV1_* environment variables and are all off in a player's game.
  *
  *   REV1_LOG=<file>   the mod's log (default rev1_coop.log next to the exe, rotated at start: rev1_coop.1..4.log;
  *                     a set REV1_LOG is appended to and never rotated)
@@ -385,7 +386,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         }
         r1_log("gate: exe sha256 %s -> %s", exe_sha[0] ? exe_sha : "(unreadable)", exe_ok ? "supported build 13298487" : "UNSUPPORTED, forwarding only");
         if (exe_ok) {
+            testmode_install();
+            d3d_install();
+            steam_install();
             console_install();
+            mute_install();
         }
     }
     return TRUE;
@@ -404,5 +409,7 @@ __declspec(dllexport) HRESULT WINAPI DirectInput8Create(HINSTANCE inst, DWORD ve
     if (!real_DirectInput8Create)
         return E_FAIL;
     HRESULT hr = real_DirectInput8Create(inst, ver, riid, out, outer);
+    if (SUCCEEDED(hr) && out && exe_ok)
+        testmode_wrap_dinput(*out);
     return hr;
 }

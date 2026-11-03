@@ -236,3 +236,16 @@ void classes_scan(const char *file, const char *filter, unsigned scan_lo, unsign
     snprintf(out, size, "scanned %llu bytes in %lu regions, %lu objects, %d vtables with a class, %lu ms -> %s%s%s", total, regions, hits, n_cls, GetTickCount() - t0,
              f ? file : "(cannot write)", objs ? " and " : "", objs ? objfile : "");
 }
+
+/* just the class name of the object at obj ("uPl< ParkerEp1_2 >" ...); 0 when obj is not a readable object with a type-info getter */
+int classes_object_name(unsigned obj, char *out, int size)
+{
+    unsigned vt;
+    out[0] = 0;
+    if (obj < 0x10000 || !r1_safe_read((void *)obj, &vt, 4))
+        return 0;
+    unsigned d = dti_of_vtable(vt);
+    if (!d)
+        return 0;
+    return dti_name(d, out, (unsigned)size, NULL, NULL);
+}
