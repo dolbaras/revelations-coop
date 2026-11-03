@@ -97,6 +97,10 @@ typedef struct {
     int (*pad_peek)(int user, void *xinput_gamepad_out);
     int (*object_name)(unsigned obj, char *out, int size);
     unsigned (*frames)(void);
+    /* version 2: */
+    void (*pad_set)(int user, int active, const void *xinput_gamepad);          /* synthetic pad for an XInput user (testmode_pad_set) */
+    void (*pad_hold)(int user, const void *xinput_gamepad, int ms);            /* ... released by itself after ms */
+    void (*shot)(void);                                                         /* screenshot request (like console `shot`) */
 } r1_api_t;
 typedef struct {
     int (*on_cmd)(const char *name, const char *arg, char *out, int size);   /* console "P <name> <arg>", on the game thread; returns 1 when handled */

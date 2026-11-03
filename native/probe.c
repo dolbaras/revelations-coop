@@ -263,7 +263,7 @@ static HMODULE plug_mod;
 static r1_plug_t plug;
 static char plug_path[260];
 
-static const r1_api_t api = {1, r1_log, r1_safe_read, testmode_pad_peek, classes_object_name, d3d_frames};
+static const r1_api_t api = {2, r1_log, r1_safe_read, testmode_pad_peek, classes_object_name, d3d_frames, testmode_pad_set, testmode_pad_hold, d3d_request_shot};
 
 static void plug_unload(char *out, int size)
 {
