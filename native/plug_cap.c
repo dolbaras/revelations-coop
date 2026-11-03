@@ -514,6 +514,35 @@ static int trk_cmd(const char *arg, char *out, int size)
     return 1;
 }
 
+
+/* P ulist [filter]: every unit of the game (sUnit [0x11E0184]: `+0x620` groups, group k = first unit at +0x2C+0x18k, next unit at unit+0x14; the player class group is k = 10) whose class name
+ * contains the filter: class, position, health. How enemies (and weapons) are found for the fire tests. */
+static void ulist_cmd(const char *filter, char *out, int size)
+{
+    unsigned su = rd32(0x11E0184), ng = su ? rd32(su + 0x620) : 0;
+    int o = snprintf(out, size, "sUnit %08x, %u groups\n", su, ng), shown = 0;
+    for (unsigned k = 0; k < ng && k < 24 && o + 160 < size; k++) {
+        unsigned u = rd32(su + 0x2C + 0x18 * k);
+        int n = 0, match = 0;
+        for (int guard = 0; u && guard < 3000 && o + 160 < size; guard++, u = rd32(u + 0x14)) {
+            char cn[96];
+            n++;
+            if (!A->object_name(u, cn, sizeof cn))
+                strcpy(cn, "?");
+            if (filter[0] && !strstr(cn, filter))
+                continue;
+            match++;
+            if (shown < 70) {
+                o += snprintf(out + o, size - o, "g%u %08x %-24s pos(%.0f,%.0f,%.0f) hp %.0f/%.0f state(F08) %d own(+30) %08x\n", k, u, cn, rdf(u + 0x40), rdf(u + 0x44), rdf(u + 0x48), rdf(u + 0xE38), rdf(u + 0xE40),
+                              (int)rd32(u + 0xF08), rd32(u + 0x30));
+                shown++;
+            }
+        }
+        if (n)
+            o += snprintf(out + o, size - o, "  group %u: %d units, %d match\n", k, n, match);
+    }
+}
+
 /* once per logic pass: drop captures of units that no longer exist (freed by a load / area change); the role stays armed and takes the new ones */
 static void on_frame_(void)
 {
@@ -617,6 +646,10 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         input_remote_set(slot, &r);
         snprintf(out, size, "record #%u for slot %d: buttons %04x lt %d rt %d L(%d,%d) R(%d,%d)%s", src[slot < 0 || slot > 1 ? 0 : slot].seq, slot, r.buttons, r.lt, r.rt, r.lx, r.ly, r.rx, r.ry,
                  src[slot < 0 || slot > 1 ? 0 : slot].kind == R1_SRC_REMOTE ? " (published)" : " (source is not remote: stored only)");
+        return 1;
+    }
+    if (!strcmp(name, "ulist")) {
+        ulist_cmd(arg, out, size);
         return 1;
     }
     if (!strcmp(name, "trk"))
