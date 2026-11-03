@@ -242,7 +242,9 @@ static struct {
 static volatile int nhist;
 static struct {
     unsigned addr;
-    int rw, len, on;
+    int rw, len, on;   /* rw: 1 write, 3 read/write, 2 EXECUTE (a hardware code breakpoint: no code is patched) */
+    unsigned hits, maxlog, ecx;
+    int filter;
 } dwt[4];
 static volatile unsigned dr_events;
 
@@ -308,6 +310,31 @@ static LONG CALLBACK dbg_veh(EXCEPTION_POINTERS *ep)
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
         if (c->Dr6 & 0xF) {
+            /* hardware EXECUTE breakpoints first (they trap before the instruction runs; RF lets it run once) */
+            int xhit = 0;
+            for (int i = 0; i < 4; i++)
+                if (((c->Dr6 >> i) & 1) && dwt[i].on && dwt[i].rw == 2) {
+                    xhit = 1;
+                    if (!dwt[i].filter || c->Ecx == dwt[i].ecx) {
+                        unsigned h = ++dwt[i].hits;
+                        if (h <= dwt[i].maxlog) {
+                            unsigned st[5] = {0};
+                            A->safe_read((void *)c->Esp, st, sizeof st);
+                            int k = bplog_n++ % 48;
+                            snprintf(bplog[k], sizeof bplog[k], "bp %08x #%u ecx=%08x edx=%08x eax=%08x ebx=%08x esi=%08x ret=%08x args %08x %08x %08x %08x", dwt[i].addr, h, (unsigned)c->Ecx, (unsigned)c->Edx,
+                                     (unsigned)c->Eax, (unsigned)c->Ebx, (unsigned)c->Esi, st[0], st[1], st[2], st[3], st[4]);
+                        }
+                        if (h >= dwt[i].maxlog) {   /* log full: disarm this breakpoint (also in the thread's own debug registers) */
+                            dwt[i].on = 0;
+                            c->Dr7 &= ~(3u << (i * 2));
+                        }
+                    }
+                }
+            if (xhit) {
+                c->Dr6 = 0;
+                c->EFlags |= 0x10000;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
             unsigned eip = (unsigned)ep->ExceptionRecord->ExceptionAddress, ret = 0, ret2 = 0;
             A->safe_read((void *)c->Esp, &ret, 4);
             if (c->Ebp)
@@ -376,8 +403,8 @@ static int dr_apply(void)
     for (int i = 0; i < 4; i++)
         if (dwt[i].on) {
             r.addr[i] = dwt[i].addr;
-            unsigned rw = dwt[i].rw == 1 ? 1u : 3u;   /* 1 = write, 3 = read/write (x86 has no read-only) */
-            unsigned len = dwt[i].len == 1 ? 0u : dwt[i].len == 2 ? 1u : 3u;
+            unsigned rw = dwt[i].rw == 2 ? 0u : dwt[i].rw == 1 ? 1u : 3u;   /* 0 = execute, 1 = write, 3 = read/write (x86 has no read-only) */
+            unsigned len = dwt[i].rw == 2 ? 0u : dwt[i].len == 1 ? 0u : dwt[i].len == 2 ? 1u : 3u;
             r.dr7 |= (1u << (i * 2)) | (rw << (16 + i * 4)) | (len << (18 + i * 4));
         }
     HANDLE t = CreateThread(NULL, 0, dr_thread, &r, 0, NULL);
@@ -422,18 +449,76 @@ static void dbg_dr(const char *arg, char *out, int size)
     }
     idx = atoi(s1);
     if (idx < 0 || idx > 3 || !s2[0]) {
-        snprintf(out, size, "usage: dr <0-3> <hexaddr> <r|w|rw> [len 1|2|4] | dr dump [reset] | dr off");
+        snprintf(out, size, "usage: dr <0-3> <hexaddr> <r|w|rw|x> [len 1|2|4] | dr dump [reset] | dr off");
         return;
     }
     dwt[idx].addr = hx(s2) & ~(unsigned)(len == 2 ? 1 : len == 1 ? 0 : 3);
-    dwt[idx].rw = !strcmp(s3, "w") ? 1 : 3;
+    dwt[idx].rw = !strcmp(s3, "w") ? 1 : !strcmp(s3, "x") ? 2 : 3;
     dwt[idx].len = len == 1 || len == 2 ? len : 4;
+    if (dwt[idx].rw == 2)
+        dwt[idx].addr = hx(s2), dwt[idx].len = 1;
     dwt[idx].on = 1;
     nhist = 0;
     dr_events = 0;
     memset(hist, 0, sizeof hist);
     int ok = dr_apply();
     snprintf(out, size, "watch %d on %08x (%s, %d bytes) on thread %lu: %s", idx, dwt[idx].addr, dwt[idx].rw == 1 ? "write" : "read/write", dwt[idx].len, GetCurrentThreadId(), ok ? "armed" : "FAILED");
+}
+
+/* P bp <hexaddr> [maxlog=20] [ecx=hex]: a hardware execute breakpoint on the game thread (one of the 4 debug registers; nothing is patched). Logs ecx, edx, eax, ebx, esi, the return address and 4
+ * stack words of the first maxlog hits, then disarms itself. P bp log | list | off. (The INT3 variant is `bp3`: it crashed the game twice, see stage3.md.) */
+static void dbg_xbp(const char *arg, char *out, int size)
+{
+    char s1[40] = "", s2[40] = "", s3[40] = "";
+    sscanf(arg, "%39s %39s %39s", s1, s2, s3);
+    veh_ensure();
+    if (!strcmp(s1, "log")) {
+        int o = 0, n = bplog_n, from = n > 48 ? n - 48 : 0;
+        for (int i = from; i < n && o + 220 < size; i++)
+            o += snprintf(out + o, size - o, "%s\n", bplog[i % 48]);
+        if (!o)
+            snprintf(out, size, "(empty)");
+        return;
+    }
+    if (!strcmp(s1, "list")) {
+        int o = 0;
+        for (int i = 0; i < 4; i++)
+            if (dwt[i].on && dwt[i].rw == 2)
+                o += snprintf(out + o, size - o, "dr%d %08x hits %u (log %u)%s\n", i, dwt[i].addr, dwt[i].hits, dwt[i].maxlog, dwt[i].filter ? " ecx filter" : "");
+        if (!o)
+            snprintf(out, size, "no execute breakpoints");
+        return;
+    }
+    if (!strcmp(s1, "off")) {
+        for (int i = 0; i < 4; i++)
+            if (dwt[i].on && dwt[i].rw == 2)
+                memset(&dwt[i], 0, sizeof dwt[i]);
+        int ok = dr_apply();
+        snprintf(out, size, "execute breakpoints cleared (%s)", ok ? "ok" : "failed");
+        return;
+    }
+    unsigned addr = hx(s1);
+    if (!addr) {
+        snprintf(out, size, "usage: bp <hexaddr> [maxlog] [ecx=hex] | bp log|list|off");
+        return;
+    }
+    int idx = -1;
+    for (int i = 0; i < 4 && idx < 0; i++)
+        if (!dwt[i].on)
+            idx = i;
+    if (idx < 0) {
+        snprintf(out, size, "all 4 debug registers are in use (dr off / bp off)");
+        return;
+    }
+    memset(&dwt[idx], 0, sizeof dwt[idx]);
+    dwt[idx].addr = addr, dwt[idx].rw = 2, dwt[idx].len = 1, dwt[idx].on = 1;
+    dwt[idx].maxlog = (s2[0] && strncmp(s2, "ecx=", 4)) ? (unsigned)atoi(s2) : 20;
+    const char *e = !strncmp(s2, "ecx=", 4) ? s2 : !strncmp(s3, "ecx=", 4) ? s3 : NULL;
+    if (e)
+        dwt[idx].filter = 1, dwt[idx].ecx = hx(e + 4);
+    bplog_n = 0;
+    int ok = dr_apply();
+    snprintf(out, size, "execute breakpoint dr%d at %08x, log %u hits%s on thread %lu: %s", idx, addr, dwt[idx].maxlog, dwt[idx].filter ? ", ecx filter" : "", GetCurrentThreadId(), ok ? "armed" : "FAILED");
 }
 
 static void dbg_bp(const char *arg, char *out, int size)
@@ -554,6 +639,8 @@ static int dbg_cmd(const char *name, const char *arg, char *out, int size)
     else if (!strcmp(name, "ptrs"))
         dbg_ptrs(arg, out, size);
     else if (!strcmp(name, "bp"))
+        dbg_xbp(arg, out, size);
+    else if (!strcmp(name, "bp3"))
         dbg_bp(arg, out, size);
     else if (!strcmp(name, "dr"))
         dbg_dr(arg, out, size);
