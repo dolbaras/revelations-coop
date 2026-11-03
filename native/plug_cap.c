@@ -565,7 +565,7 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
             role.dz = (float)atof(who);
             snprintf(out, size, "dead zone %.2f", role.dz);
         } else {
-            int o = snprintf(out, size, "role %s mode %d maps: unit slot 0 -> %s%d, unit slot 1 -> %s%d; %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d\n", role.armed ? "ARMED" : "off",
+            int o = snprintf(out, size, "role %s mode %d maps: unit slot 0 -> %s%d, unit slot 1 -> %s%d; %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d dispatch %d%d%d own %d\n", role.armed ? "ARMED" : "off",
                              role.mode, role.maps[0].en ? "pad " : "(off) ", role.maps[0].pad, role.maps[1].en ? "pad " : "(off) ", role.maps[1].pad, role.captures, padfix ? "on" : "off", padfix_calls, hk_pad.on,
                              hk_upd.on, hk_pd.on, hk_v8.on, hk_v9.on, hk_v10.on, hk_own.on);
             for (int i = 0; i < MAXCAP; i++)
