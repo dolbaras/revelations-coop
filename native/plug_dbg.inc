@@ -251,10 +251,11 @@ static LONG CALLBACK dbg_veh(EXCEPTION_POINTERS *ep)
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     CONTEXT *c = ep->ContextRecord;
     if (code == EXCEPTION_BREAKPOINT) {
-        unsigned a = (unsigned)ep->ExceptionRecord->ExceptionAddress;
+        unsigned a0 = (unsigned)ep->ExceptionRecord->ExceptionAddress;
         for (int i = 0; i < NBP; i++) {
-            if (!bps[i].on || bps[i].addr != a)
+            if (!bps[i].on || (bps[i].addr != a0 && bps[i].addr + 1 != a0))   /* (the reported address is the int3 itself; tolerate EIP-after-int3) */
                 continue;
+            unsigned a = bps[i].addr;
             if (!bps[i].filter || c->Ecx == bps[i].ecx) {
                 unsigned h = ++bps[i].hits;
                 if (h <= bps[i].maxlog) {
