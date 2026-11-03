@@ -101,6 +101,8 @@ typedef struct {
     void (*pad_set)(int user, int active, const void *xinput_gamepad);          /* synthetic pad for an XInput user (testmode_pad_set) */
     void (*pad_hold)(int user, const void *xinput_gamepad, int ms);            /* ... released by itself after ms */
     void (*shot)(void);                                                         /* screenshot request (like console `shot`) */
+    /* version 3: */
+    int (*capture_busy)(void);                                                  /* 1 = the main DLL's capture module holds hooks / roles: a plug-in must not install its own capture hooks */
 } r1_api_t;
 typedef struct {
     int (*on_cmd)(const char *name, const char *arg, char *out, int size);   /* console "P <name> <arg>", on the game thread; returns 1 when handled */

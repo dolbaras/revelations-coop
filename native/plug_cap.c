@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdarg.h>
 
 #include "r1.h"
 #include "coop_input.h"
@@ -215,6 +216,7 @@ static struct {
 } role = {.dz = 0.24f, .mode = 3};
 static volatile int padfix;
 static unsigned padfix_calls;
+static int debug_only;   /* API v3: the main DLL has the capture module; this plug-in installs no capture hook */
 
 static capu_t *cap_find(unsigned unit)
 {
@@ -614,11 +616,14 @@ static void cam_follow(void)
     }
 }
 
+#include "plug_mon.inc"
+
 /* once per logic pass: drop captures of units that no longer exist (freed by a load / area change); the role stays armed and takes the new ones */
 static void on_frame_(void)
 {
     trk_frame();
     cam_follow();
+    mon_frame();
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active && (!is_player_class(caps[i].unit) || ctl_obj_of(caps[i].unit) != caps[i].ctl_obj)) {
             A->log("plug_cap: captured unit %08x is gone (class or control object changed); role %s", caps[i].unit, role.armed ? "stays armed" : "off");
@@ -630,6 +635,12 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
 {
     if (dbg_cmd(name, arg, out, size))
         return 1;
+    if (!strcmp(name, "mon"))
+        return mon_cmd(arg, out, size);
+    if (debug_only && (!strcmp(name, "cap") || !strcmp(name, "own") || !strcmp(name, "padfix") || !strcmp(name, "src") || !strcmp(name, "rec") || !strcmp(name, "trk"))) {
+        snprintf(out, size, "the capture engine lives in the main DLL now: use the console command `cap ...` (cap bind/own/src/rec/trk/status); this plug-in has only the debug tools");
+        return 1;
+    }
     if (!strcmp(name, "cap")) {
         char sub[16] = "", who[40] = "";
         int slot = 1, mode = 3;
@@ -760,6 +771,14 @@ static void on_exit_(void)
 __declspec(dllexport) int plug_init(const r1_api_t *api, r1_plug_t *out)
 {
     A = api;
+    if (A->version >= 3) {   /* the capture module of the main DLL owns the hook points: this plug-in is the debug toolbox only */
+        debug_only = 1;
+        A->log("plug_cap: debug mode (the main DLL has the capture module, no capture hook installed)");
+        out->on_cmd = on_cmd;
+        out->on_frame = on_frame_;
+        out->on_exit = on_exit_;
+        return 0;
+    }
     static const unsigned char b_pad[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8};
     static const unsigned char b_upd[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x54};
     static const unsigned char b_pd[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8};

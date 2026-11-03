@@ -21,6 +21,7 @@
 #include <math.h>
 
 #include "r1.h"
+#include "capture.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -263,7 +264,7 @@ static HMODULE plug_mod;
 static r1_plug_t plug;
 static char plug_path[260];
 
-static const r1_api_t api = {2, r1_log, r1_safe_read, testmode_pad_peek, classes_object_name, d3d_frames, testmode_pad_set, testmode_pad_hold, d3d_request_shot};
+static const r1_api_t api = {3, r1_log, r1_safe_read, testmode_pad_peek, classes_object_name, d3d_frames, testmode_pad_set, testmode_pad_hold, d3d_request_shot, capture_busy};
 
 static void plug_unload(char *out, int size)
 {
@@ -342,13 +343,14 @@ static void probe_frame(void);
 void probe_install(void)
 {
     lt_add_frame_cb(probe_frame);
-    r1_log("probe: ready (no inline hooks in the main DLL; capture experiments are a hot-loadable plug-in, see plug_cap.c)");
+    capture_init();
+    r1_log("probe: ready (no inline hook until the capture module is asked for a role; experiments are a hot-loadable plug-in, see plug_cap.c)");
 }
 
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -383,6 +385,8 @@ void probe_run(const char *cmd, char *out, int size)
         gamepad_cmd(out, size);
     } else if (!strcmp(name, "camera")) {
         camera_cmd(out, size);
+    } else if (!strcmp(name, "cap")) {   /* the capture module (capture.c): cap status | bind | unbind | own | src | rec | trk | timeout | raid */
+        capture_cmd(arg, out, size);
     } else if (!strcmp(name, "plug")) {   /* plug load <dll path> | plug unload | plug status */
         if (!strncmp(arg, "load ", 5))
             plug_load(arg + 5, out, size);
