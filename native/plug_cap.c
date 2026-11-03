@@ -173,10 +173,10 @@ static void input_remote_set(int slot, const r1_input_t *rec)
 __declspec(dllexport) void r1in_remote_set(int slot, const r1_input_t *rec) { input_remote_set(slot, rec); }
 
 /* ---- the capture ---- */
-static hk_t hk_pad, hk_upd, hk_pd, hk_own, hk_v8, hk_v9, hk_v10;
+static hk_t hk_pad, hk_upd, hk_pd, hk_own, hk_v8, hk_v9, hk_v10, hk_think;
 static void (FC *orig_updatePad)(unsigned unit);
 static void (FC *orig_unitUpdate)(unsigned unit);
-static void (FC *orig_v8)(unsigned unit), (FC *orig_v9)(unsigned unit), (FC *orig_v10)(unsigned unit);
+static void (FC *orig_v8)(unsigned unit), (FC *orig_v9)(unsigned unit), (FC *orig_v10)(unsigned unit), (FC *orig_think)(unsigned unit);
 static void (TC *orig_padData)(void *self, unsigned slot);
 /* own slot (client plays the partner): FUN_0087E1B0(sCoopManager) = `+0xF4 in {1,2} ? +0xF8 : 0` is the offline branch of FUN_00882D60, which ~190 callers use as "the
  * local player's slot" (doors, enemies, items, cutscenes, HUD, camera); FUN_0067AF10 finds the local player unit by it. We answer with our slot instead and touch no
@@ -194,7 +194,7 @@ static unsigned FC hook_own(unsigned self)
 #define MAXCAP 4
 typedef struct {
     int active;
-    unsigned unit, ctl_obj;
+    unsigned unit, ctl_obj, mgr;   /* mgr = the unit's cCharaStateManager (+0xE80): its update is run by the unit's separate uCallThink unit (+0xFA4) */
     int saved_ctl, saved_kind;
     int pad;   /* pad slot the unit reads while it is updated */
     unsigned swaps, writes;
@@ -232,7 +232,7 @@ static capu_t *cap_take(unsigned unit, int pad)
         if (!caps[i].active) {
             capu_t *c = &caps[i];
             memset(c, 0, sizeof *c);
-            c->unit = unit, c->ctl_obj = co, c->pad = pad;
+            c->unit = unit, c->ctl_obj = co, c->pad = pad, c->mgr = rd32(unit + 0xE80);
             c->saved_ctl = (int)rd32(co + 0x34), c->saved_kind = (int)rd32(unit + 0xE30);
             wr32(co + 0x34, 1);
             wr32(unit + 0xE30, 1);
@@ -356,6 +356,24 @@ static capu_t *cap_scope(unsigned unit)
         return c;
     unsigned owner = *(volatile unsigned *)(unit + 0x30);
     return owner ? cap_find(owner) : NULL;
+}
+/* the unit's state machine (upper body states: aim, fire, reload ...) is updated by its uCallThink unit (vtable slot 8 = 0x6C9800: `FUN_0049C3B0(manager)`, manager = uCallThink+0x30),
+ * which is a unit of its own in the sUnit group loop - neither the player nor its weapon: its phase has to run under the player's pad slot too */
+static void FC hook_think(unsigned unit)
+{
+    capu_t *c = NULL;
+    if (role.mode == 3) {
+        unsigned mgr = *(volatile unsigned *)(unit + 0x30);
+        for (int i = 0; i < MAXCAP && mgr; i++)
+            if (caps[i].active && caps[i].mgr == mgr) {
+                c = &caps[i];
+                break;
+            }
+    }
+    if (c)
+        swap_call(orig_think, unit, c);
+    else
+        orig_think(unit);
 }
 static void FC hook_v8(unsigned unit)
 {
@@ -594,9 +612,9 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
             role.dz = (float)atof(who);
             snprintf(out, size, "dead zone %.2f", role.dz);
         } else {
-            int o = snprintf(out, size, "role %s mode %d maps: unit slot 0 -> %s%d, unit slot 1 -> %s%d; %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d dispatch %d%d%d own %d\n", role.armed ? "ARMED" : "off",
+            int o = snprintf(out, size, "role %s mode %d maps: unit slot 0 -> %s%d, unit slot 1 -> %s%d; %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d dispatch %d%d%d think %d own %d\n", role.armed ? "ARMED" : "off",
                              role.mode, role.maps[0].en ? "pad " : "(off) ", role.maps[0].pad, role.maps[1].en ? "pad " : "(off) ", role.maps[1].pad, role.captures, padfix ? "on" : "off", padfix_calls, hk_pad.on,
-                             hk_upd.on, hk_pd.on, hk_v8.on, hk_v9.on, hk_v10.on, hk_own.on);
+                             hk_upd.on, hk_pd.on, hk_v8.on, hk_v9.on, hk_v10.on, hk_think.on, hk_own.on);
             for (int i = 0; i < MAXCAP; i++)
                 if (caps[i].active)
                     o += snprintf(out + o, size - o, "unit %08x (slot field %u) pad %d ctlobj %08x saved ctl %d kind %d now ctl %u kind %u, %u swaps, %u group writes\n", caps[i].unit, rd32(caps[i].unit + 0xE2C), caps[i].pad,
@@ -675,6 +693,7 @@ static void on_exit_(void)
     hook_remove(&hk_v8);
     hook_remove(&hk_v9);
     hook_remove(&hk_v10);
+    hook_remove(&hk_think);
     hook_remove(&hk_pad);
     hook_remove(&hk_upd);
     hook_remove(&hk_pd);
@@ -704,6 +723,9 @@ __declspec(dllexport) int plug_init(const r1_api_t *api, r1_plug_t *out)
         orig_v9 = (void (FC *)(unsigned))hk_v9.tramp;
     if (hook_install(&hk_v10, 0x6C9C10, b_v10, 9, (void *)hook_v10))
         orig_v10 = (void (FC *)(unsigned))hk_v10.tramp;
+    static const unsigned char b_think[] = {0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x30};
+    if (hook_install(&hk_think, 0x6C9800, b_think, 6, (void *)hook_think))
+        orig_think = (void (FC *)(unsigned))hk_think.tramp;
     A->log("plug_cap: loaded (api v%u), hooks updatePad %d unitUpdate %d padData %d", A->version, hk_pad.on, hk_upd.on, hk_pd.on);
     src[0].kind = R1_SRC_PAD, src[0].arg = 0;
     src[1].kind = R1_SRC_PAD, src[1].arg = 1;
