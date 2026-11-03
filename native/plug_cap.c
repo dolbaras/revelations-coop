@@ -371,9 +371,116 @@ static void cap_off_all(char *out, int size)
         snprintf(out, size, "capture was off (role disarmed)");
 }
 
+
+/* ---- input tracks: record what a pad did (any XInput user, real or synthetic) and replay it as the REMOTE record of a slot: a scripted "remote player" for tests
+ * (the same record path the network layer will use) ---- */
+typedef struct {
+    unsigned t_ms;
+    r1_input_t r;
+} trk_t;
+static trk_t *trk;
+static int trk_n, trk_cap, trk_state, trk_user, trk_slot, trk_idx, trk_loop;   /* state 0 idle, 1 recording, 2 playing */
+static DWORD trk_t0, trk_stop_at;
+static unsigned trk_last_ms;
+
+static int rec_same(const r1_input_t *a, const r1_input_t *b) { return !memcmp(a, b, sizeof *a); }
+
+static void trk_frame(void)
+{
+    DWORD now = GetTickCount() - trk_t0;
+    if (trk_state == 1) {
+        r1_input_t r;
+        memset(&r, 0, sizeof r);
+        A->pad_peek(trk_user, &r);
+        if (trk_n < trk_cap && (trk_n == 0 || !rec_same(&r, &trk[trk_n - 1].r) || now - trk_last_ms >= 100)) {
+            trk[trk_n].t_ms = now, trk[trk_n].r = r, trk_n++;
+            trk_last_ms = now;
+        }
+        if (now >= trk_stop_at) {
+            trk_state = 0;
+            A->log("plug_cap: track recording finished: %d samples over %u ms", trk_n, (unsigned)now);
+        }
+    } else if (trk_state == 2 && trk_n > 0) {
+        unsigned end = trk[trk_n - 1].t_ms;
+        if (now > end + 200) {
+            if (trk_loop) {
+                trk_t0 = GetTickCount();
+                trk_idx = 0;
+                now = 0;
+            } else {
+                r1_input_t z;
+                memset(&z, 0, sizeof z);
+                input_remote_set(trk_slot, &z);
+                trk_state = 0;
+                A->log("plug_cap: track playback finished");
+                return;
+            }
+        }
+        while (trk_idx + 1 < trk_n && trk[trk_idx + 1].t_ms <= now)
+            trk_idx++;
+        input_remote_set(trk_slot, &trk[trk_idx].r);
+    }
+}
+
+static int trk_cmd(const char *arg, char *out, int size)
+{
+    char sub[16] = "", a[200] = "";
+    int n1 = 0, n2 = 0;
+    sscanf(arg, "%15s %199s %d %d", sub, a, &n1, &n2);
+    if (!trk) {
+        trk_cap = 20000;
+        trk = (trk_t *)calloc((size_t)trk_cap, sizeof *trk);
+    }
+    if (!strcmp(sub, "rec")) {   /* trk rec <xinput user> <seconds> */
+        trk_user = atoi(a), trk_n = 0, trk_idx = 0, trk_last_ms = 0, trk_t0 = GetTickCount(), trk_stop_at = (DWORD)(n1 > 0 ? n1 : 10) * 1000, trk_state = 1;
+        snprintf(out, size, "recording the pad of XInput user %d for %d s", trk_user, n1 > 0 ? n1 : 10);
+    } else if (!strcmp(sub, "play")) {   /* trk play <slot> [loop] : needs `src <slot> remote` */
+        trk_slot = atoi(a), trk_loop = n1 != 0, trk_idx = 0, trk_t0 = GetTickCount();
+        if (trk_n < 1 || trk_slot < 0 || trk_slot > 1) {
+            snprintf(out, size, "no track recorded/loaded (or bad slot)");
+        } else {
+            src[trk_slot].kind = R1_SRC_REMOTE;
+            trk_state = 2;
+            snprintf(out, size, "playing %d samples (%u ms) as the remote record of slot %d%s", trk_n, trk[trk_n - 1].t_ms, trk_slot, trk_loop ? ", looped" : "");
+        }
+    } else if (!strcmp(sub, "stop")) {
+        if (trk_state == 2) {
+            r1_input_t z;
+            memset(&z, 0, sizeof z);
+            input_remote_set(trk_slot, &z);
+        }
+        trk_state = 0;
+        snprintf(out, size, "track stopped (%d samples held)", trk_n);
+    } else if (!strcmp(sub, "save") || !strcmp(sub, "load")) {   /* trk save|load <file> */
+        FILE *f = fopen(a, !strcmp(sub, "save") ? "w" : "r");
+        if (!f) {
+            snprintf(out, size, "cannot open %s", a);
+            return 1;
+        }
+        if (!strcmp(sub, "save")) {
+            for (int i = 0; i < trk_n; i++)
+                fprintf(f, "%u %04x %u %u %d %d %d %d\n", trk[i].t_ms, trk[i].r.buttons, trk[i].r.lt, trk[i].r.rt, trk[i].r.lx, trk[i].r.ly, trk[i].r.rx, trk[i].r.ry);
+        } else {
+            trk_n = 0;
+            unsigned t, b, lt, rt;
+            int lx, ly, rx, ry;
+            while (trk_n < trk_cap && fscanf(f, "%u %x %u %u %d %d %d %d", &t, &b, &lt, &rt, &lx, &ly, &rx, &ry) == 8) {
+                trk[trk_n].t_ms = t, trk[trk_n].r = (r1_input_t){(uint16_t)b, (uint8_t)lt, (uint8_t)rt, (int16_t)lx, (int16_t)ly, (int16_t)rx, (int16_t)ry};
+                trk_n++;
+            }
+        }
+        fclose(f);
+        snprintf(out, size, "%s %d samples %s %s", !strcmp(sub, "save") ? "saved" : "loaded", trk_n, !strcmp(sub, "save") ? "to" : "from", a);
+    } else {
+        snprintf(out, size, "track: %s, %d samples; usage: trk rec <user> <sec> | play <slot> [loop] | stop | save|load <file>", trk_state == 1 ? "recording" : trk_state == 2 ? "playing" : "idle", trk_n);
+    }
+    return 1;
+}
+
 /* once per logic pass: drop captures of units that no longer exist (freed by a load / area change); the role stays armed and takes the new ones */
 static void on_frame_(void)
 {
+    trk_frame();
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active && (!is_player_class(caps[i].unit) || ctl_obj_of(caps[i].unit) != caps[i].ctl_obj)) {
             A->log("plug_cap: captured unit %08x is gone (class or control object changed); role %s", caps[i].unit, role.armed ? "stays armed" : "off");
@@ -475,6 +582,8 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
                  src[slot < 0 || slot > 1 ? 0 : slot].kind == R1_SRC_REMOTE ? " (published)" : " (source is not remote: stored only)");
         return 1;
     }
+    if (!strcmp(name, "trk"))
+        return trk_cmd(arg, out, size);
     if (!strcmp(name, "shot")) {
         if (A->version >= 2 && A->shot)
             A->shot();
