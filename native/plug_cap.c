@@ -179,7 +179,7 @@ static void write_group(unsigned unit)
     unsigned char may_run = ((unsigned char (FC *)(unsigned))0x6AD9E0)(unit);
     wr8(unit + 0x1150, may_run && mag > 0.7f);
     /* aim: weapon allows aiming (FUN_006ad740) and the left trigger is held */
-    unsigned char may_aim = ((unsigned char (FC *)(unsigned))0x6AD740)(unit);
+    unsigned char may_aim = ((unsigned char (TC *)(unsigned, unsigned))0x6AD740)(unit, 0);   /* __thiscall with one stack argument (0), `ret 4`: updatePad calls it as `push 0; mov ecx,unit` */
     wr8(unit + 0x1151, may_aim && pad.bLeftTrigger > 100);
     cap.writes++;
 }

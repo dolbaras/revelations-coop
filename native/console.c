@@ -128,7 +128,7 @@ static void run(const char *cmd, char *out, int size)
         snprintf(out, size,
                  "ping version base stub frames window shot quit iat threads stacks mainstack readmem <a> [n] readstr <a> [n] dword <a> dump <a> <len> <file> classname <a> dtiname <a> "
                  "objscan <filter|-> <lo> <hi> <file> | pad/padtap/padhold <user> key/keydown/keyup/wmkey mouse mbtn cursor dinput pads steam post log <t> | game thread: L <cmd> "
-                 "players [v] unit <jill|parker|hex> mode gamepad camera cap on|off|set|status ctl call w32 w8 wf rf probelog ltinfo");
+                 "players [v] units [filter] unit <jill|parker|hex> mode gamepad camera ctl call w32 w8 wf rf probelog ltinfo");
     } else if (!strcmp(name, "base")) {
         BYTE *b = (BYTE *)GetModuleHandleA(NULL);
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(b + ((IMAGE_DOS_HEADER *)b)->e_lfanew);

@@ -195,6 +195,23 @@ static unsigned find_unit(const char *what)
     return hx(what);
 }
 
+/* the game's global unit list ([0x11E0184]+0x11C, next at +0x14; FUN_00882670 walks it): every live unit, weapons included. units [name filter] */
+static void units_cmd(const char *flt, char *out, int size)
+{
+    unsigned root = rd32(0x11E0184), p = root ? rd32(root + 0x11C) : 0;
+    int o = snprintf(out, size, "unit list root %08x head %08x\n", root, p), n = 0;
+    for (int guard = 0; p && guard < 600 && o + 150 < size; guard++, p = rd32(p + 0x14)) {
+        char cn[96] = "?";
+        classes_object_name(p, cn, sizeof cn);
+        if (flt[0] && !strstr(cn, flt))
+            continue;
+        o += snprintf(out + o, size - o, "%08x %-28s E2C=%d E30=%d pos=(%.0f,%.0f,%.0f) +10C=%08x\n", p, cn, (int)rd32(p + 0xE2C), (int)rd32(p + 0xE30), rdf(p + 0x40), rdf(p + 0x44),
+                      rdf(p + 0x48), rd32(p + 0x10C));
+        n++;
+    }
+    snprintf(out + o, size - o, "%d units shown", n);
+}
+
 /* ---- globals / modes ---- */
 static void mode_cmd(char *out, int size)
 {
@@ -331,7 +348,7 @@ void probe_install(void)
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -358,6 +375,8 @@ void probe_run(const char *cmd, char *out, int size)
             snprintf(out, size, "no such unit (jill|parker|<hexaddr>)");
         else
             unit_line(unit, out, size, 1);
+    } else if (!strcmp(name, "units")) {
+        units_cmd(arg, out, size);
     } else if (!strcmp(name, "mode")) {
         mode_cmd(out, size);
     } else if (!strcmp(name, "gamepad")) {
