@@ -90,7 +90,7 @@ static int heap_ptr(unsigned p)
     return p > 0x01230000u && p < 0x7FFE0000u && !(p & 3);
 }
 
-static void snap_diff(snap_t *s, char *out, int size)
+static void snap_diff(snap_t *s, char *out, int size, int ints_only)
 {
     int o = 0, lines = 0;
     for (int r = 0; r < s->n && o + 100 < size; r++) {
@@ -106,6 +106,8 @@ static void snap_diff(snap_t *s, char *out, int size)
         for (unsigned i = 0; i + 4 <= g->len && o + 100 < size && lines < 150; i += 4) {
             unsigned a = *(unsigned *)(g->data + i), b = *(unsigned *)(cur + i);
             if (a == b)
+                continue;
+            if (ints_only && (looks_float(a) || looks_float(b) || a > 0x100000 || b > 0x100000))
                 continue;
             float fa, fb;
             memcpy(&fa, &a, 4), memcpy(&fb, &b, 4);
@@ -123,7 +125,7 @@ static void snap_diff(snap_t *s, char *out, int size)
         free(cur);
     }
     if (!lines)
-        o += snprintf(out + o, size - o, "no change in %d regions", s->n);
+        o += snprintf(out + o, size - o, "no %schange in %d regions", ints_only ? "integer " : "", s->n);
     else if (lines >= 150)
         o += snprintf(out + o, size - o, "... (150 lines shown)");
 }
@@ -218,10 +220,17 @@ static struct {
     unsigned char orig;
     int on, filter;
     unsigned ecx;
-    volatile unsigned hits, maxlog;
+    volatile unsigned hits, maxlog, traps;
+    int disarm;   /* 1 = disarm after maxlog matching hits (default) */
 } bps[NBP];
-static volatile unsigned bp_pend_addr;
-static volatile DWORD bp_pend_tid;
+/* per-thread "single step pending" table: a breakpoint hit restores the original byte, sets the trap flag and remembers (thread, address); the single-step exception of
+ * THAT thread puts the INT3 back. (One global slot crashed the game with an unhandled single step when a second thread hit a breakpoint inside the first one's step.) */
+#define NPEND 16
+static struct {
+    volatile DWORD tid;
+    volatile unsigned addr;
+} pend[NPEND];
+#define BP_STORM_LIMIT 4000   /* a breakpoint disarms itself after this many traps (hot functions cost an exception round trip per call) */
 static char bplog[48][150];
 static volatile int bplog_n;
 static PVOID veh_h;
@@ -268,22 +277,36 @@ static LONG CALLBACK dbg_veh(EXCEPTION_POINTERS *ep)
             }
             bp_put(a, bps[i].orig);
             c->Eip = a;
+            bps[i].traps++;
+            int slot = -1;
+            if (bps[i].traps < BP_STORM_LIMIT && !(bps[i].disarm && bps[i].hits >= bps[i].maxlog)) {
+                DWORD me = GetCurrentThreadId();
+                for (int k = 0; k < NPEND && slot < 0; k++)
+                    if (InterlockedCompareExchange((volatile LONG *)&pend[k].tid, (LONG)me, 0) == 0)
+                        slot = k;
+            }
+            if (slot < 0) {   /* disarm (limit reached or no free slot): the original byte stays, no single step */
+                bps[i].on = 0;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            pend[slot].addr = a;
             c->EFlags |= 0x100;
-            bp_pend_addr = a;
-            bp_pend_tid = GetCurrentThreadId();
             return EXCEPTION_CONTINUE_EXECUTION;
         }
         return EXCEPTION_CONTINUE_SEARCH;
     }
     if (code == EXCEPTION_SINGLE_STEP) {
-        if (bp_pend_addr && bp_pend_tid == GetCurrentThreadId()) {
-            unsigned a = bp_pend_addr;
-            bp_pend_addr = 0;
-            for (int i = 0; i < NBP; i++)
-                if (bps[i].on && bps[i].addr == a)
-                    bp_put(a, 0xCC);
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
+        DWORD me = GetCurrentThreadId();
+        for (int k = 0; k < NPEND; k++)
+            if (pend[k].tid == me) {
+                unsigned a = pend[k].addr;
+                pend[k].addr = 0;
+                pend[k].tid = 0;
+                for (int i = 0; i < NBP; i++)
+                    if (bps[i].on && bps[i].addr == a)
+                        bp_put(a, 0xCC);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         if (c->Dr6 & 0xF) {
             unsigned eip = (unsigned)ep->ExceptionRecord->ExceptionAddress, ret = 0, ret2 = 0;
             A->safe_read((void *)c->Esp, &ret, 4);
@@ -471,11 +494,15 @@ static void dbg_bp(const char *arg, char *out, int size)
         bps[slot].orig = b;
         bps[slot].addr = addr;
         bps[slot].hits = 0;
+        bps[slot].traps = 0;
+        bps[slot].disarm = 1;
         bps[slot].on = 1;
         bp_put(addr, 0xCC);
     }
     bps[slot].maxlog = s2[0] ? (unsigned)atoi(s2) : 20;
     bps[slot].filter = 0;
+    if (!strcmp(s2, "keep") || !strcmp(s3, "keep"))   /* keep counting after maxlog (still disarms after BP_STORM_LIMIT traps) */
+        bps[slot].disarm = 0;
     if (!strncmp(s3, "ecx=", 4) || !strncmp(s2, "ecx=", 4)) {
         bps[slot].filter = 1;
         bps[slot].ecx = hx(strchr(s3[0] == 'e' ? s3 : s2, '=') + 1);
@@ -515,13 +542,13 @@ static int dbg_cmd(const char *name, const char *arg, char *out, int size)
     else if (!strcmp(name, "usnap"))
         dbg_snap(arg, out, size, 1);
     else if (!strcmp(name, "diff")) {
-        char nm[16] = "";
-        sscanf(arg, "%15s", nm);
+        char nm[16] = "", mode[8] = "";
+        sscanf(arg, "%15s %7s", nm, mode);
         snap_t *s = snap_get(nm, 0);
         if (!s)
             snprintf(out, size, "no snapshot '%s'", nm);
         else
-            snap_diff(s, out, size);
+            snap_diff(s, out, size, mode[0] == 'i');
     } else if (!strcmp(name, "find"))
         dbg_find(arg, out, size);
     else if (!strcmp(name, "ptrs"))
