@@ -578,6 +578,15 @@ static unsigned unit_by_slot(unsigned slot)
 
 /* The stock camera does not follow the own slot (its target `uCameraManage +0x74/+0x78` stays on the main character): while the own slot is overridden, a player-class target
  * (not a cutscene or event camera target) is replaced by the own slot's unit. Written only when it differs. */
+static void cam_set_slot(unsigned slot)
+{
+    unsigned root = rd32(0x11E00B8), mgr = root ? rd32(root + 0xCE0) : 0, want = unit_by_slot(slot);
+    if (mgr && want && is_player_class(rd32(mgr + 0x74))) {
+        wr32(mgr + 0x74, want);
+        wr32(mgr + 0x78, want);
+    }
+}
+
 static void cam_follow(void)
 {
     if (!own_on || !own_cam)
@@ -663,8 +672,11 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
             return 1;
         }
         if (!strcmp(arg, "off") || !arg[0]) {
+            int was = own_on;
             own_on = 0;
-            snprintf(out, size, "own slot: game default (0 offline)");
+            if (was && own_cam)
+                cam_set_slot(0);
+            snprintf(out, size, "own slot: game default (0 offline)%s", was && own_cam ? ", camera back on the main character" : "");
         } else {
             own_slot = (unsigned)atoi(arg), own_on = 1, own_cam = strstr(arg, "nocam") ? 0 : 1;
             snprintf(out, size, "own slot overridden: %u (camera %s)", own_slot, own_cam ? "follows it" : "left alone");
