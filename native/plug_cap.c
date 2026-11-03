@@ -182,7 +182,7 @@ static void (TC *orig_padData)(void *self, unsigned slot);
  * local player's slot" (doors, enemies, items, cutscenes, HUD, camera); FUN_0067AF10 finds the local player unit by it. We answer with our slot instead and touch no
  * sCoopManager field, so the Raid state (+0xF4/+0xF8, game mode) stays as the game left it. */
 static unsigned (FC *orig_own)(unsigned self);
-static volatile int own_on;
+static volatile int own_on, own_cam = 1;
 static volatile unsigned own_slot;
 static unsigned FC hook_own(unsigned self)
 {
@@ -561,10 +561,45 @@ static void ulist_cmd(const char *filter, char *out, int size)
     }
 }
 
+/* the player unit with this slot field (+0xE2C), from the sPlayer list 0 */
+static unsigned unit_by_slot(unsigned slot)
+{
+    unsigned sp = rd32(0x1169394);
+    if (!sp)
+        return 0;
+    unsigned head = rd32(sp + 0x30), endp = rd32(sp + 0x34);
+    for (int guard = 0; head && head != endp && guard < 40; guard++, head = rd32(head + 8)) {
+        unsigned unit = rd32(head + 0x10);
+        if (unit && rd32(unit + 0xE2C) == slot && is_player_class(unit))
+            return unit;
+    }
+    return 0;
+}
+
+/* The stock camera does not follow the own slot (its target `uCameraManage +0x74/+0x78` stays on the main character): while the own slot is overridden, a player-class target
+ * (not a cutscene or event camera target) is replaced by the own slot's unit. Written only when it differs. */
+static void cam_follow(void)
+{
+    if (!own_on || !own_cam)
+        return;
+    unsigned root = rd32(0x11E00B8), mgr = root ? rd32(root + 0xCE0) : 0;
+    if (!mgr)
+        return;
+    unsigned t = rd32(mgr + 0x74);
+    if (!t || !is_player_class(t))
+        return;
+    unsigned want = unit_by_slot(own_slot);
+    if (want && want != t) {
+        wr32(mgr + 0x74, want);
+        wr32(mgr + 0x78, want);
+    }
+}
+
 /* once per logic pass: drop captures of units that no longer exist (freed by a load / area change); the role stays armed and takes the new ones */
 static void on_frame_(void)
 {
     trk_frame();
+    cam_follow();
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active && (!is_player_class(caps[i].unit) || ctl_obj_of(caps[i].unit) != caps[i].ctl_obj)) {
             A->log("plug_cap: captured unit %08x is gone (class or control object changed); role %s", caps[i].unit, role.armed ? "stays armed" : "off");
@@ -631,8 +666,8 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
             own_on = 0;
             snprintf(out, size, "own slot: game default (0 offline)");
         } else {
-            own_slot = (unsigned)atoi(arg), own_on = 1;
-            snprintf(out, size, "own slot overridden: %u", own_slot);
+            own_slot = (unsigned)atoi(arg), own_on = 1, own_cam = strstr(arg, "nocam") ? 0 : 1;
+            snprintf(out, size, "own slot overridden: %u (camera %s)", own_slot, own_cam ? "follows it" : "left alone");
         }
         return 1;
     }
