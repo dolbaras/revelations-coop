@@ -115,7 +115,7 @@ static void hook_remove(hk_t *h)
 /* ---- units ---- */
 #define GAMEPAD_PTR 0x11E0388u
 
-static unsigned gp(void) { return rd32(GAMEPAD_PTR); }
+static unsigned gp(void) { return *(volatile unsigned *)GAMEPAD_PTR; }   /* (the exe image is always readable) */
 static unsigned ctl_obj_of(unsigned unit) { return rd32(rd32(unit + 0xE80) + 0x38); }
 
 static int is_player_class(unsigned unit)
