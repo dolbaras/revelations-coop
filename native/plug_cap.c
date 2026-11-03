@@ -211,7 +211,7 @@ static struct {
     } maps[2];
     float dz;
     unsigned captures;
-} role = {.dz = 0.24f, .mode = 2};
+} role = {.dz = 0.24f, .mode = 3};
 static volatile int padfix;
 static unsigned padfix_calls;
 
@@ -531,7 +531,7 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         return 1;
     if (!strcmp(name, "cap")) {
         char sub[16] = "", who[40] = "";
-        int slot = 1, mode = 2;
+        int slot = 1, mode = 3;
         sscanf(arg, "%15s %39s %d %d", sub, who, &slot, &mode);
         if (!strcmp(sub, "on")) {
             /* "cap on partner|main|Parker|Jill|<hexaddr> [padslot=1] [mode]": the character of that unit plays on that pad slot from now on (the ROLE: it is taken
@@ -567,7 +567,7 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         } else {
             int o = snprintf(out, size, "role %s mode %d maps: unit slot 0 -> %s%d, unit slot 1 -> %s%d; %u captures, padfix %s (%u calls), hooks: updatePad %d unitUpdate %d padData %d\n", role.armed ? "ARMED" : "off",
                              role.mode, role.maps[0].en ? "pad " : "(off) ", role.maps[0].pad, role.maps[1].en ? "pad " : "(off) ", role.maps[1].pad, role.captures, padfix ? "on" : "off", padfix_calls, hk_pad.on,
-                             hk_upd.on, hk_pd.on);
+                             hk_upd.on, hk_pd.on, hk_v8.on, hk_v9.on, hk_v10.on, hk_own.on);
             for (int i = 0; i < MAXCAP; i++)
                 if (caps[i].active)
                     o += snprintf(out + o, size - o, "unit %08x (slot field %u) pad %d ctlobj %08x saved ctl %d kind %d now ctl %u kind %u, %u swaps, %u group writes\n", caps[i].unit, rd32(caps[i].unit + 0xE2C), caps[i].pad,
