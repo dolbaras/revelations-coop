@@ -173,9 +173,10 @@ static void input_remote_set(int slot, const r1_input_t *rec)
 __declspec(dllexport) void r1in_remote_set(int slot, const r1_input_t *rec) { input_remote_set(slot, rec); }
 
 /* ---- the capture ---- */
-static hk_t hk_pad, hk_upd, hk_pd, hk_own;
+static hk_t hk_pad, hk_upd, hk_pd, hk_own, hk_v8, hk_v9, hk_v10;
 static void (FC *orig_updatePad)(unsigned unit);
 static void (FC *orig_unitUpdate)(unsigned unit);
+static void (FC *orig_v8)(unsigned unit), (FC *orig_v9)(unsigned unit), (FC *orig_v10)(unsigned unit);
 static void (TC *orig_padData)(void *self, unsigned slot);
 /* own slot (client plays the partner): FUN_0087E1B0(sCoopManager) = `+0xF4 in {1,2} ? +0xF8 : 0` is the offline branch of FUN_00882D60, which ~190 callers use as "the
  * local player's slot" (doors, enemies, items, cutscenes, HUD, camera); FUN_0067AF10 finds the local player unit by it. We answer with our slot instead and touch no
@@ -345,6 +346,42 @@ static void FC hook_updatePad(unsigned unit)
     orig_updatePad(unit);
 }
 
+/* mode 3: the swap wraps the three per-unit PHASE DISPATCHERS of uCharaBase (vtable slots 8, 9, 10 = 0x6CCAB0, 0x6C9C30, 0x6C9C10, shared by uNpc/uPlayer/weapons: the group
+ * loop of sUnit (0x9B4A50) calls them for every unit, they call slots 42 / 39 (update) / 38). So everything the captured unit does in its frame (state machine, buttons, weapon)
+ * and what its weapon units do (owner = unit+0x30) reads the unit's pad slot, without knowing which function inside reads which button. */
+static capu_t *cap_scope(unsigned unit)
+{
+    capu_t *c = cap_for(unit);
+    if (c || !role.armed)
+        return c;
+    unsigned owner = *(volatile unsigned *)(unit + 0x30);
+    return owner ? cap_find(owner) : NULL;
+}
+static void FC hook_v8(unsigned unit)
+{
+    capu_t *c = role.mode == 3 ? cap_scope(unit) : NULL;
+    if (c)
+        swap_call(orig_v8, unit, c);
+    else
+        orig_v8(unit);
+}
+static void FC hook_v9(unsigned unit)
+{
+    capu_t *c = role.mode == 3 ? cap_scope(unit) : NULL;
+    if (c)
+        swap_call(orig_v9, unit, c);
+    else
+        orig_v9(unit);
+}
+static void FC hook_v10(unsigned unit)
+{
+    capu_t *c = role.mode == 3 ? cap_scope(unit) : NULL;
+    if (c)
+        swap_call(orig_v10, unit, c);
+    else
+        orig_v10(unit);
+}
+
 static void FC hook_unitUpdate(unsigned unit)
 {
     capu_t *c = cap_for(unit);
@@ -501,7 +538,7 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
              * again whenever the game recreates it); `cap map <unit slot 0|1> <pad slot>` adds the other character (e.g. Jill on pad 1 while Parker plays on pad 0) */
             unsigned unit = find_unit(who);
             if (!unit || !is_player_class(unit) || !ctl_obj_of(unit)) {
-                snprintf(out, size, "no such unit '%s' (cap on partner|main|Parker|Jill|<hexaddr> [padslot=1] [mode 2 swap whole update|0 swap updatePad|1 write group])", who);
+                snprintf(out, size, "no such unit '%s' (cap on partner|main|Parker|Jill|<hexaddr> [padslot=1] [mode 3 swap at the unit phase dispatchers|2 swap whole update|0 swap updatePad|1 write group])", who);
                 return 1;
             }
             unsigned e = rd32(unit + 0xE2C);
@@ -602,6 +639,9 @@ static void on_exit_(void)
     own_on = 0;
     dbg_cleanup();
     hook_remove(&hk_own);
+    hook_remove(&hk_v8);
+    hook_remove(&hk_v9);
+    hook_remove(&hk_v10);
     hook_remove(&hk_pad);
     hook_remove(&hk_upd);
     hook_remove(&hk_pd);
@@ -623,6 +663,14 @@ __declspec(dllexport) int plug_init(const r1_api_t *api, r1_plug_t *out)
     static const unsigned char b_own[] = {0x8B, 0x81, 0xF4, 0x00, 0x00, 0x00};
     if (hook_install(&hk_own, 0x87E1B0, b_own, 6, (void *)hook_own))
         orig_own = (unsigned (FC *)(unsigned))hk_own.tramp;
+    static const unsigned char b_v9[] = {0x56, 0x8B, 0xF1, 0x8B, 0x86, 0x1C, 0x0E, 0x00, 0x00};
+    static const unsigned char b_v10[] = {0x8B, 0x81, 0x1C, 0x0E, 0x00, 0x00, 0xC1, 0xE8, 0x1E};
+    if (hook_install(&hk_v8, 0x6CCAB0, b_v9, 9, (void *)hook_v8))
+        orig_v8 = (void (FC *)(unsigned))hk_v8.tramp;
+    if (hook_install(&hk_v9, 0x6C9C30, b_v9, 9, (void *)hook_v9))
+        orig_v9 = (void (FC *)(unsigned))hk_v9.tramp;
+    if (hook_install(&hk_v10, 0x6C9C10, b_v10, 9, (void *)hook_v10))
+        orig_v10 = (void (FC *)(unsigned))hk_v10.tramp;
     A->log("plug_cap: loaded (api v%u), hooks updatePad %d unitUpdate %d padData %d", A->version, hk_pad.on, hk_upd.on, hk_pd.on);
     src[0].kind = R1_SRC_PAD, src[0].arg = 0;
     src[1].kind = R1_SRC_PAD, src[1].arg = 1;
