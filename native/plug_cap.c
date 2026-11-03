@@ -194,8 +194,9 @@ static unsigned FC hook_own(unsigned self)
 #define MAXCAP 4
 typedef struct {
     int active;
-    unsigned unit, ctl_obj, mgr;   /* mgr = the unit's cCharaStateManager (+0xE80): its update is run by the unit's separate uCallThink unit (+0xFA4) */
-    int saved_ctl, saved_kind;
+    unsigned unit, ctl_obj, mgr, mgr2;   /* the state machines of a unit are updated by uCallThink units: [uCallThink+0x30] = unit+0xE80 (lower body, the control object is that uCallThink) or unit+0xF6C (upper body states, the uCallThink at unit+0xFA4) */
+    int saved_ctl, saved_kind, saved_tmode;   /* saved_tmode: [uCallThink(+0xFA4)+0x34], the control mode of the upper-body state machine (1 local human, 2 AI): the machine ticks with it */
+    unsigned think_obj;
     int pad;   /* pad slot the unit reads while it is updated */
     unsigned swaps, writes;
 } capu_t;
@@ -232,10 +233,17 @@ static capu_t *cap_take(unsigned unit, int pad)
         if (!caps[i].active) {
             capu_t *c = &caps[i];
             memset(c, 0, sizeof *c);
-            c->unit = unit, c->ctl_obj = co, c->pad = pad, c->mgr = rd32(unit + 0xE80);
+            c->unit = unit, c->ctl_obj = co, c->pad = pad, c->mgr = rd32(unit + 0xE80), c->mgr2 = unit + 0xF6C;
             c->saved_ctl = (int)rd32(co + 0x34), c->saved_kind = (int)rd32(unit + 0xE30);
             wr32(co + 0x34, 1);
             wr32(unit + 0xE30, 1);
+            /* the upper-body state machine (aim, fire, reload ...) has its own copy of the control mode in its uCallThink unit: 2 for an AI partner, 1 for a local human.
+             * With 2 the machine runs the AI variants of the states (fire = think+0x158 bit 0), with 1 the human variants that read the pad (found live 2026-11-04) */
+            c->think_obj = rd32(unit + 0xFA4);
+            if (c->think_obj) {
+                c->saved_tmode = (int)rd32(c->think_obj + 0x34);
+                wr32(c->think_obj + 0x34, 1);
+            }
             c->active = 1;
             role.captures++;
             A->log("plug_cap: captured unit %08x (slot field %u): control type %d -> 1, kind %d -> 1, pad slot %d mode %d", unit, rd32(unit + 0xE2C), c->saved_ctl, c->saved_kind, pad, role.mode);
@@ -264,6 +272,8 @@ static void cap_release(capu_t *c)
     if (is_player_class(c->unit) && ctl_obj_of(c->unit) == c->ctl_obj) {
         wr32(c->ctl_obj + 0x34, (unsigned)c->saved_ctl);
         wr32(c->unit + 0xE30, (unsigned)c->saved_kind);
+        if (c->think_obj && rd32(c->unit + 0xFA4) == c->think_obj)
+            wr32(c->think_obj + 0x34, (unsigned)c->saved_tmode);
     }
     c->active = 0;
 }
@@ -365,7 +375,7 @@ static void FC hook_think(unsigned unit)
     if (role.mode == 3) {
         unsigned mgr = *(volatile unsigned *)(unit + 0x30);
         for (int i = 0; i < MAXCAP && mgr; i++)
-            if (caps[i].active && caps[i].mgr == mgr) {
+            if (caps[i].active && (caps[i].mgr == mgr || caps[i].mgr2 == mgr)) {
                 c = &caps[i];
                 break;
             }
