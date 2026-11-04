@@ -210,7 +210,7 @@ static void menu_apply(const char *why)
         return;
     }
     capture_unbind(-1);
-    capture_set_own(a.unit1);
+    capture_set_own(a.unit1 == 0 ? -1 : a.unit1);   /* lead = the engine's own default (no own-slot hook needed), partner = own slot 1 before the level loads */
     capture_bind(a.unit1, a.pad1);
     capture_bind(a.unit2, a.pad2);
     split_set_layout(g_set.layout == L1_LAYOUT_TOPBOTTOM ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE);
