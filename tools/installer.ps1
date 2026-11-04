@@ -581,14 +581,27 @@ function New-Button($parent, $text, $x, $y, $w, $primary) {
     $b
 }
 
-$form = New-Object Windows.Forms.Form
+# Test mode (stage 6c; never set for a player): RE1_COOP_UI_POS="x,y" puts the window at that screen position WITHOUT taking the focus (a form class that shows
+# without activation, no Activate call), so a window test can run on the second monitor while the owner works on the first. RE1_COOP_UI_SHOTS=<folder> saves
+# window pictures (Control.DrawToBitmap: the window's own pixels, never the desktop), RE1_COOP_UI_AUTO=install|remove drives the button, only for the one folder in
+# RE1_COOP_UI_ONLY (a test copy), then the window closes.
+$script:quietPos = $null
+if ($env:RE1_COOP_UI_POS -match '^(\d+),(\d+)$') { $script:quietPos = New-Object Drawing.Point([int]$Matches[1], [int]$Matches[2]) }
+if ($script:quietPos) {
+    if (-not ("QuietCoopForm" -as [type])) {
+        Add-Type -WarningAction SilentlyContinue -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition 'public class QuietCoopForm : System.Windows.Forms.Form { protected override bool ShowWithoutActivation { get { return true; } } }'
+    }
+    $form = New-Object QuietCoopForm
+} else {
+    $form = New-Object Windows.Forms.Form
+}
 $form.SuspendLayout()
 $form.AutoScaleDimensions = New-Object Drawing.SizeF(96, 96)
 $form.AutoScaleMode = "Dpi"
 $form.Text = "$($script:TITLE) $version"
 $form.ClientSize = New-Object Drawing.Size(660, 520)
 $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false
-$form.StartPosition = "CenterScreen"
+if ($script:quietPos) { $form.StartPosition = "Manual"; $form.Location = $script:quietPos; $form.ShowInTaskbar = $false } else { $form.StartPosition = "CenterScreen" }
 $form.BackColor = $C.bg; $form.ForeColor = $C.text
 $form.Font = Font 10
 
@@ -752,6 +765,8 @@ function Update-Setup {
         $lines += (L "need")
     }
     $lbInfo.Text = $lines -join "`n"
+    # (the uninstaller's page keeps asking its question when the language is switched; the install text was shown under the Remove button before, window test 2026-11-04)
+    if ($Uninstall -and $ok) { $lbInfo.Text = (L "confirm" $g) }
     $lbInfo.ForeColor = $(if ($ok -or -not $g) { $C.text } else { $C.warn })
     $btGo.Enabled = $ok
     $btGo.BackColor = $(if ($ok) { $C.accent } else { $C.btn })
@@ -901,7 +916,7 @@ $btLogCopy.Add_Click({ [Windows.Forms.Clipboard]::SetText(($script:logLines -joi
 $form.Add_HandleCreated({ if ($script:haveWin) { [CoopWin]::DarkTitle($form.Handle) } })
 $form.Add_Shown({
     if ($script:haveWin) { [CoopWin]::SetWindowTheme($tbLog.Handle, "DarkMode_Explorer", $null) | Out-Null }
-    $form.Activate()
+    if (-not $script:quietPos) { $form.Activate() }
     if ($Game) {
         if (-not (Test-Game $Game)) {
             $tbGame.Text = $Game
@@ -926,6 +941,50 @@ $form.Add_Shown({
         if ($found.Count -ge 1) { $tbGame.Text = $found[0] } else { Update-Setup }
         $btGo.Focus()
     }
+})
+
+# Window test driver (RE1_COOP_UI_SHOTS / RE1_COOP_UI_AUTO, see the top of the form code; a player never sets them): pictures of the window itself in the languages of
+# RE1_COOP_UI_LANGS, then the install / remove button for the one folder in RE1_COOP_UI_ONLY, a picture of the result page, and the window closes.
+function Save-WinShot($tag) {
+    if (-not $env:RE1_COOP_UI_SHOTS) { return }
+    try {
+        New-Item -ItemType Directory -Force $env:RE1_COOP_UI_SHOTS | Out-Null
+        $bmp = New-Object Drawing.Bitmap($form.Width, $form.Height)
+        $form.DrawToBitmap($bmp, (New-Object Drawing.Rectangle(0, 0, $form.Width, $form.Height)))
+        $bmp.Save((Join-Path $env:RE1_COOP_UI_SHOTS ($tag + ".png")), [Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        Write-Host ("window picture " + $tag)
+    } catch { Write-Host ("window picture failed: " + $_) }
+}
+$form.Add_Shown({
+    if (-not ($env:RE1_COOP_UI_SHOTS -or $env:RE1_COOP_UI_AUTO)) { return }
+    $tag = if ($env:RE1_COOP_UI_TAG) { $env:RE1_COOP_UI_TAG } else { "win" }
+    $form.Refresh(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 500
+    Save-WinShot ($tag + "-1-start")
+    foreach ($lg in @(($env:RE1_COOP_UI_LANGS -split ',') | Where-Object { $_ })) {
+        if ($script:LANGS.Contains($lg)) {
+            $cbLang.SelectedIndex = @($script:LANGS.Keys).IndexOf($lg)
+            Set-Texts; $form.Refresh(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 300
+            Save-WinShot ($tag + "-lang-" + $lg)
+        }
+    }
+    if ($env:RE1_COOP_UI_AUTO) {
+        $cur = $tbGame.Text.Trim().Trim('"')
+        $only = $env:RE1_COOP_UI_ONLY
+        $same = $false
+        if ($only -and $cur) { try { $same = ([IO.Path]::GetFullPath($cur).TrimEnd('\') -ieq [IO.Path]::GetFullPath($only).TrimEnd('\')) } catch { } }
+        if (-not $same) {
+            Write-Host ("auto refused: the folder in the window (" + $cur + ") is not RE1_COOP_UI_ONLY (" + $only + ")")
+        } elseif ($env:RE1_COOP_UI_AUTO -eq "install" -and -not $Game) {
+            $btGo.PerformClick()
+        } elseif ($env:RE1_COOP_UI_AUTO -eq "remove" -and $Uninstall) {
+            $btRemove.PerformClick()
+        }
+        for ($i = 0; $i -lt 300 -and $script:busy; $i++) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 200 }
+        $form.Refresh(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 400
+        Save-WinShot ($tag + "-2-result")
+    }
+    $form.Close()
 })
 
 Set-Texts

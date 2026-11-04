@@ -14,7 +14,8 @@ $root = Split-Path $PSScriptRoot -Parent
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "the version must be major.minor.patch (the launcher parses it as a .NET [version]): $Version" }
 $dll = Join-Path $root "native\build\dinput8.dll"
 if (-not (Test-Path $dll)) { throw "build native\build\dinput8.dll first (sh native/build.sh)" }
-$dist = if ($Dist) { $Dist } else { Join-Path $root "dist" }
+# (an absolute path: a relative -Dist made `$_.FullName.Substring($files.Length + 1)` below cut the payload list at the wrong place and the installer then reported its own files "missing", found 2026-11-04)
+$dist = [IO.Path]::GetFullPath($(if ($Dist) { $Dist } else { Join-Path $root "dist" }))
 New-Item -ItemType Directory -Force $dist | Out-Null
 $stage = Join-Path $dist "revelations-coop-$Version"
 $files = Join-Path $stage "files"

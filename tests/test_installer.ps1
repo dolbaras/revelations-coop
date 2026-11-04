@@ -212,7 +212,7 @@ Remove-Item Env:\RE1_COOP_UI_SELFTEST, Env:\RE1_COOP_ANYEXE -ErrorAction Silentl
 $uiLines = @(Get-Content -LiteralPath $o -Encoding UTF8 | Where-Object { $_ -like "UI|*" })
 Check ($p.ExitCode -eq 0 -and $uiLines.Count -eq 13 * 6) "the window code runs for 13 languages x 6 folder states ($($uiLines.Count) lines, exit $($p.ExitCode))"
 . (Join-Path $tools "coop-texts.ps1")
-$rawKeys = @($uiLines | Where-Object { $segs = @($_.Split("|") + ($_ -split ' // ')) | ForEach-Object { $_.Trim() }; @($segs | Where-Object { $script:TEXTS["en"].ContainsKey($_) }).Count -gt 0 })
+$rawKeys = @($uiLines | Where-Object { $segs = @($_.Split("|") + ($_ -split ' // ')) | ForEach-Object { $_.Trim() }; @($segs | Where-Object { @($script:TEXTS["en"].Keys) -ccontains $_ }).Count -gt 0 })
 Check ($rawKeys.Count -eq 0) "no raw text key shows in the window ($($rawKeys.Count))"
 $st = @{}
 foreach ($l in $uiLines) { $f = $l.Split("|"); $st["$($f[1])|$([IO.Path]::GetFileName($f[2]))"] = $f }
