@@ -391,7 +391,7 @@ void probe_install(void)
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "tp", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -462,6 +462,24 @@ void probe_run(const char *cmd, char *out, int size)
             if (kind >= 0)
                 wr32(unit + 0xE30, (unsigned)kind);
             snprintf(out, size, "unit %08x control type %d -> %d, kind %d -> %d", unit, was, type, wk, kind >= 0 ? kind : wk);
+        }
+    } else if (!strcmp(name, "tp")) {   /* tp <jill|parker|hexaddr> <x> <y> <z>: the story's own "set character position" (op PcsMainCharacterSetPos, 0x771AF0) in ONE frame: the move object's
+                                           * "teleport" byte [[unit+0xE88]+0x2B4] = 1, the position +0x40/+0x44/+0x48 (+0x4C = 0), then the unit's state refresh 0x6BEF50(unit, [unit+0xF08], 1) for players.
+                                           * Plain writes of the position are swept against the collision and stop at the first wall (stage 6c live), the byte must be set in the same frame. */
+        char w[40] = "", xs[24] = "", ys[24] = "", zs[24] = "";
+        sscanf(arg, "%39s %23s %23s %23s", w, xs, ys, zs);
+        unsigned unit = find_unit(w), mo = unit ? rd32(unit + 0xE88) : 0;
+        if (!unit || !mo || !zs[0]) {
+            snprintf(out, size, "usage: tp <jill|parker|hexaddr> <x> <y> <z>");
+        } else {
+            wr8(mo + 0x2B4, 1);
+            wrf(unit + 0x40, arg_float(xs));
+            wrf(unit + 0x44, arg_float(ys));
+            wrf(unit + 0x48, arg_float(zs));
+            wr32(unit + 0x4C, 0);
+            unsigned a[3] = {unit, rd32(unit + 0xF08), 1};
+            do_call(2, 0x6BEF50, a, 3);
+            snprintf(out, size, "unit %08x set to (%s, %s, %s) with the teleport byte, now (%.1f, %.1f, %.1f)", unit, xs, ys, zs, rdf(unit + 0x40), rdf(unit + 0x44), rdf(unit + 0x48));
         }
     } else if (!strcmp(name, "probelog")) {
         int sec = atoi(arg);
