@@ -593,6 +593,20 @@ void menu_cmd(const char *arg, char *out, int size)
             snprintf(out, (size_t)size, "hint strip at %.0f,%.0f size %.0fx%.0f", x, y, w, h);
         } else
             snprintf(out, (size_t)size, "usage: menu hint <x> <y> <w> <h> (virtual 1920x1080)");
+    } else if (!strcmp(sub, "items")) {   /* the list item records of the current page (research for the native row): pointer and 32 bytes each */
+        unsigned s = g_gm_this;
+        if (!s) {
+            snprintf(out, (size_t)size, "no title menu object seen");
+            return;
+        }
+        int cnt = (int)rd32(s + GM_COUNT), o = snprintf(out, (size_t)size, "page %08x: %d items, array +0x9B8:
+", s, cnt);
+        for (int k = 0; k < 8 && k < cnt + 2 && o < size - 200; k++) {
+            unsigned p = rd32(s + 0x9B8 + 4 * k), w[8] = {0};
+            if (p) r1_safe_read((void *)p, w, sizeof w);
+            o += snprintf(out + o, (size_t)(size - o), "[%d] %08x: %08x %08x %08x %08x %08x %08x %08x %08x
+", k, p, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        }
     } else if (!strcmp(sub, "gm")) {   /* dump of the title menu object for the live research of the native row (stage B) */
         unsigned s = g_gm_this;
         if (!s) {
@@ -612,5 +626,5 @@ void menu_cmd(const char *arg, char *out, int size)
             o += snprintf(out + o, (size_t)(size - o), "%02x ", b);
         }
     } else
-        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | idle <state> | hint x y w h | gm");
+        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | idle <state> | hint x y w h | gm | items");
 }
