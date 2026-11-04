@@ -374,7 +374,16 @@ int main(void)
         CHECK(menu_test_act(other, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == 3);       /* another page: stock */
         status(st, sizeof st);
         CHECK(strstr(st, "lobby closed"));
+        menu_cmd("set armed=0", st, sizeof st);
+        frames(60);   /* (the stock menu is frozen for a moment after settings were applied) */
+        g_keys[VK_RETURN] = 1;   /* the decide key is still down when the lobby opens: it must not act inside the lobby (live: the A that opened it toggled the first row) */
         CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == 3);   /* decide on the Co-Op row: handled, lobby open, stock code NOT run */
+        frames(4);
+        menu_present(NULL);
+        CHECK(g_drawn.kind == OV_LOBBY);
+        CHECK(!g_drawn.v.cards_on);   /* co-op still off */
+        g_keys[VK_RETURN] = 0;
+        frames(3);
         status(st, sizeof st);
         CHECK(strstr(st, "lobby OPEN"));
         menu_cmd("ev back", st, sizeof st);

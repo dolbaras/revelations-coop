@@ -473,6 +473,7 @@ static void open_lobby(void)
     load_stock(env.lang);
     if (!g_lobby) g_lobby = l1_new();
     l1_open(g_lobby, &g_set, &env);
+    l1_input_reset(&g_in);   /* the first poll inside the lobby only learns what is held (the decide of the native row, A / Enter / F6, is usually still down): live, the A that opened it toggled the first row */
     g_opened_ms = GetTickCount();
     g_open = 1;
     g_opens++;
