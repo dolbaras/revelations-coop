@@ -34,7 +34,7 @@ typedef struct {
     unsigned fn_mm_ctor;    /* 0x7BA470  fastcall(this) */
     unsigned fn_mm_kids;    /* 0x7BA4F0  fastcall(manager): builds the four map units */
     unsigned fn_register;   /* 0x9B5280  thiscall(sUnit, group, unit, 0, 0), ret 0x10 */
-    unsigned alloc_vt7;     /* 0x109DC98 MtDefaultAllocator vtable slot 7 (0 = do not zero-fill the new set's blocks) */
+    unsigned alloc_table;   /* 0x11859D0: table of 64 allocator object pointers (0 = do not zero-fill the new set's blocks): the slot 7 of their vtables is wrapped during the build */
 } split_addr_t;
 
 enum { SPLIT_SIDE_BY_SIDE = 0, SPLIT_TOP_BOTTOM = 1 };
