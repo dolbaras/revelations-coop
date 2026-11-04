@@ -105,8 +105,11 @@ static int steam_lang(void)
     const char *s = ((lang_t)fn)((void *)apps);
     if (!s) return -1;
     char buf[32] = {0};
-    if (!r1_safe_read(s, buf, 31)) return -1;
-    buf[31] = 0;
+    for (int i = 0; i < 24; i++) {   /* byte by byte: the string may end right before an unreadable page */
+        if (!r1_safe_read(s + i, &buf[i], 1)) return -1;
+        if (!buf[i]) break;
+    }
+    buf[24] = 0;
     return l1_lang_from_steam(buf);
 }
 
