@@ -214,20 +214,28 @@ static void units_cmd(const char *flt, char *out, int size)
     snprintf(out + o, size - o, "%d units shown", n);
 }
 
-/* ulist [name filter]: EVERY group of the game's unit table (sUnit [0x11E0184]: +0x620 = group count, group k = first unit at +0x2C+0x18k, next at unit+0x14). `units` only walks
- * group 10 (players, NPCs); enemies are in other groups (uZombieBase = group 13), found by the stage 6c census. One line per unit: group, address, class, pos, hp/max, flags. */
+/* ulist [g<k> | name filter]: the game's whole unit table (sUnit [0x11E0184]: +0x620 = group count, group k = first unit at +0x2C+0x18k, next at unit+0x14). `units` only walks group 10
+ * (players, NPCs); enemies are in other groups (uZombieBase = group 13), found by the stage 6c census. No argument: one line per group (units, first class); g<k>: the units of group k;
+ * a name: the units of any group whose class name contains it. Unit line: group, address, class, pos, hp/max, flags (E1C), state (F08). */
 static void ulist_cmd(const char *flt, char *out, int size)
 {
-    unsigned su = rd32(0x11E0184), ng = su ? rd32(su + 0x620) : 0;
-    int o = snprintf(out, size, "sUnit %08x, %u groups\n", su, ng), shown = 0;
+    unsigned su = rd32(0x11E0184), ng = su ? rd32(su + 0x620) : 0, only = 0xFFFFFFFFu;
+    int o = snprintf(out, size, "sUnit %08x, %u groups\n", su, ng), shown = 0, summary = !flt[0];
+    if (flt[0] == 'g' && flt[1] >= '0' && flt[1] <= '9')
+        only = (unsigned)atoi(flt + 1), flt = "";
     for (unsigned k = 0; k < ng && k < 40 && o + 200 < size; k++) {
+        if (only != 0xFFFFFFFFu && k != only)
+            continue;
         unsigned u = rd32(su + 0x2C + 0x18 * k);
         int n = 0, match = 0;
+        char first[96] = "";
         for (int guard = 0; u && guard < 3000 && o + 200 < size; guard++, u = rd32(u + 0x14)) {
             char cn[96] = "?";
             n++;
             classes_object_name(u, cn, sizeof cn);
-            if (flt[0] && !strstr(cn, flt))
+            if (!first[0])
+                snprintf(first, sizeof first, "%s", cn);
+            if (summary || (flt[0] && !strstr(cn, flt)))
                 continue;
             match++;
             if (shown < 120) {
@@ -236,8 +244,10 @@ static void ulist_cmd(const char *flt, char *out, int size)
                 shown++;
             }
         }
-        if (n)
-            o += snprintf(out + o, size - o, "  group %u: %d units, %d match\n", k, n, match);
+        if (n && summary)
+            o += snprintf(out + o, size - o, "group %u: %d units, first %s\n", k, n, first);
+        else if (n && (flt[0] || only != 0xFFFFFFFFu))
+            o += snprintf(out + o, size - o, "  group %u: %d units, %d shown\n", k, n, only != 0xFFFFFFFFu ? n : match);
     }
 }
 
