@@ -62,6 +62,8 @@ static int wr(unsigned a, const void *p, unsigned n)
     return WriteProcessMemory(GetCurrentProcess(), (void *)(size_t)a, p, n, &got) && got == n;
 }
 static int wr32(unsigned a, unsigned v) { return wr(a, &v, 4); }
+static int wrf(unsigned a, float v) { return wr(a, &v, 4); }
+static float fov_req;   /* console `split fov <degrees>`: vertical FOV written into both camera managers (+0x3C) every pass; 0 = the engine's own (stage 6c experiment: a side by side half has a horizontal FOV of 32 degrees) */
 static int wr8(unsigned a, unsigned v)
 {
     unsigned char c = (unsigned char)v;
@@ -651,6 +653,10 @@ void split_frame(void)
         wr32(mgr1 + 0x74, other_unit);
         wr32(mgr1 + 0x78, other_unit);
     }
+    if (fov_req > 1.0f) {
+        wrf(mgr0 + 0x3C, fov_req);
+        wrf(mgr1 + 0x3C, fov_req);
+    }
     if (hud_req)
         hud_frame(mgr0, mgr1);
     else if (hud.cp || hud.mm)
@@ -787,6 +793,9 @@ void split_cmd(const char *arg, char *out, int size)
         split_status_text(out, size);
     } else if (!strcmp(sub, "probe")) {
         probe(out, size);
+    } else if (!strcmp(sub, "fov")) {   /* split fov <degrees | 0>: experiment, see fov_req */
+        fov_req = (float)atof(a1);
+        snprintf(out, (size_t)size, fov_req > 1.0f ? "vertical FOV %.1f written into both camera managers every pass (stock: manager 0 %.1f, manager 1 %.1f)" : "FOV left to the engine (stock now: manager 0 %.1f, manager 1 %.1f)", fov_req > 1.0f ? fov_req : rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE4) + 0x3C));
     } else if (!strcmp(sub, "hud")) {
         if (!strcmp(a1, "on") || !strcmp(a1, "off")) {
             split_set_hud(!strcmp(a1, "on"));
