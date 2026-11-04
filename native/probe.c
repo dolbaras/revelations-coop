@@ -207,8 +207,8 @@ static void units_cmd(const char *flt, char *out, int size)
         classes_object_name(p, cn, sizeof cn);
         if (flt[0] && !strstr(cn, flt))
             continue;
-        o += snprintf(out + o, size - o, "%08x %-28s E2C=%d E30=%d pos=(%.0f,%.0f,%.0f) +10C=%08x\n", p, cn, (int)rd32(p + 0xE2C), (int)rd32(p + 0xE30), rdf(p + 0x40), rdf(p + 0x44),
-                      rdf(p + 0x48), rd32(p + 0x10C));
+        o += snprintf(out + o, size - o, "%08x %-28s E2C=%d E30=%d pos=(%.0f,%.0f,%.0f) +10C=%08x hp=%.0f E1C=%08x\n", p, cn, (int)rd32(p + 0xE2C), (int)rd32(p + 0xE30), rdf(p + 0x40), rdf(p + 0x44),
+                      rdf(p + 0x48), rd32(p + 0x10C), rdf(p + 0xE38), rd32(p + 0xE1C));
         n++;
     }
     snprintf(out + o, size - o, "%d units shown", n);
