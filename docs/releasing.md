@@ -51,8 +51,10 @@ The zip holds `Install Co-op.bat`, `coop-installer.ps1`, `coop-texts.ps1` (the 1
 payload list; a fake exe is refused without a trace; install over a game with a foreign dinput8.dll (backup, record, two shortcuts, every other game file untouched);
 reinstall (the backup stays the foreign DLL); the launcher's update from a local feed served on 127.0.0.1 (a wrong checksum refused, the right one installed, backup and
 shortcuts kept); uninstall (the game folder is byte for byte the clean one); a game without dinput8.dll; a path with spaces and an apostrophe; with `-RealGame` a COPY of
-the real exe passes the hash check and its icon becomes the shortcut's icon; the 13 texts (same keys, same placeholders, translated) and the language choice. Not covered
-offline: the installer's WINDOW (it is the proven window of the other mods of this workspace with this game's texts; first look at it on a PC with a free desktop).
+the real exe passes the hash check and its icon becomes the shortcut's icon; the 13 texts (same keys, same placeholders, translated) and the language choice. The installer's WINDOW is
+checked by `lab\inst_window_test.ps1` of the lab (install / uninstall through the zip installer and through the setup exe, on a stand-in folder and on a game test copy, windows on a
+second monitor, pictures of the windows themselves): test-only variables `RE1_COOP_UI_POS=x,y` (window at that position WITHOUT taking the focus), `RE1_COOP_UI_SHOTS=<folder>`,
+`RE1_COOP_UI_LANGS=en,ru`, `RE1_COOP_UI_TAG`, `RE1_COOP_UI_AUTO=install|remove` (clicks the button, only for the folder in `RE1_COOP_UI_ONLY`; a player never sets them).
 
 An update test against the real GitHub is done with `coop-launcher.ps1 -Feed http://127.0.0.1:<port>/latest.json -NoStart` as the test does, or `RE1_COOP_FEED` for a start
 through the shortcut. New shortcuts go to `-ShortcutDir <folder>` in tests, never to the desktop.
