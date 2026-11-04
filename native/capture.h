@@ -85,6 +85,7 @@ void capture_set_source(int pad_slot, int kind);  /* CAP_NATIVE: the game polls 
 /* A remote record (network thread ok). seq: wrapping 32-bit counter of the sender, a record that is not newer than the last accepted one is dropped (counted as stale);
  * ts_ms: sender clock, kept for the caller's jitter / delay statistics. Returns 1 when accepted. The record becomes the state of the synthetic XInput user <pad_slot>. */
 int capture_push_remote(int pad_slot, const r1_input_t *rec, unsigned seq, unsigned ts_ms);
+void capture_set_latch(int ms);                   /* a newly pressed remote button / trigger stays pressed at least ms (default 40): a tap shorter than one game poll is not lost */
 void capture_set_remote_timeout(int ms);          /* 0 = off. A remote slot that got no record for ms is set neutral (no stuck buttons when the link stalls) */
 
 void capture_get_state(capture_state_t *st);

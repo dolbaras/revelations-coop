@@ -338,14 +338,36 @@ static int raid_active(void)
 /* ---- input sources ---- */
 typedef struct {
     int kind;
-    r1_input_t last;
+    r1_input_t last;   /* what was published to the game last (remote: raw record + latched presses) */
+    r1_input_t raw;    /* the last remote record as received */
     unsigned seq, ts, accepted, stale, timeouts;
-    int have, neutralised;
-    DWORD recv_tick;
+    int have, neutralised, latched;
+    DWORD recv_tick, hold_until[16], lt_until, rt_until;
+    uint8_t lt_hold, rt_hold;
 } src_t;
 static src_t src[2];
+static volatile int latch_ms = 40;
 
 static void publish(int slot, const r1_input_t *r) { testmode_pad_set(slot, 1, r); }
+
+/* A press that is shorter than the game's poll interval (one record pressed, the next one released, both between two polls) would never be seen: the game derives its
+ * "pressed this frame" edges from poll to poll. A newly pressed button / trigger of a remote record therefore stays pressed for latch_ms (40) even when the next record releases it. */
+static void publish_remote(int slot, DWORD now)
+{
+    src_t *s = &src[slot];
+    r1_input_t e = s->raw;
+    int latched = 0;
+    for (int b = 0; b < 16; b++)
+        if (!(e.buttons & (1u << b)) && (int)(s->hold_until[b] - now) > 0)
+            e.buttons |= (uint16_t)(1u << b), latched = 1;
+    if (e.lt < s->lt_hold && (int)(s->lt_until - now) > 0)
+        e.lt = s->lt_hold, latched = 1;
+    if (e.rt < s->rt_hold && (int)(s->rt_until - now) > 0)
+        e.rt = s->rt_hold, latched = 1;
+    s->latched = latched;
+    s->last = e;
+    publish(slot, &e);
+}
 
 void capture_set_source(int slot, int kind)
 {
@@ -359,7 +381,10 @@ void capture_set_source(int slot, int kind)
         return;
     }
     src[slot].kind = kind;
-    src[slot].last = z;
+    src[slot].last = src[slot].raw = z;
+    src[slot].latched = 0;
+    memset(src[slot].hold_until, 0, sizeof src[slot].hold_until);
+    src[slot].lt_until = src[slot].rt_until = 0;
     src[slot].have = 0;
     src[slot].neutralised = 0;
     src[slot].recv_tick = GetTickCount();
@@ -375,14 +400,26 @@ int capture_push_remote(int slot, const r1_input_t *rec, unsigned seq, unsigned 
         s->stale++;
         return 0;
     }
+    DWORD now = GetTickCount();
+    uint16_t newly = (uint16_t)(rec->buttons & ~s->raw.buttons);
+    for (int b = 0; b < 16; b++)
+        if (newly & (1u << b))
+            s->hold_until[b] = now + (DWORD)latch_ms;
+    if (rec->lt > s->raw.lt)
+        s->lt_hold = rec->lt, s->lt_until = now + (DWORD)latch_ms;
+    if (rec->rt > s->raw.rt)
+        s->rt_hold = rec->rt, s->rt_until = now + (DWORD)latch_ms;
+    s->raw = *rec;
     s->last = *rec;
     s->seq = seq, s->ts = ts_ms, s->have = 1, s->neutralised = 0;
-    s->recv_tick = GetTickCount();
+    s->recv_tick = now;
     s->accepted++;
     if (s->kind == CAP_REMOTE)
-        publish(slot, rec);
+        publish_remote(slot, now);
     return 1;
 }
+
+void capture_set_latch(int ms) { latch_ms = ms < 0 ? 0 : ms; }
 
 void capture_set_remote_timeout(int ms) { remote_timeout_ms = ms; }
 
@@ -547,7 +584,10 @@ void capture_frame(void)
             r1_input_t z;
             memset(&z, 0, sizeof z);
             if (memcmp(&src[s].last, &z, sizeof z) != 0) {
-                src[s].last = z;
+                src[s].last = src[s].raw = z;
+                src[s].latched = 0;
+                memset(src[s].hold_until, 0, sizeof src[s].hold_until);
+                src[s].lt_until = src[s].rt_until = 0;
                 publish(s, &z);
                 src[s].timeouts++;
             }
@@ -558,6 +598,9 @@ void capture_frame(void)
         if (!blocked)
             cam_set_slot(0);
     }
+    for (int s = 0; s < 2; s++)
+        if (src[s].kind == CAP_REMOTE && src[s].latched)
+            publish_remote(s, now);
     apply();
     if (!hooks_on)
         return;
@@ -721,6 +764,9 @@ void capture_cmd(const char *arg, char *out, int size)
         int acc = capture_push_remote(slot, &r, seq, GetTickCount());
         snprintf(out, size, "record seq %u for pad slot %d: buttons %04x lt %d rt %d L(%d,%d) R(%d,%d): %s%s", seq, slot, r.buttons, r.lt, r.rt, r.lx, r.ly, r.rx, r.ry, acc ? "accepted" : "DROPPED (stale)",
                  acc && src[slot].kind != CAP_REMOTE ? " (stored only: the source is not remote)" : "");
+    } else if (!strcmp(sub, "latch")) {
+        capture_set_latch(atoi(a));
+        snprintf(out, size, "a newly pressed remote button / trigger stays pressed for at least %d ms", latch_ms);
     } else if (!strcmp(sub, "timeout")) {
         capture_set_remote_timeout(atoi(a));
         snprintf(out, size, "remote dead-man timeout %d ms (0 = off)", remote_timeout_ms);
