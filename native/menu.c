@@ -53,6 +53,7 @@ static int g_installed, g_disabled;
 static volatile unsigned g_gm_this, g_gm_tick;
 static volatile int g_gm_state, g_gm_type = -1, g_gm_sub, g_gm_cursor, g_gm_count;
 static unsigned g_gm_calls;
+static int g_idle_state = 4;               /* [+0x3FC] value that means "waiting for input" (confirmed or corrected by the first live run: menu idle <n>) */
 static int g_type_filter = -1;             /* menu type the hint / F6 are limited to (-1 = any title menu page) */
 static volatile int g_open;                /* lobby open: the stock update is skipped */
 static l1_t *g_lobby;
@@ -345,7 +346,7 @@ static void menu_frame(void)
     if (!g_installed || g_disabled) return;
     unsigned now = GetTickCount();
     int seen = g_gm_this && now - g_gm_tick < 300;
-    int idle = seen && g_gm_state == 4 && (g_type_filter < 0 || g_gm_type == g_type_filter);
+    int idle = seen && g_gm_state == g_idle_state && (g_type_filter < 0 || g_gm_type == g_type_filter);
     l1_raw raw;
     int pads = 0;
     read_raw(&raw, &pads, idle || g_open);
@@ -468,10 +469,10 @@ void menu_cmd(const char *arg, char *out, int size)
         overlay_stats(ov, sizeof ov);
         unsigned now = GetTickCount();
         snprintf(out, (size_t)size,
-                 "menu: %s; title menu object %08x state %d type %d sub %d cursor %d items %d (last update %d ms ago, %u calls, type filter %d); lobby %s; settings armed %d role %s layout %s pads %s; "
+                 "menu: %s; title menu object %08x state %d type %d sub %d cursor %d items %d (last update %d ms ago, %u calls, idle state %d, type filter %d); lobby %s; settings armed %d role %s layout %s pads %s; "
                  "language %s (src %d); last apply: %s\nini %s\n%s",
                  g_installed ? "installed" : (g_disabled ? "disabled" : "not installed"), g_gm_this, g_gm_state, g_gm_type, g_gm_sub, g_gm_cursor, g_gm_count,
-                 g_gm_this ? (int)(now - g_gm_tick) : -1, g_gm_calls, g_type_filter, g_open ? "OPEN" : "closed", g_set.armed, g_set.role == L1_PARTNER ? "partner" : "lead",
+                 g_gm_this ? (int)(now - g_gm_tick) : -1, g_gm_calls, g_idle_state, g_type_filter, g_open ? "OPEN" : "closed", g_set.armed, g_set.role == L1_PARTNER ? "partner" : "lead",
                  g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", g_set.pads_swapped ? "exchanged" : "normal", g_lang >= 0 ? l1_lang_codes[g_lang] : "?", g_lang_src,
                  g_last_apply[0] ? g_last_apply : "-", g_ini_path, ov);
     } else if (!strcmp(sub, "open")) {
@@ -530,6 +531,9 @@ void menu_cmd(const char *arg, char *out, int size)
         g_stock_loaded = -1;
         load_stock(l);
         snprintf(out, (size_t)size, "language %s", l1_lang_codes[l]);
+    } else if (!strcmp(sub, "idle")) {
+        g_idle_state = atoi(rest);
+        snprintf(out, (size_t)size, "the menu counts as waiting for input in state %d", g_idle_state);
     } else if (!strcmp(sub, "type")) {
         g_type_filter = atoi(rest);
         snprintf(out, (size_t)size, "the hint and F6 work on title menu type %d (-1 = any page)", g_type_filter);
@@ -559,5 +563,5 @@ void menu_cmd(const char *arg, char *out, int size)
             o += snprintf(out + o, (size_t)(size - o), "%02x ", b);
         }
     } else
-        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | hint x y w h | gm");
+        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | idle <state> | hint x y w h | gm");
 }
