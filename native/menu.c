@@ -89,9 +89,115 @@ static void __attribute__((fastcall)) hook_mgr_vf8(void *self)
     if (!g_open && !g_closing) orig_mgr_vf8(self);
 }
 
+/* ---------------------------------------------------------------- the native row (stage 6c)
+ * The main page is built by the title menu manager with three calls of the page's AddItem (0x82A590: label message, bank, help message, bank, flags; the labels are the Title
+ * messages 8 / 9 / 10 = menu_campaign / menu_coopmode / menu_option, bank 6) and keeps its rows in `row[count] = &record[count]` (+0x9B8), the text ids at +0x41C / +0x480. The 3DS
+ * build had a fourth row "menu_gamestart" (Title message 11, help 15 "memo_gamestart"): both strings are "Invalid Message" in every language. This code (1) puts our label / help text
+ * into the message table of the Title bank (the string pointers at [[res + 0x98] + 4 * id]) and (2) appends the row with the page's own AddItem, once per page object, before the
+ * page lays its list out; (3) detours the page's decide handler 0x82BE80: the decide of that row opens the lobby, everything else is the stock code. (Writing count = 4 alone crashed in
+ * stage 6: the row pointer of the fourth slot was never filled in.) REV1_NATIVEROW=0 switches it off. */
+#define SGUI_PTR_VA 0x1182CA4u      /* the GUI singleton: [+0x108 + 4 * bank] = the message resource of a bank, bank 6 = Title */
+#define TITLE_BANK 6
+#define MSG_LABEL 11                /* Title message "menu_gamestart" */
+#define MSG_HELP 15                 /* Title message "memo_gamestart" */
+#define ADDITEM_MAIN_VA 0x82A590u   /* AddItem variant of the main page (record set 2 at +0xA64) */
+#define ACT_VA 0x82BE80u            /* the page's decide handler: thiscall(page, cancel, mouse), ret 8, returns 1 when handled */
+#define ACT_STEAL 6                 /* 53 56 8B F1 33 DB = push ebx; push esi; mov esi,ecx; xor ebx,ebx */
+typedef void(__attribute__((thiscall)) * additem_t)(void *page, unsigned p2, unsigned p3, unsigned p4, unsigned p5, unsigned p6, unsigned p7, unsigned p8, unsigned p9);
+typedef unsigned(__attribute__((fastcall)) * act_t)(void *page, void *edx, unsigned cancel, unsigned mouse);
+static unsigned g_sgui_ptr_va = SGUI_PTR_VA;
+static additem_t g_additem = (additem_t)ADDITEM_MAIN_VA;
+static act_t g_act_tramp;
+static int g_row_enabled = 1;
+static volatile unsigned g_row_page;   /* the page object that got the row */
+static int g_row_index = -1;           /* its index (3) */
+static unsigned g_row_adds, g_row_acts;
+static char g_row_label[128], g_row_help[192];
+
+void menu_test_set_native(unsigned sgui_ptr_va, void *additem) { g_sgui_ptr_va = sgui_ptr_va, g_additem = (additem_t)additem, g_row_enabled = 1, g_row_page = 0; }
+
+static void open_lobby(void);
+static int detect_lang(void);
+
+static int wr32m(unsigned a, unsigned v)
+{
+    if (IsBadWritePtr((void *)a, 4)) return 0;
+    *(volatile unsigned *)a = v;
+    return 1;
+}
+
+/* the main page, seen for the first time: three rows with the label ids 8 / 9 / 10 */
+static void native_row_try(unsigned s)
+{
+    if (!g_row_enabled || s == g_row_page) return;
+    if ((int)rd32(s + GM_TYPE) != 0 || (int)rd32(s + GM_COUNT) != 3) return;
+    if (rd32(s + 0x41C) != 8 || rd32(s + 0x420) != 9 || rd32(s + 0x424) != 10) return;
+    unsigned sg = rd32(g_sgui_ptr_va), res = sg ? rd32(sg + 0x108 + 4 * TITLE_BANK) : 0, tab = res ? rd32(res + 0x98) : 0, n = res ? rd32(res + 0x88) : 0;
+    if (!tab || n <= MSG_HELP) {
+        static int said;
+        if (!said++) r1_log("menu: native row: the Title message table is not there yet (singleton %08x resource %08x table %08x count %u): later", sg, res, tab, n);
+        return;
+    }
+    int lang = detect_lang();
+    snprintf(g_row_label, sizeof g_row_label, "%s", l1_text(L1T_ROW_LABEL, lang));
+    snprintf(g_row_help, sizeof g_row_help, "%s", l1_text(L1T_ROW_HELP, lang));
+    if (!wr32m(tab + 4 * MSG_LABEL, (unsigned)(size_t)g_row_label) || !wr32m(tab + 4 * MSG_HELP, (unsigned)(size_t)g_row_help)) {
+        r1_log("menu: native row: the message table at %08x is not writable", tab);
+        g_row_page = s;
+        return;
+    }
+    g_row_index = (int)rd32(s + GM_COUNT);
+    int state = (int)rd32(s + GM_STATE);
+    g_additem((void *)s, MSG_LABEL, TITLE_BANK, MSG_HELP, TITLE_BANK, 0, 1, 0, 0);
+    g_row_page = s;
+    g_row_adds++;
+    r1_log("menu: native row added to the main page %08x (state %d, items now %d): label \"%s\", help \"%s\"", s, state, (int)rd32(s + GM_COUNT), g_row_label, g_row_help);
+}
+
+static unsigned __attribute__((fastcall)) hook_act(void *page, void *edx, unsigned cancel, unsigned mouse)
+{
+    unsigned s = (unsigned)(size_t)page;
+    if (g_row_enabled && s == g_row_page && (cancel & 0xFF) == 0 && (int)rd32(s + GM_STATE) == g_idle_state && (int)rd32(s + GM_CURSOR) == g_row_index && !g_open && !g_closing) {
+        g_row_acts++;
+        r1_log("menu: native row decided (%s): lobby opens", (mouse & 0xFF) ? "mouse" : "key / pad");
+        open_lobby();
+        return 1;   /* handled: the page stays in its waiting state, the stock manager sees nothing */
+    }
+    return g_act_tramp ? g_act_tramp(page, edx, cancel, mouse) : 0;
+}
+unsigned menu_test_act(void *page, unsigned cancel, unsigned mouse, void *orig) { g_act_tramp = (act_t)orig; return hook_act(page, NULL, cancel, mouse); }
+
+static int install_act_detour(void)
+{
+    static const unsigned char expect[ACT_STEAL] = {0x53, 0x56, 0x8B, 0xF1, 0x33, 0xDB};
+    unsigned char cur[ACT_STEAL];
+    if (!r1_safe_read((void *)(uintptr_t)ACT_VA, cur, ACT_STEAL) || memcmp(cur, expect, ACT_STEAL)) {
+        r1_log("menu: native row: the decide handler's first bytes are not the expected ones: the row stays off");
+        return 0;
+    }
+    unsigned char *t = (unsigned char *)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!t) return 0;
+    memcpy(t, expect, ACT_STEAL);
+    t[ACT_STEAL] = 0xE9;
+    *(int *)(t + ACT_STEAL + 1) = (int)((ACT_VA + ACT_STEAL) - (unsigned)(uintptr_t)(t + ACT_STEAL + 5));
+    g_act_tramp = (act_t)(uintptr_t)t;
+    unsigned char patch[ACT_STEAL];
+    patch[0] = 0xE9;
+    *(int *)(patch + 1) = (int)((unsigned)(uintptr_t)hook_act - (ACT_VA + 5));
+    patch[5] = 0x90;
+    DWORD old;
+    if (!VirtualProtect((void *)(uintptr_t)ACT_VA, ACT_STEAL, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    memcpy((void *)(uintptr_t)ACT_VA, patch, ACT_STEAL);   /* one copy of whole instructions; the handler runs from the title menu's update only */
+    VirtualProtect((void *)(uintptr_t)ACT_VA, ACT_STEAL, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void *)(uintptr_t)ACT_VA, ACT_STEAL);
+    r1_log("menu: native row: decide handler %08x detoured (trampoline %p)", ACT_VA, (void *)t);
+    return 1;
+}
+
 /* ---------------------------------------------------------------- the update wrapper */
 static void __attribute__((fastcall)) hook_vf8(void *self)
 {
+    native_row_try((unsigned)self);   /* before the stock update: the row must exist when the page lays its list out */
     if (!g_open && !g_closing) orig_vf8(self);   /* lobby open (or just closed, keys still down): the stock menu is frozen */
     unsigned s = (unsigned)self;
     g_gm_this = s;
@@ -481,6 +587,12 @@ void menu_install(void)
     void *fake2 = (void *)g_mgr_vtable;
     if (!r1_patch_vtable(&fake2, GM_VF8_SLOT, (void *)hook_mgr_vf8)) {
         r1_log("menu: cannot patch the manager's vtable slot (the page's own update is wrapped already: the entry still works, keys may leak into the stock menu)");
+    }
+    if (r1_env("REV1_NATIVEROW", v, sizeof v) && v[0] == '0') {
+        g_row_enabled = 0;
+        r1_log("menu: native row disabled by REV1_NATIVEROW=0 (hint + F6 / BACK only)");
+    } else if (!install_act_detour()) {
+        g_row_enabled = 0;   /* never add a row whose decide nobody catches */
     }
     lt_add_frame_cb(menu_frame);
     g_installed = 1;

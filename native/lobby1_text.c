@@ -191,6 +191,11 @@ static const char *const T[L1T_COUNT][L1_LANGS] = {
                        "Режим «Рейд» и онлайн-игра никогда не затрагиваются этим модом.", "Ten mod nigdy nie ingeruje w tryb Raid ani grę online.",
                        "Raid-modus en online spelen worden door deze mod nooit aangeraakt.", "O modo Raid e o jogo online nunca são alterados por este mod.",
                        "O modo Raid e o jogo online nunca são alterados por este mod.", "本模组绝不会改动突袭模式和在线游戏。", "本模組絕不會改動突襲模式和線上遊戲。"},
+    [L1T_ROW_LABEL] = {"Co-Op Play", "Jeu coopératif", "Gioco cooperativo", "Koop-Spiel", "Juego cooperativo", "協力プレイ", "Совместная игра", "Gra kooperacyjna", "Co-op spelen",
+                       "Jogo cooperativo", "Jogo cooperativo", "协力游玩", "協力遊玩"},
+    [L1T_ROW_HELP] = {"Two players, one PC (split screen).", "Deux joueurs, un PC (écran partagé).", "Due giocatori, un PC (schermo diviso).", "Zwei Spieler, ein PC (geteilter Bildschirm).",
+                      "Dos jugadores, un PC (pantalla dividida).", "1台のPCで2人プレイ（分割画面）。", "Два игрока, один ПК (разделённый экран).", "Dwóch graczy, jeden komputer (podzielony ekran).",
+                      "Twee spelers, één pc (gesplitst scherm).", "Dois jogadores, um PC (ecrã dividido).", "Dois jogadores, um PC (tela dividida).", "一台电脑两名玩家（分屏）。", "一台電腦兩名玩家（分割畫面）。"},
 };
 
 const char *l1_text(int id, int lang)

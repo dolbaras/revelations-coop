@@ -126,6 +126,40 @@ static void press(int vk, int ms_frames)
 
 static void status(char *out, int size) { menu_cmd("status", out, size); }
 
+
+/* ---------------------------------------------------------------- the native row: fake singleton with the Title message table, fake AddItem, fake decide handler */
+extern void menu_test_set_native(unsigned sgui_ptr_va, void *additem);
+extern unsigned menu_test_act(void *page, unsigned cancel, unsigned mouse, void *orig);
+static unsigned g_sgui_ptr;
+static unsigned g_add_calls, g_add_args[9];
+static unsigned g_act_orig_calls;
+static void __attribute__((thiscall)) fake_additem(void *page, unsigned p2, unsigned p3, unsigned p4, unsigned p5, unsigned p6, unsigned p7, unsigned p8, unsigned p9)
+{
+    unsigned char *pg = page;
+    unsigned cnt;
+    memcpy(&cnt, pg + 0x410, 4);
+    g_add_calls++;
+    g_add_args[0] = p2, g_add_args[1] = p3, g_add_args[2] = p4, g_add_args[3] = p5, g_add_args[4] = p6, g_add_args[5] = p7, g_add_args[6] = p8, g_add_args[7] = p9;
+    memcpy(pg + 0x41C + 4 * cnt, &p2, 4);
+    unsigned rowptr = (unsigned)(size_t)(pg + 0xA64 + 8 * cnt);
+    memcpy(pg + 0x9B8 + 4 * cnt, &rowptr, 4);
+    cnt++;
+    memcpy(pg + 0x410, &cnt, 4);
+}
+static unsigned __attribute__((fastcall)) fake_act_orig(void *page, void *edx, unsigned cancel, unsigned mouse) { (void)page; (void)edx; (void)cancel; (void)mouse; g_act_orig_calls++; return 7; }
+static unsigned char *mk_page(unsigned type, unsigned count, unsigned id0, unsigned id1, unsigned id2)
+{
+    unsigned char *p = calloc(1, 0xC00);
+    memcpy(p + 0x9A0, &type, 4);
+    memcpy(p + 0x410, &count, 4);
+    memcpy(p + 0x41C, &id0, 4);
+    memcpy(p + 0x420, &id1, 4);
+    memcpy(p + 0x424, &id2, 4);
+    unsigned one = 1;
+    memcpy(p + 0x3FC, &one, 4);
+    return p;
+}
+
 int main(void)
 {
     char ini[MAX_PATH], tmp[MAX_PATH];
@@ -278,6 +312,54 @@ int main(void)
     menu_cmd("ev back", st, sizeof st);
     status(st, sizeof st);
     CHECK(strstr(st, "lobby closed"));
+
+    /* ---- the native row: the main page (type 0, three rows with the label ids 8 / 9 / 10) gets a fourth row from the dead "menu_gamestart" message; its decide opens the lobby */
+    {
+        static const char invalid[] = "Invalid Message";
+        unsigned *tab = calloc(46, 4), *res = calloc(0x100 / 4, 4), *sg = calloc(0x800 / 4, 4);
+        for (int i = 0; i < 46; i++) tab[i] = (unsigned)(size_t)invalid;
+        res[0x88 / 4] = 46;
+        res[0x98 / 4] = (unsigned)(size_t)tab;
+        sg[(0x108 + 4 * 6) / 4] = (unsigned)(size_t)res;
+        g_sgui_ptr = (unsigned)(size_t)sg;
+        menu_test_set_native((unsigned)(size_t)&g_sgui_ptr, fake_additem);
+        unsigned char *other = mk_page(0, 3, 18, 19, 16);      /* the Campaign page: three rows of another kind */
+        unsigned char *old_obj = g_obj;
+        g_obj = other;
+        frames(2);
+        CHECK(g_add_calls == 0);                                 /* only the main page gets the row */
+        unsigned char *main_page = mk_page(0, 3, 8, 9, 10);
+        g_obj = main_page;
+        frames(2);
+        CHECK(g_add_calls == 1);                                 /* once per page object, before the stock update of that frame */
+        CHECK(g_add_args[0] == 11 && g_add_args[1] == 6 && g_add_args[2] == 15 && g_add_args[3] == 6 && g_add_args[4] == 0 && g_add_args[5] == 1 && g_add_args[6] == 0 && g_add_args[7] == 0);
+        CHECK(!strcmp((const char *)(size_t)tab[11], "Co-Op Play") && !strcmp((const char *)(size_t)tab[15], "Two players, one PC (split screen)."));
+        CHECK(tab[10] == (unsigned)(size_t)invalid && tab[12] == (unsigned)(size_t)invalid);   /* nothing else of the table touched */
+        unsigned cnt;
+        memcpy(&cnt, main_page + 0x410, 4);
+        CHECK(cnt == 4);
+        frames(5);
+        CHECK(g_add_calls == 1);                                 /* not again */
+        /* decide handler: the new row opens the lobby, other rows / cancel go to the stock code */
+        unsigned st4 = 4, cur;
+        memcpy(main_page + 0x3FC, &st4, 4);
+        cur = 1; memcpy(main_page + 0x408, &cur, 4);
+        g_act_orig_calls = 0;
+        CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == 1);   /* row 1: stock */
+        cur = 3; memcpy(main_page + 0x408, &cur, 4);
+        CHECK(menu_test_act(main_page, 1, 0, fake_act_orig) == 7 && g_act_orig_calls == 2);   /* cancel on row 3: stock */
+        CHECK(menu_test_act(other, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == 3);       /* another page: stock */
+        status(st, sizeof st);
+        CHECK(strstr(st, "lobby closed"));
+        CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == 3);   /* decide on the Co-Op row: handled, lobby open, stock code NOT run */
+        status(st, sizeof st);
+        CHECK(strstr(st, "lobby OPEN"));
+        menu_cmd("ev back", st, sizeof st);
+        status(st, sizeof st);
+        CHECK(strstr(st, "lobby closed"));
+        g_obj = old_obj;
+        frames(3);
+    }
     printf("%d checks, %d failed\n", checks, fails);
     remove(ini);
     printf(fails ? "FAILED\n" : "ALL OK\n");
