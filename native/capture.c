@@ -120,6 +120,9 @@ static struct {
 } roles[2];
 static volatile int own_req, own_on, camera_follow = 1, blocked, force_raid, cam_restore;
 static volatile unsigned own_slot;
+static volatile int ext_req;                    /* another module (split.c) needs the own-slot hook installed */
+static volatile DWORD own_scope_tid;            /* thread whose own-slot queries answer own_scope_slot (0 = none): the second HUD's update phases */
+static volatile int own_scope_slot;
 static volatile int remote_timeout_ms;
 static unsigned captures_total;
 
@@ -351,6 +354,9 @@ static void TC hook_padData(void *self, unsigned slot)
  * field is written, so the Raid state of the game stays as it was */
 static unsigned FC hook_own(unsigned self)
 {
+    DWORD st = own_scope_tid;
+    if (st && st == GetCurrentThreadId() && !blocked)   /* scoped answer for ONE thread: the workers keep the real own slot */
+        return (unsigned)own_scope_slot;
     if (own_on && !blocked)
         return own_slot;
     return orig_own(self);
@@ -623,7 +629,7 @@ static void apply(void)
         blocked = CAP_BLOCK_NONE;
         r1_log("capture: campaign again, capture may run");
     }
-    int need = roles[0].en || roles[1].en || own_req;
+    int need = roles[0].en || roles[1].en || own_req || ext_req;
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active && caps[i].flip && !roles[caps[i].role].en)
             cap_release(&caps[i]);
@@ -753,7 +759,26 @@ void capture_set_own(int unit_slot)
 
 void capture_set_camera_follow(int on) { camera_follow = on != 0; }
 
-int capture_busy(void) { return hooks_on || roles[0].en || roles[1].en || own_req; }
+int capture_busy(void) { return hooks_on || roles[0].en || roles[1].en || own_req || ext_req; }
+
+void capture_ext_request(int on) { ext_req = on != 0; }
+int capture_hooks_ready(void) { return hooks_on && !blocked; }
+void capture_own_scope(int slot)
+{
+    if (slot < 0 || slot > 1 || !hooks_on) {
+        own_scope_tid = 0;
+        return;
+    }
+    own_scope_slot = slot;
+    own_scope_tid = GetCurrentThreadId();
+}
+int capture_own_effective(void)
+{
+    if (own_on && !blocked)
+        return (int)own_slot;
+    unsigned cm = rd32(AD.coopmgr_ptr), pm = cm ? rd32(cm + 0xF4) : 0;
+    return pm == 1 || pm == 2 ? (int)(rd32(cm + 0xF8) & 1) : 0;   /* what 0x87E1B0 answers without our override: pm - 1 <= 1 ? [+0xF8] : 0 */
+}
 
 void capture_get_state(capture_state_t *st)
 {

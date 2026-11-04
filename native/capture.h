@@ -94,6 +94,14 @@ void capture_status_text(char *out, int size);
 /* console: "cap <sub> ..." on the game thread; returns the answer in out */
 void capture_cmd(const char *arg, char *out, int size);
 
+/* Services for split.c (the second view's HUD): the own-slot hook may be requested without any role; a SCOPE makes the own-slot query answer a given slot for the calling
+ * thread only (the workers keep the real answer), the scope is closed with slot -1. capture_own_effective() = the slot the engine answers right now (override, else the
+ * game's own rule). Raid: the hook is removed with all others, a scope then does nothing. */
+void capture_ext_request(int on);
+int capture_hooks_ready(void);
+void capture_own_scope(int slot);
+int capture_own_effective(void);
+
 /* 1 while any hook of the module is installed or requested (plug-ins skip their own capture hooks then) */
 int capture_busy(void);
 

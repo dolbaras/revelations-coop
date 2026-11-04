@@ -410,9 +410,16 @@ void testmode_xinput_sites(char *out, int size)
         o += snprintf(out + o, size - o, "\n  %08lx user %lu: %ld calls, %ld connected", (unsigned long)xsite[k].ret, xsite[k].user, xsite[k].n, xsite[k].ok);
 }
 
+/* split screen: while the second human's menu is open the game's pad slots 0 and 1 are fed from the OTHER physical pad (the menus read slot 0 as "the local human") */
+static volatile LONG pad_swap;
+void testmode_pad_swap(int on) { InterlockedExchange(&pad_swap, on != 0); }
+int testmode_pad_swapped(void) { return pad_swap != 0; }
+
 static DWORD xinput_inner(DWORD i, XINPUT_STATE *st)
 {
     static LONG logged;
+    if (pad_swap && i < 2)
+        i ^= 1;
     if (i < 4 && synth[i].active && st) {
         if (synth[i].until && (LONG)(GetTickCount() - synth[i].until) >= 0) {
             memset(&synth[i].pad, 0, sizeof synth[i].pad);

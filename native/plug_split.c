@@ -406,6 +406,51 @@ static void hud2_restore_masks(void)
     hud2_norig = 0;
 }
 
+/* LIVE (2026-11-04, section 8.2 of stage5.md): the stock children are built into zeroed memory (their constructors rely on it) while a later allocation reuses
+ * freed heap blocks full of 0x82 bytes; the draw loop 0x7B0070 skips a child whose byte +0x274 is not 0. Every cUnit factory allocates through
+ * MtDefaultAllocator vtable slot 7 (0x8DD9E0, thiscall(this, size, align, tag), ret 0xC; the pointer to the allocator object is [0x11859D0 + 4 * k], all slots point
+ * at the one object 0x1185BE8). Slot 6 is plain malloc: nothing is cleared. While the second set is built, the slot is wrapped (vtable pointer patch, no code patch)
+ * and the blocks of THIS thread are zero-filled before they are returned. */
+#define ALLOC_VT_SLOT7 0x109DC98u
+static void *(TC *orig_alloc7)(void *self, unsigned size, unsigned align, unsigned tag);
+static volatile unsigned zero_tid;
+static unsigned n_zeroed, n_zbytes;
+
+static void *TC hook_alloc7(void *self, unsigned size, unsigned align, unsigned tag)
+{
+    void *p = orig_alloc7(self, size, align, tag);
+    if (p && zero_tid && GetCurrentThreadId() == zero_tid && size && size <= 0x100000u) {
+        memset(p, 0, size);
+        n_zeroed++, n_zbytes += size;
+    }
+    return p;
+}
+
+static int alloc_wrap(int enable)
+{
+    static int wrapped;
+    DWORD old;
+    if (enable == wrapped)
+        return 1;
+    if (!VirtualProtect((void *)ALLOC_VT_SLOT7, 4, PAGE_READWRITE, &old))
+        return 0;
+    if (enable) {
+        unsigned cur = rd32(ALLOC_VT_SLOT7);
+        if (cur != 0x8DD9E0u) {
+            A->log("plug_split: allocator slot 7 is %08x, not the expected 0x8DD9E0: not wrapping", cur);
+            VirtualProtect((void *)ALLOC_VT_SLOT7, 4, old, &old);
+            return 0;
+        }
+        orig_alloc7 = (void *(TC *)(void *, unsigned, unsigned, unsigned))cur;
+        *(unsigned *)ALLOC_VT_SLOT7 = (unsigned)hook_alloc7;
+    } else {
+        *(unsigned *)ALLOC_VT_SLOT7 = 0x8DD9E0u;
+    }
+    VirtualProtect((void *)ALLOC_VT_SLOT7, 4, old, &old);
+    wrapped = enable;
+    return 1;
+}
+
 static int hud2_make(char *out, int size)
 {
     static const unsigned char b_v8[] = {0xA1, 0x10, 0x91, 0x16, 0x01, 0x83, 0xEC, 0x0C};
@@ -429,15 +474,24 @@ static int hud2_make(char *out, int size)
         return 1;
     }
     orig_v9h = (void (FC *)(unsigned))hk_v9h.tramp;
+    if (!alloc_wrap(1)) {
+        snprintf(out, (size_t)size, "hud2: cannot wrap the allocator (see log)");
+        return 1;
+    }
+    zero_tid = GetCurrentThreadId();
+    n_zeroed = n_zbytes = 0;
     unsigned mem = ((unsigned (*)(unsigned, unsigned))0x7AFFB0)(0x98, 0x10);
     if (!mem) {
+        zero_tid = 0, alloc_wrap(0);
         snprintf(out, (size_t)size, "hud2: allocation failed");
         return 1;
     }
     unsigned m = ((unsigned (FC *)(unsigned))0x7AFFE0)(mem);
     A->log("plug_split: hud2: allocated %08x, constructed %08x", mem, m);
     ((void (FC *)(unsigned))0x7B06D0)(m);
-    A->log("plug_split: hud2: children built");
+    zero_tid = 0;
+    alloc_wrap(0);
+    A->log("plug_split: hud2: children built, %u blocks / %u bytes zero-filled", n_zeroed, n_zbytes);
     wr32(m + 0xC, rd32(m + 0xC) | 0x2000);
     hud2_mgr = m;   /* from here on its update phases run as slot 1 */
     int nk = set_set_mask(m, 4, 0);
@@ -539,7 +593,8 @@ static int hud_probe(char *out, int size)
         unsigned n2 = 0;
         for (unsigned c = rd32(hud2_mgr + 0x3C); c && n2 < 40; c = rd32(c + 0x270), n2++) {
             cname(c, cn, sizeof cn);
-            P("   h2 child %08x %-28s flags %08x viewmask %03x%s", c, cn, rd32(c + 0xC), (rd32(c + 0xC) >> 16) & 0x3FF, "\n");
+            P("   h2 child %08x %-28s flags %08x en(bit14) %u skip(+274) %02x gui(+280) %08x viewmask %03x\n", c, cn, rd32(c + 0xC), (rd32(c + 0xC) >> 14) & 1, rd8(c + 0x274), rd32(c + 0x280),
+              (rd32(c + 0xC) >> 16) & 0x3FF);
         }
     }
     P("   (%u children of the main cockpit listed)\n", n);
@@ -651,6 +706,8 @@ static void on_frame_(void) { apply(); }
 static void on_exit_(void)
 {
     hud1 = 0;
+    zero_tid = 0;
+    alloc_wrap(0);
     hud2_restore_masks();
     if (hud2_mgr)
         set_set_mask(hud2_mgr, 0, 0);

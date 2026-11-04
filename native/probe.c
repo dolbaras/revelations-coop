@@ -22,6 +22,7 @@
 
 #include "r1.h"
 #include "capture.h"
+#include "split.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -344,13 +345,14 @@ void probe_install(void)
 {
     lt_add_frame_cb(probe_frame);
     capture_init();
+    split_init();
     r1_log("probe: ready (no inline hook until the capture module is asked for a role; experiments are a hot-loadable plug-in, see plug_cap.c)");
 }
 
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -387,6 +389,8 @@ void probe_run(const char *cmd, char *out, int size)
         camera_cmd(out, size);
     } else if (!strcmp(name, "cap")) {   /* the capture module (capture.c): cap status | bind | unbind | own | src | rec | trk | timeout | raid */
         capture_cmd(arg, out, size);
+    } else if (!strcmp(name, "split")) {   /* the split screen module (split.c): split status | on [v|h] | off | lay | hud | menu | probe */
+        split_cmd(arg, out, size);
     } else if (!strcmp(name, "plug")) {   /* plug load <dll path> | plug unload | plug status */
         if (!strncmp(arg, "load ", 5))
             plug_load(arg + 5, out, size);

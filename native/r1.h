@@ -47,6 +47,8 @@ void testmode_pad_pretend(int user, int active, const void *xinput_gamepad);
 DWORD testmode_pad_activity(void);
 void testmode_dinput_stats(char *out, int size);
 int testmode_pad_peek(int user, void *xinput_gamepad_out);                    /* what XInputGetState(user) would give the game: synthetic first, else real; 1 = connected */
+void testmode_pad_swap(int on);                                                /* game pad slots 0 and 1 read the other physical pad (split screen: second human's menu) */
+int testmode_pad_swapped(void);
 void testmode_xinput_sites(char *out, int size);                              /* which XInput users the game polls, from which call sites */
 
 /* inject.c: synthetic keyboard / mouse for test runs */
