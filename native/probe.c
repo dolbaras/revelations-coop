@@ -214,6 +214,33 @@ static void units_cmd(const char *flt, char *out, int size)
     snprintf(out + o, size - o, "%d units shown", n);
 }
 
+/* ulist [name filter]: EVERY group of the game's unit table (sUnit [0x11E0184]: +0x620 = group count, group k = first unit at +0x2C+0x18k, next at unit+0x14). `units` only walks
+ * group 10 (players, NPCs); enemies are in other groups (uZombieBase = group 13), found by the stage 6c census. One line per unit: group, address, class, pos, hp/max, flags. */
+static void ulist_cmd(const char *flt, char *out, int size)
+{
+    unsigned su = rd32(0x11E0184), ng = su ? rd32(su + 0x620) : 0;
+    int o = snprintf(out, size, "sUnit %08x, %u groups\n", su, ng), shown = 0;
+    for (unsigned k = 0; k < ng && k < 40 && o + 200 < size; k++) {
+        unsigned u = rd32(su + 0x2C + 0x18 * k);
+        int n = 0, match = 0;
+        for (int guard = 0; u && guard < 3000 && o + 200 < size; guard++, u = rd32(u + 0x14)) {
+            char cn[96] = "?";
+            n++;
+            classes_object_name(u, cn, sizeof cn);
+            if (flt[0] && !strstr(cn, flt))
+                continue;
+            match++;
+            if (shown < 120) {
+                o += snprintf(out + o, size - o, "g%u %08x %-26s pos=(%.0f,%.0f,%.0f) hp=%.0f/%.0f E1C=%08x F08=%d\n", k, u, cn, rdf(u + 0x40), rdf(u + 0x44), rdf(u + 0x48), rdf(u + 0xE38),
+                              rdf(u + 0xE40), rd32(u + 0xE1C), (int)rd32(u + 0xF08));
+                shown++;
+            }
+        }
+        if (n)
+            o += snprintf(out + o, size - o, "  group %u: %d units, %d match\n", k, n, match);
+    }
+}
+
 /* ---- globals / modes ---- */
 static void mode_cmd(char *out, int size)
 {
@@ -354,7 +381,7 @@ void probe_install(void)
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -383,6 +410,8 @@ void probe_run(const char *cmd, char *out, int size)
             unit_line(unit, out, size, 1);
     } else if (!strcmp(name, "units")) {
         units_cmd(arg, out, size);
+    } else if (!strcmp(name, "ulist")) {
+        ulist_cmd(arg, out, size);
     } else if (!strcmp(name, "mode")) {
         mode_cmd(out, size);
     } else if (!strcmp(name, "gamepad")) {
