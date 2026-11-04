@@ -19,7 +19,7 @@ What works on the real game (test copy, main PC):
 
 Layout: `native/` proxy (C, 32-bit, built with Zig: `sh native/build.sh`; hot-loadable experiment plug-ins `plug_*.c`: `build_plug.sh`, `build_split.sh`), `tools/r1console.py` console client.
 
-Variables: `REV1_LOG=<file>`, `REV1_CONSOLE=<port>` (UDP on 127.0.0.1), `REV1_ANYEXE=1` (lab only), `REV1_SPLIT=v|h` (start with the split screen requested, side by side / top-bottom), `REV1_MENU=0` (switch the Co-Op Play entry off), `REV1_LANG=<code>` (language of the lobby texts), `REV1_COOP_INI=<file>` (settings file),
+Variables: `REV1_LOG=<file>`, `REV1_CONSOLE=<port>` (UDP on 127.0.0.1), `REV1_ANYEXE=1` (lab only), `REV1_SPLIT=v|h` (start with the split screen requested, side by side / top-bottom), `REV1_MENU=0` (switch the Co-Op Play entry off), `REV1_NATIVEROW=0` (no fourth row in the main menu: hint + F6 / BACK only), `REV1_LANG=<code>` (language of the lobby texts), `REV1_COOP_INI=<file>` (settings file),
 test-window variables of the lab (`REV1_WINPOS`, `REV1_WINSIZE`, `REV1_BACKGROUND`, `REV1_MUTE`, `REV1_ADAPTER`).
 Console words (UDP): `menu status | open | close | view | set | gm`, `split status | on [v|h] | off | lay v|h | hud | menu | view | probe`, `splitkill` (emergency off from any thread), `cap status | bind | own | src | ...`.
 Licence: MIT.
