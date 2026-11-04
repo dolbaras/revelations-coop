@@ -723,7 +723,8 @@ function Update-Setup {
     $g = $tbGame.Text.Trim().Trim('"')
     $ok = $false
     $lines = @()
-    $btRemove.Visible = $false
+    $btRemove.Visible = $false; $btRemove.Tag = 0   # (Tag = what the page means to show: Visible reads false while the window is not shown)
+    $btGo.Text = L "install"
     if (-not $g) {
         $lines += (L "nogame")
     } elseif (-not (Test-Game $g)) {
@@ -736,7 +737,7 @@ function Update-Setup {
         $lines += ([string][char]0x2714 + "  " + (L "found"))
         $m = Read-Manifest $g
         if ($m.files.Count -gt 0) {
-            $btRemove.Visible = $true
+            $btRemove.Visible = $true; $btRemove.Tag = 1
             if ($m.version -eq $version) {
                 $lines += ([string][char]0x2022 + "  " + (L "same" $version))
                 $btGo.Text = L "reinstall"
@@ -928,5 +929,19 @@ $form.Add_Shown({
 })
 
 Set-Texts
+# Tests (tests\test_installer.ps1): build everything above without showing the window, then run the texts and the page-1 state code for every language over the
+# folders listed in RE1_COOP_UI_SELFTEST (';' separated; "" = no folder) and print one line per language and folder: lang|folder|info text|install button|remove visible.
+if ($env:RE1_COOP_UI_SELFTEST -ne $null) {
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    foreach ($f in ($env:RE1_COOP_UI_SELFTEST -split ';')) {
+        foreach ($lg in $script:LANGS.Keys) {
+            $script:lang = $lg
+            $tbGame.Text = $f
+            Set-Texts
+            Write-Host ("UI|" + $lg + "|" + $f + "|" + ($lbInfo.Text -replace "`n", " // ") + "|" + $btGo.Text + "|" + $btRemove.Tag + "|" + $btGo.Enabled + "|" + $lbSub.Text + "|" + $btBrowse.Text + "|" + $btCancel.Text)
+        }
+    }
+    exit 0
+}
 [Windows.Forms.Application]::Run($form)
 exit $script:exitCode

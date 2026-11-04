@@ -58,10 +58,10 @@ Check ((($payload1 -contains "dinput8.dll") -and ($payload1 -contains "coop\coop
 Check ((Get-Content (Join-Path $x2 "files\coop\version.txt") -TotalCount 1) -eq "0.0.2") "version.txt of the 0.0.2 package"
 
 # ---- the stand-in game
-function New-Game($name, [switch] $WithForeignDll) {
+function New-Game($name, [switch] $WithForeignDll, [switch] $RealExe) {
     $g = Join-Path $base $name
     New-Item -ItemType Directory -Force (Join-Path $g "nativePC\msg") | Out-Null
-    [IO.File]::WriteAllText((Join-Path $g "rerev.exe"), "MZ fake game exe $name")
+    if ($RealExe) { Copy-Item (Join-Path $RealGame "rerev.exe") (Join-Path $g "rerev.exe") } else { [IO.File]::WriteAllText((Join-Path $g "rerev.exe"), "MZ fake game exe $name") }
     [IO.File]::WriteAllText((Join-Path $g "steam_api.dll"), "steam api")
     [IO.File]::WriteAllText((Join-Path $g "nativePC\msg\Title_eng.gmd"), "texts")
     if ($WithForeignDll) { [IO.File]::WriteAllText((Join-Path $g "dinput8.dll"), "ASI LOADER of somebody else") }
@@ -193,6 +193,38 @@ if ($RealGame) {
     Run-PS (Join-Path $g4 "coop\coop-installer.ps1") @("-Quiet", "-Uninstall", "-Game", "`"$g4`"")
     Check (($script:exit -eq 0) -and (@(Get-ChildItem $g4 -Force).Count -eq 1)) "uninstall leaves only rerev.exe"
 }
+
+# 8b. the window's code without showing it (RE1_COOP_UI_SELFTEST): page 1 for every language over six folder states
+$ui0 = Join-Path $base "ui empty"; New-Item -ItemType Directory -Force $ui0 | Out-Null                         # a folder without rerev.exe
+$ui1 = New-Game "ui fake exe"                                                                                      # a fake exe: refused
+# (with -RealGame the three "good" folders hold a copy of the real exe and pass the hash check; without it RE1_COOP_ANYEXE stands in and the fake-exe state is skipped)
+$real = [bool]$RealGame
+$ui2 = if ($real) { New-Game "ui good" -RealExe } else { New-Game "ui good" }                                    # accepted and not installed
+$ui3 = if ($real) { New-Game "ui installed" -RealExe } else { New-Game "ui installed" }
+if (-not $real) { $env:RE1_COOP_ANYEXE = "1" }
+Run-PS (Join-Path $x2 "coop-installer.ps1") @("-Quiet", "-Game", "`"$ui3`"", "-ShortcutDir", "`"$(Join-Path $base 'links six')`"")      # installed 0.0.2: the same version as this installer ("reinstall")
+$ui4 = if ($real) { New-Game "ui older" -RealExe } else { New-Game "ui older" }
+Run-PS (Join-Path $x1 "coop-installer.ps1") @("-Quiet", "-Game", "`"$ui4`"", "-ShortcutDir", "`"$(Join-Path $base 'links seven')`"")      # installed 0.0.1 (the installer under test has 0.0.2: "update")
+$env:RE1_COOP_UI_SELFTEST = (@("", $ui0, $ui1, $ui2, $ui3, $ui4) -join ";")
+$o = Join-Path $base "ui-out.txt"
+$p = Start-Process powershell -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$(Join-Path $x2 'coop-installer.ps1')`"") -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $o
+Remove-Item Env:\RE1_COOP_UI_SELFTEST, Env:\RE1_COOP_ANYEXE -ErrorAction SilentlyContinue
+$uiLines = @(Get-Content -LiteralPath $o -Encoding UTF8 | Where-Object { $_ -like "UI|*" })
+Check ($p.ExitCode -eq 0 -and $uiLines.Count -eq 13 * 6) "the window code runs for 13 languages x 6 folder states ($($uiLines.Count) lines, exit $($p.ExitCode))"
+. (Join-Path $tools "coop-texts.ps1")
+$rawKeys = @($uiLines | Where-Object { $segs = @($_.Split("|") + ($_ -split ' // ')) | ForEach-Object { $_.Trim() }; @($segs | Where-Object { $script:TEXTS["en"].ContainsKey($_) }).Count -gt 0 })
+Check ($rawKeys.Count -eq 0) "no raw text key shows in the window ($($rawKeys.Count))"
+$st = @{}
+foreach ($l in $uiLines) { $f = $l.Split("|"); $st["$($f[1])|$([IO.Path]::GetFileName($f[2]))"] = $f }
+foreach ($lg in "en", "ru", "ja", "zh-tw", "pt-br") {
+    Check ($st["$lg|ui good"][6] -eq "True" -and $st["$lg|ui good"][5] -eq "0") "ui $lg : a good folder enables Install, no Remove"
+    if ($real) { Check ($st["$lg|ui fake exe"][6] -eq "False") "ui $lg : a fake exe disables Install" }
+    Check ($st["$lg|ui empty"][6] -eq "False") "ui $lg : a folder without rerev.exe disables Install"
+    Check ($st["$lg|ui installed"][5] -eq "1" -and $st["$lg|ui installed"][4] -ne $st["$lg|ui good"][4]) "ui $lg : an installed folder offers Remove and a different button (Reinstall)"
+    Check ($st["$lg|ui older"][4] -ne $st["$lg|ui installed"][4] -and $st["$lg|ui older"][4] -ne $st["$lg|ui good"][4]) "ui $lg : an older install offers Update"
+}
+Check ($st["en|ui good"][4] -eq "Install" -and $st["en|ui installed"][4] -eq "Reinstall" -and $st["en|ui older"][4] -eq "Update") "ui en : Install / Reinstall / Update"
+Check ($st["ja|ui good"][3] -match "rerev|Resident Evil") "ui ja : the info text is in Japanese and names the game"
 
 # 9. texts: 13 languages, the same keys and placeholders as English, nothing empty, translated
 . (Join-Path $tools "coop-texts.ps1")
