@@ -617,6 +617,7 @@ static void cam_follow(void)
 }
 
 #include "plug_mon.inc"
+#include "plug_thr.inc"
 
 /* once per logic pass: drop captures of units that no longer exist (freed by a load / area change); the role stays armed and takes the new ones */
 static void on_frame_(void)
@@ -624,6 +625,7 @@ static void on_frame_(void)
     trk_frame();
     cam_follow();
     mon_frame();
+    thr_frame();
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active && (!is_player_class(caps[i].unit) || ctl_obj_of(caps[i].unit) != caps[i].ctl_obj)) {
             A->log("plug_cap: captured unit %08x is gone (class or control object changed); role %s", caps[i].unit, role.armed ? "stays armed" : "off");
@@ -637,6 +639,8 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         return 1;
     if (!strcmp(name, "mon"))
         return mon_cmd(arg, out, size);
+    if (!strcmp(name, "thr"))
+        return thr_cmd(arg, out, size);
     if (debug_only && (!strcmp(name, "cap") || !strcmp(name, "own") || !strcmp(name, "padfix") || !strcmp(name, "src") || !strcmp(name, "rec") || !strcmp(name, "trk"))) {
         snprintf(out, size, "the capture engine lives in the main DLL now: use the console command `cap ...` (cap bind/own/src/rec/trk/status); this plug-in has only the debug tools");
         return 1;
@@ -751,6 +755,7 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
 
 static void on_exit_(void)
 {
+    thr_stop();
     char tmp[600];
     if (role.armed || caps[0].active || caps[1].active || caps[2].active || caps[3].active)
         cap_off_all(tmp, sizeof tmp);

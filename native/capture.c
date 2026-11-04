@@ -110,6 +110,7 @@ typedef struct {
     unsigned unit, ctl_obj, mgr, mgr2, think_obj;   /* mgr = unit+0xE80 (lower body machine owner), mgr2 = unit+0xF6C (upper body machine), think_obj = uCallThink at unit+0xFA4 */
     int saved_ctl, saved_kind, saved_tmode;
     int pad, role;
+    int flip;   /* 1 = the character was taken over (fields changed, given back on release); 0 = passive: only wrapped with its pad slot (the other character is bound) */
     unsigned swaps;
 } capu_t;
 static capu_t caps[MAXCAP];
@@ -129,6 +130,50 @@ static unsigned (FC *orig_own)(unsigned self);
 static int hooks_on;
 static int inited;
 
+/* ---- the swap lock ----
+ * FOUND LIVE 2026-11-04: the unit phases run on EIGHT threads (the sUnit group loop queues the units of threaded groups as jobs; weapons and uCallThink units of the
+ * players are among them, the player units themselves are on the logic thread). sGamePad+0x870 is one global: two threads inside swapped sections, or a worker reading
+ * the pad while the logic thread has a section open, see the wrong slot (a character flickered into the aim state because of the other one's trigger) and a restore
+ * of a stale "old" value left the slot at 1 for good. So: every swapped section runs under one lock (re-entrant for nested hooks on the same thread), and every player
+ * unit is wrapped as soon as any role is bound (passively with its default pad slot when its own role is not bound). A thread that cannot get the lock within 30 ms
+ * goes on unlocked (counted) rather than risk a deadlock. */
+static CRITICAL_SECTION swap_cs;
+static int swap_cs_ready;
+static volatile LONG lock_waits, lock_timeouts;
+static unsigned slot_leaks;
+static DWORD swap_tids[8];
+static volatile int n_swap_tids;
+
+static int lock_take(void)
+{
+    if (!swap_cs_ready)
+        return 0;
+    if (TryEnterCriticalSection(&swap_cs))
+        return 1;
+    InterlockedIncrement(&lock_waits);
+    DWORD t0 = GetTickCount();
+    do {
+        Sleep(0);
+        if (TryEnterCriticalSection(&swap_cs))
+            return 1;
+    } while (GetTickCount() - t0 < 30);
+    InterlockedIncrement(&lock_timeouts);
+    return 0;
+}
+
+static void note_thread(void)
+{
+    DWORD t = GetCurrentThreadId();
+    int n = n_swap_tids;
+    for (int i = 0; i < n && i < 8; i++)
+        if (swap_tids[i] == t)
+            return;
+    if (n < 8) {
+        swap_tids[n] = t;
+        n_swap_tids = n + 1;
+    }
+}
+
 /* ---- capture of a unit ---- */
 static capu_t *cap_find(unsigned unit)
 {
@@ -143,17 +188,31 @@ static capu_t *cap_take(unsigned unit, int role)
     unsigned co = ctl_obj_of(unit);
     if (!co)
         return NULL;
+    if (swap_cs_ready)
+        EnterCriticalSection(&swap_cs);
+    capu_t *found = cap_find(unit);
+    if (found) {
+        if (swap_cs_ready)
+            LeaveCriticalSection(&swap_cs);
+        return found;
+    }
     for (int i = 0; i < MAXCAP; i++)
         if (!caps[i].active) {
             capu_t *c = &caps[i];
             memset(c, 0, sizeof *c);
-            c->unit = unit, c->ctl_obj = co, c->role = role, c->pad = roles[role].pad, c->mgr = rd32(unit + 0xE80), c->mgr2 = unit + 0xF6C;
+            c->unit = unit, c->ctl_obj = co, c->role = role, c->flip = roles[role].en, c->pad = roles[role].en ? roles[role].pad : 0, c->mgr = rd32(unit + 0xE80), c->mgr2 = unit + 0xF6C;
+            c->think_obj = rd32(unit + 0xFA4);
+            if (!c->flip) {   /* passive: the character is not bound, nothing of it is changed; it only runs under its default pad slot, inside the lock */
+                c->active = 1;
+                if (swap_cs_ready)
+                    LeaveCriticalSection(&swap_cs);
+                return c;
+            }
             c->saved_ctl = (int)rd32(co + 0x34), c->saved_kind = (int)rd32(unit + 0xE30);
             wr32(co + 0x34, 1);
             wr32(unit + 0xE30, 1);
             /* the upper-body state machine has its own control mode in its uCallThink unit: 2 = AI partner (AI variants of the states: fire = think+0x158 bit 0),
              * 1 = human (variants that read the pad) */
-            c->think_obj = rd32(unit + 0xFA4);
             if (c->think_obj) {
                 c->saved_tmode = (int)rd32(c->think_obj + 0x34);
                 wr32(c->think_obj + 0x34, 1);
@@ -162,8 +221,12 @@ static capu_t *cap_take(unsigned unit, int role)
             captures_total++;
             r1_log("capture: took unit %08x (slot field %u): control type %d -> 1, kind %d -> 1, upper mode %d -> 1, pad slot %d", unit, rd32(unit + 0xE2C), c->saved_ctl, c->saved_kind,
                    c->saved_tmode, c->pad);
+            if (swap_cs_ready)
+                LeaveCriticalSection(&swap_cs);
             return c;
         }
+    if (swap_cs_ready)
+        LeaveCriticalSection(&swap_cs);
     return NULL;
 }
 
@@ -171,7 +234,7 @@ static void cap_release(capu_t *c)
 {
     if (!c->active)
         return;
-    if (is_player_class(c->unit) && ctl_obj_of(c->unit) == c->ctl_obj) {
+    if (c->flip && is_player_class(c->unit) && ctl_obj_of(c->unit) == c->ctl_obj) {
         wr32(c->ctl_obj + 0x34, (unsigned)c->saved_ctl);
         wr32(c->unit + 0xE30, (unsigned)c->saved_kind);
         if (c->think_obj && rd32(c->unit + 0xFA4) == c->think_obj)
@@ -193,7 +256,7 @@ static capu_t *cap_for(unsigned unit)
     if (c || !(roles[0].en | roles[1].en))
         return c;
     unsigned e = *(volatile unsigned *)(unit + 0xE2C), kind = *(volatile unsigned *)(unit + 0xE30);
-    if (e > 1 || !roles[e].en || (kind != 1 && kind != 2) || !is_player_class(unit))
+    if (e > 1 || (kind != 1 && kind != 2) || !is_player_class(unit))
         return NULL;
     return cap_take(unit, (int)e);
 }
@@ -215,11 +278,15 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
         fn(unit);
         return;
     }
+    int locked = lock_take();
+    note_thread();
     unsigned old = *(volatile unsigned *)(g + 0x870);
     *(volatile unsigned *)(g + 0x870) = (unsigned)c->pad;
     fn(unit);
     *(volatile unsigned *)(g + 0x870) = old;
     c->swaps++;
+    if (locked)
+        LeaveCriticalSection(&swap_cs);
 }
 
 static void FC hook_v8(unsigned unit)
@@ -268,10 +335,13 @@ static void TC hook_padData(void *self, unsigned slot)
 {
     unsigned g = gp();
     if (g && slot < 2) {
+        int locked = lock_take();
         unsigned old = *(volatile unsigned *)(g + 0x870);
         *(volatile unsigned *)(g + 0x870) = slot;
         orig_padData(self, slot);
         *(volatile unsigned *)(g + 0x870) = old;
+        if (locked)
+            LeaveCriticalSection(&swap_cs);
         return;
     }
     orig_padData(self, slot);
@@ -555,7 +625,7 @@ static void apply(void)
     }
     int need = roles[0].en || roles[1].en || own_req;
     for (int i = 0; i < MAXCAP; i++)
-        if (caps[i].active && !roles[caps[i].role].en)
+        if (caps[i].active && caps[i].flip && !roles[caps[i].role].en)
             cap_release(&caps[i]);
     if (blocked)
         return;
@@ -604,6 +674,24 @@ void capture_frame(void)
     apply();
     if (!hooks_on)
         return;
+    {   /* pass start: the workers are idle, nothing may hold a swapped slot; repair a leak (a restore that raced) */
+        unsigned g = gp();
+        if (g && *(volatile unsigned *)(g + 0x870) != 0) {
+            if (++slot_leaks <= 5)
+                r1_log("capture: sGamePad+0x870 was %u at the start of a pass (leak #%u), reset to 0", *(volatile unsigned *)(g + 0x870), slot_leaks);
+            *(volatile unsigned *)(g + 0x870) = 0;
+        }
+        /* The game switches PadData[k] between "keyboard" (device kind 6, after a key was used for the menus) and "pad" in FUN_00888FD0, ONCE, when it sees pad activity while it is in
+         * keyboard mode (sGamePad+0x874 = 1). If that moment passed with the wrong slot current (the leak above), the kind stays 6 and the pad of that slot is ignored forever
+         * (the aim trigger read the keyboard map). A pad slot that shows input while its PadData says keyboard gets the keyboard mode back so the game's own transition runs again. */
+        static DWORD last_fix;
+        for (int s = 0; g && s < 2; s++)
+            if (rd32(g + 0x638 + 0x90 * (unsigned)s) == 6 && rd32(g + 0x198 + 0x2CC * (unsigned)s) != 0 && rd32(g + 0x874) == 0 && GetTickCount() - last_fix > 500) {
+                wr32(g + 0x874, 1);
+                last_fix = GetTickCount();
+                r1_log("capture: pad slot %d has input but PadData says keyboard: keyboard mode set so the game switches the device kind", s);
+            }
+    }
     cam_follow();
     for (int i = 0; i < MAXCAP; i++)
         if (caps[i].active && (!is_player_class(caps[i].unit) || ctl_obj_of(caps[i].unit) != caps[i].ctl_obj)) {
@@ -617,6 +705,8 @@ int capture_init(void)
     if (inited)
         return 0;
     inited = 1;
+    InitializeCriticalSection(&swap_cs);
+    swap_cs_ready = 1;
     lt_add_frame_cb(capture_frame);
     r1_log("capture: module ready (no hook is installed until a role or the own slot is requested)");
     return 0;
@@ -629,9 +719,13 @@ void capture_bind(int unit_slot, int pad_slot)
         return;
     roles[unit_slot].pad = pad_slot;
     roles[unit_slot].en = 1;
-    for (int i = 0; i < MAXCAP; i++)   /* already captured: move to the new pad slot */
-        if (caps[i].active && caps[i].role == unit_slot)
-            caps[i].pad = pad_slot;
+    for (int i = 0; i < MAXCAP; i++)   /* already seen: a passive entry is dropped (taken over properly at its next phase), a taken one moves to the new pad slot */
+        if (caps[i].active && caps[i].role == unit_slot) {
+            if (caps[i].flip)
+                caps[i].pad = pad_slot;
+            else
+                caps[i].active = 0;
+        }
 }
 
 void capture_unbind(int unit_slot)
@@ -685,6 +779,7 @@ void capture_status_text(char *out, int size)
     int o = snprintf(out, size, "capture: hooks %s%s, game mode %d, own slot %s%u (camera %s), remote timeout %d ms, %u units taken\n", st.hooks_on ? "ON" : "off",
                      st.blocked == CAP_BLOCK_RAID ? " BLOCKED (Raid)" : st.blocked == CAP_BLOCK_BUILD ? " BLOCKED (build mismatch)" : "", st.game_mode, st.own_on ? "" : "(default) ", st.own_slot,
                      st.camera_follow ? "follows" : "left alone", remote_timeout_ms, st.captures);
+    o += snprintf(out + o, size - o, "swap lock: %ld waits, %ld timeouts, %u slot leaks repaired, %d threads ran swapped sections\n", (long)lock_waits, (long)lock_timeouts, slot_leaks, (int)n_swap_tids);
     for (int e = 0; e < 2; e++)
         o += snprintf(out + o, size - o, "role unit slot %d: %s pad slot %d, unit %08x, %u swaps\n", e, st.role[e].enabled ? "bound to" : "(unbound)", st.role[e].pad, st.role[e].unit, st.role[e].swaps);
     unsigned g = gp();
