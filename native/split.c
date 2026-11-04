@@ -28,7 +28,7 @@
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
 
-static split_addr_t AD = {0x11E00B8u, 0x1169394u, 0x1169108u, 0x1169398u, 0x1169120u, 0x11E0184u, 0x7AFFB0u, 0x7AFFE0u, 0x7B06D0u, 0x7BA440u, 0x7BA470u, 0x7BA4F0u, 0x9B5280u, 0x109DC98u};
+static split_addr_t AD = {0x11E00B8u, 0x1169394u, 0x1169108u, 0x1169398u, 0x1169120u, 0x11E0184u, 0x7AFFB0u, 0x7AFFE0u, 0x7B06D0u, 0x7BA440u, 0x7BA470u, 0x7BA4F0u, 0x9B5280u, 0x11859D0u};
 
 void split_test_set_addrs(const split_addr_t *a) { AD = *a; }
 
@@ -172,30 +172,46 @@ static void *TC hook_alloc7(void *self, unsigned size, unsigned align, unsigned 
     return p;
 }
 
+/* The allocator of a class is picked by an index in its DTI (flags +0x18 >> 23 & 0x3F, 12 for the cockpit classes) from the table at 0x11859D0; the objects are of DIFFERENT
+ * classes (MtDefaultAllocator vtable 0x109DC7C for index 0, MtScalableAllocator 0x109D1A8 for index 12), all with the same slot 7 stub 0x8DD9E0. So every distinct allocator
+ * vtable of the table gets its slot 7 wrapped for the duration of the build (found live: wrapping only the default allocator's vtable zero-filled nothing). */
+#define ALLOC_STUB 0x8DD9E0u
+#define ALLOC_MAXVT 8
+static unsigned alloc_slots[ALLOC_MAXVT];
+static int n_alloc_slots;
+
 static int alloc_wrap(int enable)
 {
-    static int wrapped;
     DWORD old;
-    if (!AD.alloc_vt7)
+    if (!AD.alloc_table)
         return 1;   /* harness: nothing to wrap */
-    if (enable == wrapped)
+    if (!enable) {
+        for (int i = 0; i < n_alloc_slots; i++)
+            if (VirtualProtect((void *)(size_t)alloc_slots[i], 4, PAGE_READWRITE, &old)) {
+                *(unsigned *)(size_t)alloc_slots[i] = ALLOC_STUB;
+                VirtualProtect((void *)(size_t)alloc_slots[i], 4, old, &old);
+            }
+        n_alloc_slots = 0;
         return 1;
-    if (!VirtualProtect((void *)(size_t)AD.alloc_vt7, 4, PAGE_READWRITE, &old))
-        return 0;
-    if (enable) {
-        unsigned cur = rd32(AD.alloc_vt7);
-        if (cur != 0x8DD9E0u) {
-            r1_log("split: allocator slot 7 is %08x, not the expected 0x8DD9E0: not wrapping", cur);
-            VirtualProtect((void *)(size_t)AD.alloc_vt7, 4, old, &old);
-            return 0;
-        }
-        orig_alloc7 = (void *(TC *)(void *, unsigned, unsigned, unsigned))(size_t)cur;
-        *(unsigned *)(size_t)AD.alloc_vt7 = (unsigned)(size_t)hook_alloc7;
-    } else {
-        *(unsigned *)(size_t)AD.alloc_vt7 = 0x8DD9E0u;
     }
-    VirtualProtect((void *)(size_t)AD.alloc_vt7, 4, old, &old);
-    wrapped = enable;
+    if (n_alloc_slots)
+        return 1;
+    for (unsigned k = 0; k < 64 && n_alloc_slots < ALLOC_MAXVT; k++) {
+        unsigned obj = rd32(AD.alloc_table + 4 * k), vt = obj ? rd32(obj) : 0, slot = vt + 0x1C;
+        int dup = 0;
+        for (int i = 0; i < n_alloc_slots; i++)
+            dup |= alloc_slots[i] == slot;
+        if (!vt || dup || rd32(slot) != ALLOC_STUB)
+            continue;
+        if (!VirtualProtect((void *)(size_t)slot, 4, PAGE_READWRITE, &old))
+            continue;
+        orig_alloc7 = (void *(TC *)(void *, unsigned, unsigned, unsigned))(size_t)ALLOC_STUB;
+        *(unsigned *)(size_t)slot = (unsigned)(size_t)hook_alloc7;
+        VirtualProtect((void *)(size_t)slot, 4, old, &old);
+        alloc_slots[n_alloc_slots++] = slot;
+    }
+    if (!n_alloc_slots)
+        r1_log("split: no allocator vtable with the expected slot 7 stub %08x found: the second HUD set is not zero-filled", ALLOC_STUB);
     return 1;
 }
 
@@ -357,25 +373,63 @@ static int hud_build(void)
     return 1;
 }
 
-/* once per pass while the split is on: keep the set alive and attached to the current stock set */
-static void hud_frame(void)
+/* LIVE CRASH (2026-11-04 03:34, session s5b): the pause menu's "load the last checkpoint" tears the area down (units, GUI resources) a few frames after the menu closes; the
+ * second set, alive and updating, hit an engine assertion (0x401396, inside the GUI update chain, esi = the second cockpit manager) and the game died. The same can happen on
+ * any load. So the set does not live through anything that can load: it is RETIRED when a pause / game over screen opens or a cutscene starts (those are the doors to a load),
+ * and it is (re)built only after the world has been unchanged for hud_settle_ms: same stock cockpit managers, camera managers and player units, gameplay camera on viewport 0. */
+static unsigned hud_settle_ms = 1500;
+static unsigned stable_key[6];
+static DWORD stable_since;
+
+static void hud_forget(void)
+{
+    hud.n_orig = 0;
+    memset(&hud.cp, 0, sizeof hud.cp * 4);   /* cp, mm, stock_cp, stock_mm */
+}
+
+static void hud_unstable(void)
+{
+    memset(stable_key, 0, sizeof stable_key);
+    stable_since = 0;
+}
+
+/* once per pass while the split is on and the gameplay view is shown */
+static void hud_frame(unsigned mgr0, unsigned mgr1)
 {
     unsigned ck = rd32(AD.cockpit_ptr), scp = ck ? rd32(ck + 0x28) : 0, smm = ck ? rd32(ck + 0x2C) : 0;
-    if (hud.cp || hud.mm) {
-        int stale = !in_group(COCKPIT_GROUP, hud.cp) || !in_group(COCKPIT_GROUP, hud.mm) || scp != hud.stock_cp || smm != hud.stock_mm;
-        if (stale) {   /* a load / checkpoint recreated the cockpit: forget the old set (the engine freed it with its group; nothing is called) and build a new one */
-            r1_log("split: cockpit recreated or second set gone (stock %08x/%08x, was %08x/%08x): rebuilding", scp, smm, hud.stock_cp, hud.stock_mm);
-            hud.n_orig = 0;
-            memset(&hud.cp, 0, sizeof hud.cp * 4);
-            hud.failed = 0;
+    unsigned key[6] = {scp, smm, mgr0, mgr1, unit_by_slot(0), unit_by_slot(1)};
+    DWORD now = GetTickCount();
+    int ok = 1;
+    for (int i = 0; i < 6; i++)
+        ok &= key[i] != 0;
+    if (!ok || memcmp(key, stable_key, sizeof key) != 0) {   /* the world changed: nothing of the old set may be touched any more */
+        if (hud.cp || hud.mm) {
+            if (in_group(COCKPIT_GROUP, hud.cp) || in_group(COCKPIT_GROUP, hud.mm))
+                hud_destroy("the world changed (cockpit, cameras or characters)");
+            else {
+                r1_log("split: second HUD set gone with its group (the engine freed it), forgotten");
+                hud_forget();
+            }
         }
+        memcpy(stable_key, key, sizeof key);
+        stable_since = now;
+        hud.failed = 0;
+        return;
     }
-    if (!hud.cp && !hud.failed) {
+    if (hud.cp || hud.mm) {
+        if (!in_group(COCKPIT_GROUP, hud.cp) || !in_group(COCKPIT_GROUP, hud.mm)) {
+            r1_log("split: second HUD set is not in the cockpit group any more, forgotten");
+            hud_forget();
+        }
+        return;
+    }
+    if (!hud.failed && now - stable_since >= hud_settle_ms) {
         static DWORD last_try;
-        DWORD now = GetTickCount();
-        if (now - last_try > 500) {
-            last_try = now;
-            hud_build();
+        if (now - last_try > 500 || last_try == 0) {   /* a build that could not start yet (stock set not running) is retried every half second */
+            if (!hud_build())
+                last_try = now ? now : 1;
+            else
+                last_try = 0;
         }
     }
 }
@@ -422,7 +476,7 @@ static void menu_leave(const char *why)
 
 /* a full-screen GUI that the engine draws in every viewport is running: managers 2 (game over), 3 (pause) have unit flags 0xC00 set while they run (live), manager 5
  * (item / map menu manager) while its bit 0x800 is set (static: its update only runs with 0x4800; unverified live) */
-static int gui_running(void)
+static int gui_running(void)   /* 1 = pause / game over (a load can follow), 2 = item / map menu (verified live: flags 0x4800 while open), 0 = none */
 {
     unsigned ck = rd32(AD.cockpit_ptr);
     for (unsigned k = 2; ck && k <= 3; k++) {
@@ -519,6 +573,10 @@ void split_frame(void)
             n_susp++;
             r1_log("split: whole view (%s)", gui ? "pause / game over / item menu" : "cutscene or other camera on viewport 0");
         }
+        if ((gui == 1 || (!gui && cutscene)) && (hud.cp || hud.mm))   /* the doors to a load: the second HUD set must not be alive when the engine tears the area down */
+            hud_destroy(gui == 1 ? "pause / game over screen opened" : "cutscene");
+        if (gui == 1 || (!gui && cutscene))
+            hud_unstable();
         wr8(v2 + 0x10, 0);
         wr8(v0 + 0x13, sv.mode0);
         wr8(v2 + 0x13, sv.mode);
@@ -557,7 +615,7 @@ void split_frame(void)
         wr32(mgr1 + 0x78, other);
     }
     if (hud_req)
-        hud_frame();
+        hud_frame(mgr0, mgr1);
     else if (hud.cp || hud.mm)
         hud_destroy("second HUD switched off");
 }
