@@ -2,3 +2,6 @@ native/build/
 *.pdb
 *.lib
 __pycache__/
+tests/build/
+*.exe
+test_lobby1.ini
