@@ -330,12 +330,14 @@ static int hud_build(void)
     alloc_wrap(0);
     if (!cp || !mm) {
         r1_log("split: second HUD set could not be allocated (cp %08x mm %08x)", cp, mm);
+        hud.failed = 1;
         return 0;
     }
     wr32(cp + 0xC, rd32(cp + 0xC) | 0x2000);
     wr32(mm + 0xC, rd32(mm + 0xC) | 0x2000);
     if (!vt_copy(cp, (void *)wrap_cp8, (void *)wrap_cp9, &orig_cp8, &orig_cp9, &vt_cp) || !vt_copy(mm, (void *)wrap_mm8, (void *)wrap_mm9, &orig_mm8, &orig_mm9, &vt_mm)) {
         r1_log("split: private vtable copy failed");
+        hud.failed = 1;
         return 0;
     }
     set_cp_mask(cp, 4);
@@ -572,6 +574,15 @@ int split_init(void)
 }
 
 void split_enable(int on) { want_on = on != 0; }
+
+/* Emergency stop from ANY thread (console word "splitkill": works when the game thread is stuck and the normal "split off" cannot run): the request is cleared and the viewport bytes
+ * are put back with plain writes; the HUD set, the roles and the own slot are cleaned up by the game thread's next pass if it runs again. */
+void split_emergency_off(void)
+{
+    want_on = 0;
+    restore_views();
+    testmode_pad_swap(0);
+}
 void split_set_layout(int layout) { layout_req = layout == SPLIT_TOP_BOTTOM ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE; }
 void split_set_hud(int on) { hud_req = on != 0; }
 int split_is_active(void) { return active && !suspended; }

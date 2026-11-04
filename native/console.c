@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "r1.h"
+#include "split.h"
 
 static unsigned long hex(const char *s) { return strtoul(s, NULL, 16); }
 
@@ -111,6 +112,11 @@ static void run(const char *cmd, char *out, int size)
     sscanf(cmd, "%31s %299[^\r\n]", name, arg);
     if (!strcmp(name, "L")) {   /* L <command>: run any console command on the game's logic thread */
         lt_post(arg, out, size);
+        return;
+    }
+    if (!strcmp(name, "splitkill")) {   /* emergency stop of the split screen: does not need the game thread */
+        split_emergency_off();
+        snprintf(out, size, "split screen request cleared, viewport bytes restored (from the console thread)");
         return;
     }
     if (probe_is_game_cmd(name)) {   /* these commands touch game state: always on the game thread */

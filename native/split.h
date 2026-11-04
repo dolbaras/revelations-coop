@@ -56,6 +56,7 @@ int split_init(void);                  /* once, from probe_install (game thread)
 void split_frame(void);                /* per logic pass, game thread (registered by split_init) */
 
 void split_enable(int on);             /* request the split screen on / off (off puts every byte back) */
+void split_emergency_off(void);      /* any thread (console "splitkill"): clears the request and restores the viewport bytes even when the game thread is stuck */
 void split_set_layout(int layout);     /* SPLIT_SIDE_BY_SIDE (default) or SPLIT_TOP_BOTTOM; applied at the next pass */
 void split_set_hud(int on);            /* second HUD set on / off (default on); off = both views show the stock HUD of the first human */
 void split_get_state(split_state_t *st);
