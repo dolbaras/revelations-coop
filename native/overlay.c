@@ -14,7 +14,7 @@ static float g_scale = 1.0f, g_ox = 0.0f, g_oy = 0.0f;
 static int g_bbw = 1920, g_bbh = 1080;
 static unsigned g_frames, g_fail_font, g_fail_tex;
 static int g_cls;
-static float g_hx = 260, g_hy = 980, g_hw = 1400, g_hh = 70;   /* hint strip, virtual 1920x1080 coordinates (console: menu hint x y w h) */
+static float g_hx = 260, g_hy = 1014, g_hw = 1400, g_hh = 54;   /* below the stock help line and the key legend (virtual y 914 / 980 on the Russian screen) */   /* hint strip, virtual 1920x1080 coordinates (console: menu hint x y w h) */
 void overlay_set_hint_rect(float x, float y, float w, float h)
 {
     if (w < 200) w = 200;
