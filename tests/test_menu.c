@@ -140,9 +140,7 @@ int main(void)
     char st[1500];
     status(st, sizeof st);
     if (!strstr(st, "test_menu_")) {   /* never write the settings of a test into the game's real config folder (this happened once: a stray rev1_coop.ini with armed=1) */
-        printf("ABORT: the settings path is not the temporary test file:
-%s
-", st);
+        printf("ABORT: the settings path is not the temporary test file: %s\n", st);
         return 2;
     }
     CHECK(strstr(st, "disabled"));
