@@ -25,7 +25,7 @@
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
 
-static capture_addr_t AD = {0x11E0388u, 0x1169394u, 0x1169108u, 0x1169398u, 0x11E00B8u, 0x88A470u, 0x6CCAB0u, 0x6C9C30u, 0x6C9C10u, 0x6C9800u, 0x87E1B0u};
+static capture_addr_t AD = {0x11E0388u, 0x1169394u, 0x1169108u, 0x1169398u, 0x11E00B8u, 0x88A470u, 0x6CCAB0u, 0x6C9C30u, 0x6C9C10u, 0x6C9800u, 0x87E1B0u, 0x116C3E4u};
 
 void capture_test_set_addrs(const capture_addr_t *a) { AD = *a; }
 
@@ -120,6 +120,7 @@ static struct {
 } roles[2];
 static volatile int own_req, own_on, camera_follow = 1, blocked, force_raid, cam_restore;
 static volatile unsigned own_slot;
+static volatile unsigned view_idx[2];           /* per character (unit slot): DAT_0116C3E4 value while its swapped sections run, 0 = leave alone (split screen) */
 static volatile int ext_req;                    /* another module (split.c) needs the own-slot hook installed */
 /* threads whose own-slot queries answer a scoped slot: the second HUD's update phases (a cockpit and a minimap manager may update on two worker threads at once) */
 #define SCOPE_MAX 8
@@ -286,7 +287,15 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
     note_thread();
     unsigned old = *(volatile unsigned *)(g + 0x870);
     *(volatile unsigned *)(g + 0x870) = (unsigned)c->pad;
+    /* split screen: the view this character's per-view units (action prompts, message boxes) are made for; sCamera viewport lookups by "the current view" see the same index */
+    unsigned vwant = AD.view_idx_ptr && (unsigned)c->role < 2 ? view_idx[c->role] : 0, vold = 0;
+    if (vwant) {
+        vold = *(volatile unsigned *)AD.view_idx_ptr;
+        *(volatile unsigned *)AD.view_idx_ptr = vwant;
+    }
     fn(unit);
+    if (vwant)
+        *(volatile unsigned *)AD.view_idx_ptr = vold;
     *(volatile unsigned *)(g + 0x870) = old;
     c->swaps++;
     if (locked)
@@ -766,6 +775,11 @@ void capture_set_camera_follow(int on) { camera_follow = on != 0; }
 int capture_busy(void) { return hooks_on || roles[0].en || roles[1].en || own_req || ext_req; }
 
 void capture_ext_request(int on) { ext_req = on != 0; }
+void capture_set_view_index(int unit_slot, unsigned view)
+{
+    if (unit_slot >= 0 && unit_slot < 2)
+        view_idx[unit_slot] = view;
+}
 int capture_hooks_ready(void) { return hooks_on && !blocked; }
 void capture_own_scope(int slot)
 {

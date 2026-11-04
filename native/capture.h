@@ -41,6 +41,7 @@ typedef struct {
     unsigned fn_v10;        /* 0x6C9C10 slot 10 */
     unsigned fn_think;      /* 0x6C9800 uCallThink phase (state machine tick) */
     unsigned fn_own;        /* 0x87E1B0 own slot (sCoopManager+0xF4 in {1,2} ? +0xF8 : 0) */
+    unsigned view_idx_ptr;  /* 0x116C3E4 DAT_0116C3E4 "view being created" (action icons, message boxes ... take their view mask from it; 0 = no such feature, harness) */
 } capture_addr_t;
 
 enum { CAP_NATIVE = R1_SRC_PAD, CAP_REMOTE = R1_SRC_REMOTE, CAP_SCRIPT = R1_SRC_SCRIPT };
@@ -97,6 +98,7 @@ void capture_cmd(const char *arg, char *out, int size);
 /* Services for split.c (the second view's HUD): the own-slot hook may be requested without any role; a SCOPE makes the own-slot query answer a given slot for the calling
  * thread only (the other threads keep the real answer; up to 8 threads at once), the scope is closed with slot -1. capture_own_effective() = the slot the engine answers right now (override, else the
  * game's own rule). Raid: the hook is removed with all others, a scope then does nothing. */
+void capture_set_view_index(int unit_slot, unsigned view);   /* while a character (and its weapons) runs a swapped section, DAT_0116C3E4 = view (0 = leave alone): per-view units it creates get that viewport */
 void capture_ext_request(int on);
 int capture_hooks_ready(void);
 void capture_own_scope(int slot);

@@ -120,6 +120,7 @@ static int in_group(unsigned group, unsigned unit)
 static volatile int want_on;              /* split_enable(1) */
 static volatile int layout_req = SPLIT_SIDE_BY_SIDE;
 static volatile int hud_req = 1;
+static volatile int view_req;             /* per-view units of the second human (action prompts, message boxes) are made for viewport 2: experimental, console "split view on" */
 static int active, blocked, suspended;
 static int have_saved;
 static struct {
@@ -536,6 +537,8 @@ static void teardown(const char *why)
     active = 0;
     suspended = 0;
     capture_ext_request(0);
+    capture_set_view_index(0, 0);
+    capture_set_view_index(1, 0);
 }
 
 void split_frame(void)
@@ -567,7 +570,12 @@ void split_frame(void)
     if (!active)
         r1_log("split: starting (%s, manager 0 %08x manager 1 %08x)", vertical ? "side by side" : "top/bottom", mgr0, mgr1);
     active = 1;
-    capture_ext_request(hud_req);
+    capture_ext_request(hud_req || view_req);
+    {
+        int own = capture_own_effective();
+        capture_set_view_index(own, 0);
+        capture_set_view_index(1 - own, view_req && !mx.on ? VP_SECOND : 0);
+    }
     menu_frame(gui);
     if (mx.on)
         gui = gui ? gui : 3;   /* the second human's menu is about to open: whole view from the first pass on (own slot flips, the cameras would swap sides) */
@@ -779,6 +787,10 @@ void split_cmd(const char *arg, char *out, int size)
     } else if (!strcmp(sub, "lay")) {
         split_set_layout(a1[0] == 'h' ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE);
         snprintf(out, (size_t)size, "layout %s", layout_req == SPLIT_SIDE_BY_SIDE ? "side by side" : "top/bottom");
+    } else if (!strcmp(sub, "view")) {   /* view on|off: DAT_0116C3E4 = 2 while the second human's character runs (his action prompts / message boxes are made for viewport 2) */
+        if (!strcmp(a1, "on") || !strcmp(a1, "off"))
+            view_req = !strcmp(a1, "on");
+        snprintf(out, (size_t)size, "per-view units of the second human: %s", view_req ? "viewport 2" : "stock (viewport 0)");
     } else if (!strcmp(sub, "menu")) {   /* menu 1|2 : force the second human's BACK / START exchange; menu off */
         if (!strcmp(a1, "off")) {
             if (mx.on)
@@ -799,6 +811,6 @@ void split_cmd(const char *arg, char *out, int size)
         wr8(vp_addr(r, i) + off, (unsigned)v);
         snprintf(out, (size_t)size, "vp%u %s = %d (the module's own pass may overwrite it while split is on)", i, a2, v);
     } else {
-        snprintf(out, (size_t)size, "split: status | on [v|h] | off | lay v|h | hud [on|off|rebuild] | menu <1=BACK|2=START|off> | probe | vp <i> <field> <v>");
+        snprintf(out, (size_t)size, "split: status | on [v|h] | off | lay v|h | hud [on|off|rebuild] | view [on|off] | menu <1=BACK|2=START|off> | probe | vp <i> <field> <v>");
     }
 }
