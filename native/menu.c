@@ -38,6 +38,9 @@
 #define GM_NODES 0xAB4              /* seven shortcut GUI nodes */
 #define GM_MSGS 0xAD4
 
+static unsigned g_vtable = GM_VTABLE, g_expect_orig = GM_VF8_ORIG;   /* the offline harness replaces them */
+void menu_test_set_addrs(unsigned vtable, unsigned expect_orig) { g_vtable = vtable, g_expect_orig = expect_orig; }
+
 static unsigned rd32(unsigned a)
 {
     unsigned v = 0;
@@ -398,7 +401,9 @@ void menu_install(void)
 {
     char v[16];
     if (g_installed) return;
-    InitializeCriticalSection(&g_lock);
+    g_disabled = 0;
+    static int lock_init;
+    if (!lock_init) InitializeCriticalSection(&g_lock), lock_init = 1;
     if (r1_env("REV1_MENU", v, sizeof v) && v[0] == '0') {
         r1_log("menu: disabled by REV1_MENU=0");
         g_disabled = 1;
@@ -413,13 +418,13 @@ void menu_install(void)
     int ini_found = l1_ini_load(g_ini_path, &g_set, &g_lang_override);
     l1_input_reset(&g_in);
     /* wrap the title menu's update: patch one slot of the class vtable (checked first) */
-    unsigned cur = rd32(GM_VTABLE + 4 * GM_VF8_SLOT);
-    if (cur != GM_VF8_ORIG) {
-        r1_log("menu: uGUI_GeneralMenu vtable slot 8 is %08x, expected %08x: not this build, the menu module stays off", cur, GM_VF8_ORIG);
+    unsigned cur = rd32(g_vtable + 4 * GM_VF8_SLOT);
+    if (cur != g_expect_orig) {
+        r1_log("menu: uGUI_GeneralMenu vtable slot 8 is %08x, expected %08x: not this build, the menu module stays off", cur, g_expect_orig);
         g_disabled = 1;
         return;
     }
-    void *fake = (void *)GM_VTABLE;
+    void *fake = (void *)g_vtable;
     void *old = r1_patch_vtable(&fake, GM_VF8_SLOT, (void *)hook_vf8);
     if (!old) {
         r1_log("menu: cannot patch the vtable slot");

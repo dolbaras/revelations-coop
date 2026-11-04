@@ -131,6 +131,7 @@ void menu_install(void);                    /* once, from probe_install (game th
 void menu_present(void *d3d9_device);       /* Present hook (render thread): draws the scene the game thread published */
 void menu_before_reset(void);
 void menu_cmd(const char *arg, char *out, int size);   /* console "menu ..." (game thread) */
+void menu_test_set_addrs(unsigned vtable, unsigned expect_orig);   /* offline harness: another vtable / original update function */
 
 /* mute.c: REV1_MUTE=1 keeps this process's audio sessions muted */
 void mute_install(void);
