@@ -458,13 +458,13 @@ void menu_install(void)
         return;
     }
     void *fake = (void *)g_vtable;
+    orig_vf8 = (vf8_t)cur;   /* set BEFORE the patch: the menu's update may run on another thread right after it */
     void *old = r1_patch_vtable(&fake, GM_VF8_SLOT, (void *)hook_vf8);
     if (!old) {
         r1_log("menu: cannot patch the vtable slot");
         g_disabled = 1;
         return;
     }
-    orig_vf8 = (vf8_t)old;
     lt_add_frame_cb(menu_frame);
     g_installed = 1;
     r1_log("menu: ready (settings file %s%s; armed %d role %s layout %s pads %s)", g_ini_path, ini_found ? "" : " - not there yet", g_set.armed, g_set.role == L1_PARTNER ? "partner" : "lead",
