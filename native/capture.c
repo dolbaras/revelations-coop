@@ -121,8 +121,9 @@ static struct {
 static volatile int own_req, own_on, camera_follow = 1, blocked, force_raid, cam_restore;
 static volatile unsigned own_slot;
 static volatile int ext_req;                    /* another module (split.c) needs the own-slot hook installed */
-static volatile DWORD own_scope_tid;            /* thread whose own-slot queries answer own_scope_slot (0 = none): the second HUD's update phases */
-static volatile int own_scope_slot;
+/* threads whose own-slot queries answer a scoped slot: the second HUD's update phases (a cockpit and a minimap manager may update on two worker threads at once) */
+#define SCOPE_MAX 8
+static volatile LONG scope_tid[SCOPE_MAX], scope_slot[SCOPE_MAX], scope_n;
 static volatile int remote_timeout_ms;
 static unsigned captures_total;
 
@@ -354,9 +355,12 @@ static void TC hook_padData(void *self, unsigned slot)
  * field is written, so the Raid state of the game stays as it was */
 static unsigned FC hook_own(unsigned self)
 {
-    DWORD st = own_scope_tid;
-    if (st && st == GetCurrentThreadId() && !blocked)   /* scoped answer for ONE thread: the workers keep the real own slot */
-        return (unsigned)own_scope_slot;
+    if (scope_n && !blocked) {   /* scoped answer for the registered threads only: every other thread keeps the real own slot */
+        LONG me = (LONG)GetCurrentThreadId();
+        for (int i = 0; i < SCOPE_MAX; i++)
+            if (scope_tid[i] == me)
+                return (unsigned)scope_slot[i];
+    }
     if (own_on && !blocked)
         return own_slot;
     return orig_own(self);
@@ -765,12 +769,26 @@ void capture_ext_request(int on) { ext_req = on != 0; }
 int capture_hooks_ready(void) { return hooks_on && !blocked; }
 void capture_own_scope(int slot)
 {
-    if (slot < 0 || slot > 1 || !hooks_on) {
-        own_scope_tid = 0;
+    LONG me = (LONG)GetCurrentThreadId();
+    if (slot < 0 || slot > 1 || !hooks_on) {   /* close this thread's scope */
+        for (int i = 0; i < SCOPE_MAX; i++)
+            if (scope_tid[i] == me) {
+                scope_tid[i] = 0;
+                InterlockedDecrement(&scope_n);
+            }
         return;
     }
-    own_scope_slot = slot;
-    own_scope_tid = GetCurrentThreadId();
+    for (int i = 0; i < SCOPE_MAX; i++)
+        if (scope_tid[i] == me) {
+            scope_slot[i] = slot;
+            return;
+        }
+    for (int i = 0; i < SCOPE_MAX; i++)
+        if (InterlockedCompareExchange(&scope_tid[i], me, 0) == 0) {
+            scope_slot[i] = slot;
+            InterlockedIncrement(&scope_n);
+            return;
+        }
 }
 int capture_own_effective(void)
 {
