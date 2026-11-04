@@ -87,6 +87,7 @@ static ov_scene g_drawn;
 static int g_draws;
 void overlay_draw(void *dev, const ov_scene *sc) { (void)dev; g_drawn = *sc; g_draws++; }
 void overlay_release(void) {}
+int overlay_row_at_client(int px, int py, int cw, int ch, int *vx, int *vy) { (void)px, (void)py, (void)cw, (void)ch; if (vx) *vx = 0; if (vy) *vy = 0; return -1; }
 void overlay_set_hint_rect(float x, float y, float w, float h) { (void)x; (void)y; (void)w; (void)h; }
 void overlay_stats(char *out, int size) { snprintf(out, (size_t)size, "overlay stub"); }
 

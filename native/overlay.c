@@ -186,6 +186,11 @@ static void draw_lobby(const ov_scene *sc)
     text(v->note, 160, 890, 1600, 60, 22, 0, 0xFFC9A66B, DT_LEFT, 1);
     text(v->note2, 160, 952, 1600, 56, 22, 0, 0xFF8C96A0, DT_LEFT, 1);
     text(v->hint, 160, 1016, 1640, 40, 22, 0, 0xFF7E8890, DT_LEFT, 0);
+    if (sc->cursor_on) {   /* a small pointer while the mouse is in use */
+        float cx = (float)sc->cursor_x, cy = (float)sc->cursor_y;
+        rect_px(cx - 1, cy - 12, 3, 25, 0xFFFFFFFF), rect_px(cx - 12, cy - 1, 25, 3, 0xFFFFFFFF);
+        rect_px(cx, cy - 11, 1, 23, 0xFFC0392B), rect_px(cx - 11, cy, 23, 1, 0xFFC0392B);
+    }
 }
 
 /* the hint strip: the part of the virtual layout it covers is returned in pixel coordinates */
@@ -267,6 +272,7 @@ static void gdi_frame(IDirect3DDevice9 *dev, const ov_scene *sc, UINT W, UINT H,
     if (sc->kind == OV_LOBBY) {
         const unsigned char *b = (const unsigned char *)&sc->v;
         for (size_t i = 0; i < sizeof sc->v; i++) sig = (sig ^ b[i]) * 16777619u;
+        sig = (sig ^ (unsigned)sc->cursor_on ^ ((unsigned)sc->cursor_x << 3) ^ ((unsigned)sc->cursor_y << 17)) * 16777619u;
     } else if (sc->kind == OV_HINT)
         for (const char *p = sc->hint; *p; p++) sig = (sig ^ (unsigned char)*p) * 16777619u;
     sig = (sig ^ (unsigned)sc->kind) * 16777619u, sig = (sig ^ (unsigned)sc->lang) * 16777619u, sig = (sig ^ (unsigned)W) * 16777619u, sig = (sig ^ (unsigned)H) * 16777619u;

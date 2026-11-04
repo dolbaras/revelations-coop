@@ -254,6 +254,30 @@ static void read_raw(l1_raw *raw, int *pads, int want_pads)
     *pads = n;
 }
 
+/* mouse: hover and click on the rows of the lobby (only while the game window is in front; the pointer is drawn by the overlay while the mouse moves) */
+static int m_hover = -2, m_prev_btn, m_vx, m_vy;
+static unsigned m_last_move;
+static int mouse_events(l1_event *ev, int max, unsigned now)
+{
+    int n = 0;
+    if (!in_foreground()) return 0;
+    HWND w = testmode_window();
+    POINT pt;
+    RECT rc;
+    if (!GetCursorPos(&pt) || !ScreenToClient(w, &pt) || !GetClientRect(w, &rc)) return 0;
+    static POINT last_pt = {-1, -1};
+    int row = overlay_row_at_client(pt.x, pt.y, rc.right, rc.bottom, &m_vx, &m_vy);
+    if (pt.x != last_pt.x || pt.y != last_pt.y) m_last_move = now, last_pt = pt;
+    int btn = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    if (row != m_hover && now - m_last_move < 200) {
+        m_hover = row;
+        if (row >= 0 && n < max) ev[n].kind = L1E_HOVER, ev[n].row = row, n++;
+    }
+    if (btn && !m_prev_btn && row >= 0 && n < max) ev[n].kind = L1E_CLICK, ev[n].row = row, n++;
+    m_prev_btn = btn;
+    return n;
+}
+
 /* ---------------------------------------------------------------- scene for the overlay */
 static void publish(const ov_scene *sc)
 {
@@ -357,8 +381,14 @@ static void menu_frame(void)
         if (!seen && now - g_gm_tick > 1500 && now - g_opened_ms > 1500) {   /* the title menu is gone (a test opened the lobby elsewhere is left alone for a while) */
             if (g_gm_this) close_lobby("title menu gone");
         }
+        l1_event mev[4];
+        int mn = mouse_events(mev, 4, now);
         for (int i = 0; i < n; i++) {
             l1_event_in(g_lobby, &ev[i]);
+            g_events++;
+        }
+        for (int i = 0; i < mn; i++) {
+            l1_event_in(g_lobby, &mev[i]);
             g_events++;
         }
         l1_env env;
@@ -375,6 +405,8 @@ static void menu_frame(void)
         sc.kind = OV_LOBBY;
         sc.lang = g_lang;
         l1_view_get(g_lobby, &sc.v);
+        sc.cursor_on = now - m_last_move < 3000 && in_foreground();
+        sc.cursor_x = m_vx, sc.cursor_y = m_vy;
         publish(&sc);
     } else if (idle) {
         static ov_scene sc;

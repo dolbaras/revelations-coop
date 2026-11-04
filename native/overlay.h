@@ -18,6 +18,7 @@ typedef struct {
     char hint[300];      /* OV_HINT: one line at the bottom edge */
     int lang;            /* 0..12, picks the font face */
     unsigned tick_ms;    /* animation clock */
+    int cursor_on, cursor_x, cursor_y;   /* mouse pointer in virtual 1920x1080 coordinates (drawn while the mouse is in use: the game hides its own cursor on some screens) */
 } ov_scene;
 
 void overlay_draw(void *d3d9_device, const ov_scene *sc);   /* inside the Present hook */
