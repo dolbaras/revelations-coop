@@ -578,6 +578,9 @@ void split_frame(void)
     int vertical = layout_req == SPLIT_SIDE_BY_SIDE;   /* the engine's vertical divider: left / right halves */
     int gui = gui_running();
     int cutscene = rd32(v0 + 4) != mgr0;
+    /* solo part of the story (or the partner is gone): the second human has no character, his view would freeze on the last pose: whole view for the first human meanwhile */
+    unsigned other_unit = unit_by_slot((unsigned)(1 - capture_own_effective()));
+    int solo = !other_unit;
     if (!active) {
         r1_log("split: starting (%s, manager 0 %08x manager 1 %08x)", vertical ? "side by side" : "top/bottom", mgr0, mgr1);
         capture_state_t cs;
@@ -600,11 +603,11 @@ void split_frame(void)
         gui = gui ? gui : 3;   /* the second human's menu is about to open: whole view from the first pass on (own slot flips, the cameras would swap sides) */
     /* The demo scheduler (cutscenes) and the title put their own camera object on viewport 0 (0x891E07 keeps the old one and restores it afterwards); the pause menu, the
      * game over screen and the item menu are GUI units the engine draws in EVERY viewport (squeezed into both halves). Whole view meanwhile; the split comes back by itself. */
-    if (gui || cutscene) {
+    if (gui || cutscene || solo) {
         if (!suspended) {
-            suspended = gui ? SPLIT_SUSP_GUI : SPLIT_SUSP_CAMERA;
+            suspended = gui ? SPLIT_SUSP_GUI : cutscene ? SPLIT_SUSP_CAMERA : SPLIT_SUSP_SOLO;
             n_susp++;
-            r1_log("split: whole view (%s)", gui ? "pause / game over / item menu" : "cutscene or other camera on viewport 0");
+            r1_log("split: whole view (%s)", gui ? "pause / game over / item menu" : cutscene ? "cutscene or other camera on viewport 0" : "the other human has no character (solo part)");
         }
         if ((gui == 1 || (!gui && cutscene)) && (hud.cp || hud.mm))   /* the doors to a load: the second HUD set must not be alive when the engine tears the area down */
             hud_destroy(gui == 1 ? "pause / game over screen opened" : "cutscene");
@@ -642,10 +645,9 @@ void split_frame(void)
     if ((fl & 0xC00) != 0xC00)
         wr32(mgr1 + 0xC, fl | 0xC00);
     /* manager 1 follows the human that is NOT the own slot (the player code talks to manager 1 for that character) */
-    unsigned other = unit_by_slot((unsigned)(1 - capture_own_effective()));
-    if (other && rd32(mgr1 + 0x74) != other) {
-        wr32(mgr1 + 0x74, other);
-        wr32(mgr1 + 0x78, other);
+    if (other_unit && rd32(mgr1 + 0x74) != other_unit) {
+        wr32(mgr1 + 0x74, other_unit);
+        wr32(mgr1 + 0x78, other_unit);
     }
     if (hud_req)
         hud_frame(mgr0, mgr1);
@@ -697,7 +699,7 @@ void split_status_text(char *out, int size)
     split_state_t s;
     split_get_state(&s);
     snprintf(out, (size_t)size, "split %s%s%s: layout %s, second HUD %s (cockpit %08x minimap %08x, %u builds, %u blocks zero-filled), menu exchange %s (%u so far); passes %u, re-asserted %u, whole-view episodes %u; vp2 camera %08x",
-             want_on ? "ON" : "off", blocked == SPLIT_BLOCK_RAID ? " (blocked: Raid)" : "", suspended ? (suspended == SPLIT_SUSP_GUI ? " (whole view: menu)" : " (whole view: cutscene)") : "",
+             want_on ? "ON" : "off", blocked == SPLIT_BLOCK_RAID ? " (blocked: Raid)" : "", suspended ? (suspended == SPLIT_SUSP_GUI ? " (whole view: menu)" : suspended == SPLIT_SUSP_SOLO ? " (whole view: no second character)" : " (whole view: cutscene)") : "",
              layout_req == SPLIT_SIDE_BY_SIDE ? "side by side" : "top/bottom", hud_req ? (hud.cp ? "up" : "waiting") : "off", hud.cp, hud.mm, n_builds, n_zeroed, mx.on ? "OPEN" : "idle", n_mx, n_pass, n_reasserted,
              n_susp, last_cam2);
 }

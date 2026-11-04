@@ -39,7 +39,7 @@ typedef struct {
 
 enum { SPLIT_SIDE_BY_SIDE = 0, SPLIT_TOP_BOTTOM = 1 };
 enum { SPLIT_BLOCK_NONE = 0, SPLIT_BLOCK_RAID = 1 };
-enum { SPLIT_SUSP_NONE = 0, SPLIT_SUSP_CAMERA = 1 /* cutscene / title camera on viewport 0 */, SPLIT_SUSP_GUI = 2 /* pause, game over, item menu */ };
+enum { SPLIT_SUSP_NONE = 0, SPLIT_SUSP_CAMERA = 1 /* cutscene / title camera on viewport 0 */, SPLIT_SUSP_GUI = 2 /* pause, game over, item menu */, SPLIT_SUSP_SOLO = 3 /* the other human's character does not exist (a solo part of the story) */ };
 
 typedef struct {
     int requested;         /* split_enable(1) was called */
