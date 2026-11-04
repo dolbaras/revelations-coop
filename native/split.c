@@ -578,8 +578,16 @@ void split_frame(void)
     int vertical = layout_req == SPLIT_SIDE_BY_SIDE;   /* the engine's vertical divider: left / right halves */
     int gui = gui_running();
     int cutscene = rd32(v0 + 4) != mgr0;
-    if (!active)
+    if (!active) {
         r1_log("split: starting (%s, manager 0 %08x manager 1 %08x)", vertical ? "side by side" : "top/bottom", mgr0, mgr1);
+        capture_state_t cs;
+        capture_get_state(&cs);
+        if (!cs.role[0].enabled && !cs.role[1].enabled) {   /* nobody bound the two humans (console use): the default local layout, first character on pad 0, second on pad 1 */
+            capture_bind(0, 0);
+            capture_bind(1, 1);
+            r1_log("split: no capture roles were bound: character 0 -> pad 0, character 1 -> pad 1");
+        }
+    }
     active = 1;
     capture_ext_request(hud_req || view_req);
     {
@@ -652,6 +660,12 @@ int split_init(void)
         return 1;
     inited = 1;
     lt_add_frame_cb(split_frame);
+    char ev[16];
+    if (r1_env("REV1_SPLIT", ev, sizeof ev) && ev[0] && ev[0] != '0') {   /* REV1_SPLIT=v|h|1: start with the split screen requested (tests, owner demos with two pads) */
+        layout_req = ev[0] == 'h' ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE;
+        want_on = 1;
+        r1_log("split: REV1_SPLIT=%s: split screen requested from the start (%s)", ev, layout_req == SPLIT_TOP_BOTTOM ? "top/bottom" : "side by side");
+    }
     r1_log("split: module ready (nothing is touched until split_enable(1) / console \"split on\")");
     return 1;
 }
