@@ -435,15 +435,17 @@ static void hud_frame(unsigned mgr0, unsigned mgr1)
 }
 
 /* ====================================================================== menus of the second human ====================================================================== */
-/* The item / map / pause menus are GUI units that read pad slot 0 and the own-slot human. For the second human they run in an exchange: pads 0/1 swapped at the XInput
- * level, own slot 1, roles flipped (his character reads pad slot 0, the first character pad slot 1), until the menu GUI has closed. */
+/* The item / map / pause menus are GUI units that read pad slot 0 and the own-slot human ("the local human"). The human on pad slot 0 is the local human of the split (left /
+ * top view, his character = the own slot); for the other human (pad slot 1) the menus run in an EXCHANGE: pads 0/1 swapped at the XInput level, the capture roles' pad slots
+ * swapped, the own slot = his character, until the menu GUI has closed; then all three are put back as they were (any lobby layout: Jill left, or Parker left with own slot 1). */
 static struct {
     int on;
     unsigned prev_btn;
     DWORD t_enter;
     int seen_gui, quiet;
     int kind;   /* 1 BACK, 2 START */
-    int enabled_once;
+    int old_pad[2];            /* capture roles' pad slots before the exchange, by unit slot */
+    int old_own_on, old_own;   /* own-slot override before the exchange */
 } mx;
 static unsigned n_mx;
 
@@ -451,24 +453,28 @@ static void menu_enter(int kind)
 {
     capture_state_t st;
     capture_get_state(&st);
-    if (!st.role[0].enabled || !st.role[1].enabled || st.role[0].pad != 0 || st.role[1].pad != 1 || st.own_on) {
-        r1_log("split: second human's menu requested but the roles are not the local split layout (0->pad0, 1->pad1, own default): left alone");
+    int p0 = st.role[0].pad, p1 = st.role[1].pad;
+    if (!st.role[0].enabled || !st.role[1].enabled || p0 == p1 || p0 < 0 || p0 > 1 || p1 < 0 || p1 > 1) {
+        r1_log("split: second human's menu requested but the two characters are not bound to the two pad slots: left alone");
         return;
     }
+    int other_unit = p0 == 1 ? 0 : 1;   /* the character played on pad slot 1 */
+    mx.old_pad[0] = p0, mx.old_pad[1] = p1;
+    mx.old_own_on = st.own_on, mx.old_own = (int)st.own_slot;
     testmode_pad_swap(1);
-    capture_bind(0, 1);
-    capture_bind(1, 0);
-    capture_set_own(1);
+    capture_bind(0, 1 - p0);
+    capture_bind(1, 1 - p1);
+    capture_set_own(other_unit);
     mx.on = 1, mx.kind = kind, mx.t_enter = GetTickCount(), mx.seen_gui = 0, mx.quiet = 0;
     n_mx++;
-    r1_log("split: second human opens his %s: pads exchanged, own slot 1, roles flipped", kind == 1 ? "item menu (BACK)" : "pause menu (START)");
+    r1_log("split: second human opens his %s: pads exchanged, own slot %d, roles flipped", kind == 1 ? "item menu (BACK)" : "pause menu (START)", other_unit);
 }
 
 static void menu_leave(const char *why)
 {
-    capture_set_own(-1);
-    capture_bind(0, 0);
-    capture_bind(1, 1);
+    capture_set_own(mx.old_own_on ? mx.old_own : -1);
+    capture_bind(0, mx.old_pad[0]);
+    capture_bind(1, mx.old_pad[1]);
     testmode_pad_swap(0);
     mx.on = 0;
     r1_log("split: second human's menu over (%s): pads, own slot and roles back to the split layout", why);
