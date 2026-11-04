@@ -14,6 +14,13 @@ static float g_scale = 1.0f, g_ox = 0.0f, g_oy = 0.0f;
 static int g_bbw = 1920, g_bbh = 1080;
 static unsigned g_frames, g_fail_font, g_fail_tex;
 static int g_cls;
+static float g_hx = 260, g_hy = 980, g_hw = 1400, g_hh = 70;   /* hint strip, virtual 1920x1080 coordinates (console: menu hint x y w h) */
+void overlay_set_hint_rect(float x, float y, float w, float h)
+{
+    if (w < 200) w = 200;
+    if (h < 30) h = 30;
+    g_hx = x, g_hy = y, g_hw = w, g_hh = h;
+}
 
 static struct { int x, y, w, h; } g_hit[L1_ROWS];
 static int g_hit_n;
@@ -184,7 +191,7 @@ static void draw_lobby(const ov_scene *sc)
 /* the hint strip: the part of the virtual layout it covers is returned in pixel coordinates */
 static void hint_strip_rect(RECT *r)
 {
-    float x = 260, y = 980, w = 1400, h = 70;
+    float x = g_hx, y = g_hy, w = g_hw, h = g_hh;
     r->left = (LONG)(g_ox + x * g_scale), r->top = (LONG)(g_oy + y * g_scale), r->right = (LONG)(g_ox + (x + w) * g_scale + 0.5f), r->bottom = (LONG)(g_oy + (y + h) * g_scale + 0.5f);
     if (r->left < 0) r->left = 0;
     if (r->top < 0) r->top = 0;
@@ -194,7 +201,7 @@ static void hint_strip_rect(RECT *r)
 
 static void draw_hint(const ov_scene *sc)
 {
-    float x = 260, y = 980, w = 1400, h = 70;
+    float x = g_hx, y = g_hy, w = g_hw, h = g_hh;
     rect_px(x, y, w, h, 0xFF0C0F13);
     frame_px(x, y, w, h, 2, 0xFF3A424A);
     rect_px(x, y, 6, h, COL_ACCENT);

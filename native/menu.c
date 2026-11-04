@@ -533,6 +533,13 @@ void menu_cmd(const char *arg, char *out, int size)
     } else if (!strcmp(sub, "type")) {
         g_type_filter = atoi(rest);
         snprintf(out, (size_t)size, "the hint and F6 work on title menu type %d (-1 = any page)", g_type_filter);
+    } else if (!strcmp(sub, "hint")) {   /* menu hint x y w h: where the hint strip is drawn (virtual 1920x1080), to keep clear of the stock menu's own help line */
+        float x, y, w, h;
+        if (sscanf(rest, "%f %f %f %f", &x, &y, &w, &h) == 4) {
+            overlay_set_hint_rect(x, y, w, h);
+            snprintf(out, (size_t)size, "hint strip at %.0f,%.0f size %.0fx%.0f", x, y, w, h);
+        } else
+            snprintf(out, (size_t)size, "usage: menu hint <x> <y> <w> <h> (virtual 1920x1080)");
     } else if (!strcmp(sub, "gm")) {   /* dump of the title menu object for the live research of the native row (stage B) */
         unsigned s = g_gm_this;
         if (!s) {
@@ -552,5 +559,5 @@ void menu_cmd(const char *arg, char *out, int size)
             o += snprintf(out + o, (size_t)(size - o), "%02x ", b);
         }
     } else
-        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | gm");
+        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | hint x y w h | gm");
 }

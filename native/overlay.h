@@ -21,6 +21,7 @@ typedef struct {
 } ov_scene;
 
 void overlay_draw(void *d3d9_device, const ov_scene *sc);   /* inside the Present hook */
+void overlay_set_hint_rect(float x, float y, float w, float h);   /* where the hint strip sits (virtual coordinates) */
 void overlay_release(void);                                  /* before IDirect3DDevice9::Reset (and at shutdown) */
 int overlay_row_at_client(int px, int py, int client_w, int client_h, int *vx, int *vy);   /* row of the last drawn lobby under a client pixel, -1 none */
 unsigned overlay_frames(void);                               /* frames copied so far */
