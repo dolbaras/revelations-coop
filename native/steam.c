@@ -30,6 +30,7 @@ static volatile LONG rc_calls, rc_slow, rc_max_ms;
 static volatile LONG rc_total_ms;
 static DWORD t_start;
 static int log_stats;
+static int ach_block;   /* REV1_ACHBLOCK=1 (test runs): SetAchievement / SetStat / StoreStats are logged and NOT passed to Steam: no real achievement or stat is ever written by a test */
 
 static double now_ms(void)
 {
@@ -124,6 +125,7 @@ GETSTAT(2)
     { \
         const void *ret = __builtin_return_address(0); \
         float f; memcpy(&f, &v, 4); \
+        if (ach_block) { r1_log("ach: SetStat[%d] BLOCKED (REV1_ACHBLOCK)", N); return 1; } \
         int r = ((int (THISCALL *)(void *, const char *, unsigned))stat_orig[N])(self, name, v); \
         r1_log("ach: SetStat[%d](\"%s\", int=%d float=%g) -> %d (caller %s, +%lu ms)", N, name ? name : "(null)", (int)v, (double)f, r & 0xff, caller_str(ret, N), GetTickCount() - t_start); \
         return r; \
@@ -152,6 +154,10 @@ static int THISCALL s_GetAchievement(void *self, const char *name, unsigned char
 static int THISCALL s_SetAchievement(void *self, const char *name)
 {
     const void *ret = __builtin_return_address(0);
+    if (ach_block) {
+        r1_log("ach: SetAchievement(\"%s\") BLOCKED (REV1_ACHBLOCK), not passed to Steam (caller %s)", name ? name : "(null)", caller_str(ret, 7));
+        return 1;
+    }
     int r = ((int (THISCALL *)(void *, const char *))stat_orig[7])(self, name);
     r1_log("ach: SetAchievement(\"%s\") -> %d (caller %s, +%lu ms)", name ? name : "(null)", r & 0xff, caller_str(ret, 7), GetTickCount() - t_start);
     return r;
@@ -180,6 +186,10 @@ static int THISCALL s_GetAchievementAndUnlockTime(void *self, const char *name, 
 static int THISCALL s_StoreStats(void *self)
 {
     const void *ret = __builtin_return_address(0);
+    if (ach_block) {
+        r1_log("ach: StoreStats() BLOCKED (REV1_ACHBLOCK) (caller %s)", caller_str(ret, 10));
+        return 1;
+    }
     int r = ((int (THISCALL *)(void *))stat_orig[10])(self);
     r1_log("ach: StoreStats() -> %d (caller %s, +%lu ms)", r & 0xff, caller_str(ret, 10), GetTickCount() - t_start);
     return r;
@@ -254,6 +264,9 @@ void steam_install(void)
     char v[8];
     t_start = GetTickCount();
     log_stats = !(r1_env("REV1_NOACH", v, sizeof v) && v[0] == '1');
+    ach_block = r1_env("REV1_ACHBLOCK", v, sizeof v) && v[0] == '1';
+    if (ach_block)
+        log_stats = 1;
     real_Init = (SteamAPI_Init_t)r1_patch_iat("steam_api.dll", "SteamAPI_Init", (void *)hook_Init);
     real_RunCallbacks = (SteamAPI_RunCallbacks_t)r1_patch_iat("steam_api.dll", "SteamAPI_RunCallbacks", (void *)hook_RunCallbacks);
     real_ContextInit = (ContextInit_t)r1_patch_iat("steam_api.dll", "SteamInternal_ContextInit", (void *)hook_ContextInit);
