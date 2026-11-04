@@ -40,4 +40,20 @@ typedef struct {
     unsigned seq;            /* number of records received */
 } r1_input_src_t;
 
+/* Either human may answer a full-screen question (game over: "Continue?", the pause menu of the first human): the record of the second pad is merged into the first pad's
+ * record while such a screen runs (testmode_pad_merge, split.c): buttons OR-ed, triggers = the larger, each stick = the one with the larger deflection. */
+static inline void r1_input_merge(r1_input_t *dst, const r1_input_t *src)
+{
+    int dl = dst->lx * dst->lx + dst->ly * dst->ly, sl = src->lx * src->lx + src->ly * src->ly;
+    int dr = dst->rx * dst->rx + dst->ry * dst->ry, sr = src->rx * src->rx + src->ry * src->ry;
+    dst->buttons |= src->buttons;
+    if (src->lt > dst->lt)
+        dst->lt = src->lt;
+    if (src->rt > dst->rt)
+        dst->rt = src->rt;
+    if (sl > dl)
+        dst->lx = src->lx, dst->ly = src->ly;
+    if (sr > dr)
+        dst->rx = src->rx, dst->ry = src->ry;
+}
 #endif

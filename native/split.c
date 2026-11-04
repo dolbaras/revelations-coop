@@ -538,6 +538,7 @@ static void teardown(const char *why)
 {
     if (mx.on)
         menu_leave(why);
+    testmode_pad_merge(0);
     hud_destroy(why);
     restore_views();
     if (active)
@@ -577,6 +578,7 @@ void split_frame(void)
     unsigned v2 = vp_addr(r, VP_SECOND), v0 = vp_addr(r, 0);
     int vertical = layout_req == SPLIT_SIDE_BY_SIDE;   /* the engine's vertical divider: left / right halves */
     int gui = gui_running();
+    testmode_pad_merge(gui == 1 && !mx.on);   /* a game over / pause screen that nobody exchanged the pads for: either human can answer (stage 6c live: the second pad did nothing) */
     int cutscene = rd32(v0 + 4) != mgr0;
     /* solo part of the story (or the partner is gone): the second human has no character, his view would freeze on the last pose: whole view for the first human meanwhile */
     unsigned other_unit = unit_by_slot((unsigned)(1 - capture_own_effective()));

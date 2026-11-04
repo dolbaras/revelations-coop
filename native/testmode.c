@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <xinput.h>
+#include "coop_input.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -458,6 +459,8 @@ void testmode_pad_swap(int on) { InterlockedExchange(&pad_swap, on != 0); }
 int testmode_pad_swapped(void) { return pad_swap != 0; }
 void testmode_pad_swap_base(int on) { InterlockedExchange(&pad_swap_base, on != 0); }
 int testmode_pad_swap_base_get(void) { return pad_swap_base != 0; }
+static volatile LONG pad_merge;
+void testmode_pad_merge(int on) { InterlockedExchange(&pad_merge, on != 0); }
 
 static DWORD xinput_inner(DWORD i, XINPUT_STATE *st)
 {
@@ -516,6 +519,12 @@ static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
     DWORD ret_addr = (DWORD)__builtin_return_address(0);
     InterlockedIncrement(&xinput_calls);
     DWORD fr = xinput_inner(i, st);
+    if (pad_merge && i == 0 && st && fr == ERROR_SUCCESS) {   /* game over / pause screen: the other human's pad answers too */
+        XINPUT_STATE o;
+        memset(&o, 0, sizeof o);
+        if (xinput_inner(1, &o) == ERROR_SUCCESS)
+            r1_input_merge((r1_input_t *)&st->Gamepad, (const r1_input_t *)&o.Gamepad);
+    }
     xinput_note(i, ret_addr, fr == ERROR_SUCCESS);
     if (i < 4 && st && fr == ERROR_SUCCESS) {   /* what the game really gets (console `pads`): last state per user and how often a button was down */
         xlast[i].buttons = st->Gamepad.wButtons;

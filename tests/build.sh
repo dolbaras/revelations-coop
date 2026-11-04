@@ -6,3 +6,5 @@ ZIG="${ZIG:-../../../../tools/zig/zig-x86_64-windows-0.16.0/zig.exe}"
 mkdir -p build
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_lobby1.exe test_lobby1.c ../native/lobby1.c ../native/lobby1_text.c ../native/lobby1_input.c ../native/gmdtext.c
 ./build/test_lobby1.exe
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_padmerge.exe test_padmerge.c
+./build/test_padmerge.exe
