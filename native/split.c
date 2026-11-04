@@ -92,6 +92,14 @@ static unsigned unit_by_slot(unsigned slot)
     return 0;
 }
 
+/* a live camera manager: class uCameraManage and a unit state of 1 / 2 (a freed or zeroed object after the episode ended / at the title is neither) */
+static int is_cam_mgr(unsigned m)
+{
+    char cn[96];
+    unsigned st = rd32(m + 0xC) & 7;
+    return m > 0x10000 && (st == 1 || st == 2) && classes_object_name(m, cn, sizeof cn) && !strcmp(cn, "uCameraManage");
+}
+
 /* campaign only: the Raid (game mode != 0 or sCoopManager+0xF4 in {1,2}) is never touched */
 static int raid_active(void)
 {
@@ -560,8 +568,11 @@ void split_frame(void)
         return;
     }
     unsigned mgr0 = rd32(r + 0xCE0), mgr1 = rd32(r + 0xCE4);
-    if (!mgr0 || !mgr1)
-        return;   /* no episode loaded yet */
+    if (!mgr0 || !mgr1 || !is_cam_mgr(mgr0) || !is_cam_mgr(mgr1)) {   /* no episode loaded (yet / any more): the split waits, nothing of it may stay switched on */
+        if (active || have_saved || hud.cp || mx.on)
+            teardown("no gameplay cameras (title / loading)");
+        return;
+    }
     remember(r);
     unsigned v2 = vp_addr(r, VP_SECOND), v0 = vp_addr(r, 0);
     int vertical = layout_req == SPLIT_SIDE_BY_SIDE;   /* the engine's vertical divider: left / right halves */
