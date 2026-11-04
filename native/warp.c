@@ -1,13 +1,19 @@
 /*
  * warp.c - developer tool: start the campaign at ANOTHER section through the stock Continue path (hardware tests of enemies, doors, herbs, other character
- * pairs without playing through the story). Not part of the player's game: nothing happens unless the console command `warp` is used.
+ * pairs without playing through the story). Not part of the player's game: nothing is patched unless the console command `warp <id>` is used.
  *
- *   warp <hex scene id>   e.g. 91020100 = episode 2 section 1; the next Continue (Campaign -> Continue) starts that section instead of the saved one
+ *   warp <hex id>   92020100 = the start of episode 2 section 1 (Continue asks for the area class 0x92EESS00 of the saved checkpoint), 91020100 = the section area itself;
+ *                   the next area change to an area of the same kind (0x92.. / 0x91..) loads the wanted one instead (one shot)
  *   warp off | status
  *
- * Mechanism (stage 6b, static): the continue area aStartContinue (vtable 0xFF1994) runs its slot 7 (0x434F70) every frame until it succeeds; that function hands the
- * start request record [[0x116B3D4] + 0x60 + mode * 0x24] to the loader 0x6D0FF0, which reads the section's scene id at record +0x14 (0x91EESS00 = the area class
- * aEpisodeEE.. of the section) and makes the game load it. The wrapper overwrites that id before the original runs. The record is dumped to the log at the first frame.
+ * Two layers. (a) RECORD level (ids 0x91EESS00, the working one): the engine looks the section's episode record up by id with 0x726B70 (thiscall, ecx = the episode
+ * table, id on the stack, ret 4; the Continue path gets the id from the save slot); a 6-byte detour (56 8B 71 6C 33 D2 = push esi; mov esi,[ecx+6c]; xor edx,edx) swaps the
+ * id of every story-section lookup for the wanted one until `warp off`, so the save work, the area class, the stage and the start position all belong to one section.
+ * (b) AREA level (ids 0x92EESS00, only the area class changes: the units are the wanted section's but the STAGE stays the old one; kept for the log). Mechanism: every area change goes through sGameArea (vtable 0xFF25AC) slot 10 = 0x43C740, thiscall(this, DTI of the next area) ret 4. The area class of a
+ * story section is aEpisodeEE.. whose DTI hash IS the scene id 0x91EESS00 (0x91FF0000 = "no next section", back to the title). The wrapper swaps the DTI for the one of the
+ * wanted id (found in the engine's DTI hash table, 0x1185C60 + (id & 0xFF) * 4, chain link +0x14, hash +0x1C) the first time a story section is requested; every
+ * area change is logged. Earlier tries that did NOT work: the title menu manager's update (the record is set and consumed inside one update) and the loader
+ * 0x6D0FF0 / aStartContinue's update (neither runs on the Campaign -> Continue path).
  */
 #include <windows.h>
 #include <stdio.h>
@@ -15,19 +21,18 @@
 #include <stdlib.h>
 #include "r1.h"
 
-#define AC_VTABLE 0xFF1994u       /* aStartContinue */
-#define AC_SLOT 7
-#define AC_ORIG 0x434F70u
-#define START_SINGLETON 0x116B3D4u
-#define REC_BASE 0x60u
-#define REC_SIZE 0x24u
-#define REC_ID 0x14u
+#define AREA_VTABLE 0xFF25ACu
+#define AREA_SLOT 10
+#define AREA_ORIG 0x43C740u
+#define DTI_TABLE 0x1185C60u
+#define DTI_NEXT 0x14u
+#define DTI_HASH 0x1Cu
 
-typedef void(__attribute__((fastcall)) * vf_t)(void *self);
-static vf_t orig_vf;
+typedef void(__attribute__((fastcall)) * change_t)(void *self, void *edx, void *dti);
+static change_t orig_change;
 static volatile unsigned g_id;       /* 0 = off */
-static unsigned g_calls, g_writes, g_last_before, g_last_rec;
-static int g_dumped;
+static unsigned g_calls, g_swaps, g_last_from;
+static int g_installed;
 
 static unsigned rd32(unsigned a)
 {
@@ -35,57 +40,111 @@ static unsigned rd32(unsigned a)
     return r1_safe_read((void *)(uintptr_t)a, &v, 4) ? v : 0;
 }
 
-static void __attribute__((fastcall)) hook_vf(void *self)
+static unsigned dti_by_hash(unsigned id)
+{
+    unsigned node = rd32(DTI_TABLE + 4 * (id & 0xFF));
+    for (int n = 0; node && n < 2048; n++, node = rd32(node + DTI_NEXT))
+        if (rd32(node + DTI_HASH) == id)
+            return node;
+    return 0;
+}
+
+static void __attribute__((fastcall)) hook_change(void *self, void *edx, void *dti)
 {
     g_calls++;
-    unsigned obj = rd32(START_SINGLETON), holder = rd32(R1_GAMESYS_PTR);
-    if (obj && holder) {
-        unsigned g = rd32(holder + 0x24);
-        unsigned mode = g ? rd32(g + 0x20) : 0;
-        unsigned rec = obj + REC_BASE + (mode & 1) * REC_SIZE;
-        unsigned cur = rd32(rec + REC_ID);
-        g_last_rec = rec;
-        if (!g_dumped) {
-            g_dumped = 1;
-            r1_log("warp: first frame of the continue area: singleton %08x mode %u record %08x id %08x; record bytes:", obj, mode, rec, cur);
-            for (unsigned o = 0; o < REC_SIZE; o += 4)
-                r1_log("warp:   +%02x %08x", o, rd32(rec + o));
-        }
-        if (g_id && cur && cur != g_id) {
-            g_last_before = cur;
-            DWORD old;
-            if (VirtualProtect((void *)(uintptr_t)(rec + REC_ID), 4, PAGE_READWRITE, &old)) {
-                *(volatile unsigned *)(uintptr_t)(rec + REC_ID) = g_id;
-                g_writes++;
-                if (g_writes <= 3)
-                    r1_log("warp: scene id %08x replaced by %08x in the start record", cur, g_id);
-            }
-        }
+    unsigned hash = dti ? rd32((unsigned)(uintptr_t)dti + DTI_HASH) : 0;
+    r1_log("warp: area change requested: DTI %08x hash %08x%s", (unsigned)(uintptr_t)dti, hash, g_id ? " (warp armed)" : "");
+    if (g_id && (hash >> 24) == (g_id >> 24) && (hash & 0x00FF0000u) != 0x00FF0000u && hash != g_id) {
+        unsigned want = dti_by_hash(g_id);
+        if (want) {
+            r1_log("warp: story section %08x replaced by %08x (DTI %08x)", hash, g_id, want);
+            g_last_from = hash;
+            g_swaps++;
+            g_id = 0;
+            dti = (void *)(uintptr_t)want;
+        } else
+            r1_log("warp: no DTI with hash %08x in the engine's table: the request goes through unchanged", g_id);
     }
-    orig_vf(self);
+    orig_change(self, edx, dti);
+}
+
+/* ---- (a) the episode record lookup 0x726B70 ---- */
+#define LOOKUP_VA 0x726B70u
+#define LOOKUP_STEAL 6
+typedef void *(__attribute__((fastcall)) * lookup_t)(void *table, void *edx, unsigned id);
+static lookup_t g_lookup_tramp;
+static unsigned g_lookup_calls, g_lookup_swaps, g_lookup_last_from;
+
+static void *__attribute__((fastcall)) hook_lookup(void *table, void *edx, unsigned id)
+{
+    g_lookup_calls++;
+    if (g_id && (g_id >> 24) == 0x91u && (id >> 24) == 0x91u && (id & 0x00FF0000u) != 0x00FF0000u && id != g_id) {
+        g_lookup_swaps++;
+        g_lookup_last_from = id;
+        if (g_lookup_swaps <= 20)
+            r1_log("warp: episode record lookup %08x replaced by %08x", id, g_id);
+        id = g_id;
+    }
+    return g_lookup_tramp(table, edx, id);
+}
+
+static int install_lookup_detour(void)
+{
+    static const unsigned char expect[LOOKUP_STEAL] = {0x56, 0x8B, 0x71, 0x6C, 0x33, 0xD2};
+    unsigned char cur[LOOKUP_STEAL];
+    if (!r1_safe_read((void *)(uintptr_t)LOOKUP_VA, cur, LOOKUP_STEAL) || memcmp(cur, expect, LOOKUP_STEAL)) {
+        r1_log("warp: the lookup's first bytes are not the expected ones: the record layer stays off");
+        return 0;
+    }
+    unsigned char *t = (unsigned char *)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!t)
+        return 0;
+    memcpy(t, expect, LOOKUP_STEAL);
+    t[LOOKUP_STEAL] = 0xE9;
+    *(int *)(t + LOOKUP_STEAL + 1) = (int)((LOOKUP_VA + LOOKUP_STEAL) - (unsigned)(uintptr_t)(t + LOOKUP_STEAL + 5));
+    g_lookup_tramp = (lookup_t)(uintptr_t)t;
+    unsigned char patch[LOOKUP_STEAL];
+    patch[0] = 0xE9;
+    *(int *)(patch + 1) = (int)((unsigned)(uintptr_t)hook_lookup - (LOOKUP_VA + 5));
+    patch[5] = 0x90;
+    DWORD old;
+    if (!VirtualProtect((void *)(uintptr_t)LOOKUP_VA, LOOKUP_STEAL, PAGE_EXECUTE_READWRITE, &old))
+        return 0;
+    memcpy((void *)(uintptr_t)LOOKUP_VA, patch, LOOKUP_STEAL);   /* one copy of whole instructions; the lookup runs only in menu / section changes (we are idle at the title) */
+    VirtualProtect((void *)(uintptr_t)LOOKUP_VA, LOOKUP_STEAL, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void *)(uintptr_t)LOOKUP_VA, LOOKUP_STEAL);
+    r1_log("warp: episode record lookup %08x detoured (trampoline %p)", LOOKUP_VA, (void *)t);
+    return 1;
+}
+
+static int install_hook(void)
+{
+    unsigned cur = rd32(AREA_VTABLE + 4 * AREA_SLOT);
+    if (cur != AREA_ORIG) {
+        r1_log("warp: sGameArea vtable slot %d is %08x, expected %08x: the tool stays off", AREA_SLOT, cur, AREA_ORIG);
+        return 0;
+    }
+    void *fake = (void *)(uintptr_t)AREA_VTABLE;
+    orig_change = (change_t)(uintptr_t)cur;
+    if (!r1_patch_vtable(&fake, AREA_SLOT, (void *)hook_change)) {
+        r1_log("warp: cannot patch the vtable slot");
+        return 0;
+    }
+    r1_log("warp: sGameArea slot %d wrapped", AREA_SLOT);
+    return 1;
 }
 
 void warp_install(void)
 {
-    unsigned cur = rd32(AC_VTABLE + 4 * AC_SLOT);
-    if (cur != AC_ORIG) {
-        r1_log("warp: aStartContinue vtable slot %d is %08x, expected %08x: the warp tool stays off", AC_SLOT, cur, AC_ORIG);
-        return;
-    }
-    void *fake = (void *)(uintptr_t)AC_VTABLE;
-    orig_vf = (vf_t)(uintptr_t)cur;
-    if (!r1_patch_vtable(&fake, AC_SLOT, (void *)hook_vf)) {
-        r1_log("warp: cannot patch the vtable slot");
-        return;
-    }
-    r1_log("warp: ready (console `warp <hex scene id>`)");
+    /* nothing at start: the wrapper is put in by the first `warp <id>` */
 }
 
 void warp_cmd(const char *arg, char *out, int size)
 {
     if (!arg || !arg[0] || !strcmp(arg, "status")) {
-        snprintf(out, size, "warp: %s scene id %08x; continue-area frames %u, writes %u (last replaced id %08x), last record %08x",
-                 orig_vf ? "installed" : "NOT installed", g_id, g_calls, g_writes, g_last_before, g_last_rec);
+        snprintf(out, size, "warp: area wrapper %s, record lookup detour %s, id armed %08x; area changes seen %u, swaps %u (last %08x); lookups %u, swaps %u (last %08x)",
+                 g_installed ? "in place" : "not installed", g_lookup_tramp ? "in place" : "not installed", g_id, g_calls, g_swaps, g_last_from,
+                 g_lookup_calls, g_lookup_swaps, g_lookup_last_from);
         return;
     }
     if (!strcmp(arg, "off")) {
@@ -94,11 +153,20 @@ void warp_cmd(const char *arg, char *out, int size)
         return;
     }
     unsigned id = (unsigned)strtoul(arg, NULL, 16);
-    if ((id & 0xFF000000u) != 0x91000000u) {
-        snprintf(out, size, "warp: a scene id looks like 91EESS00 (hex), got '%s'", arg);
+    if ((id >> 24) != 0x91u && (id >> 24) != 0x92u) {
+        snprintf(out, size, "warp: a scene id looks like 91EESS00 or 92EESS00 (hex), got '%s'", arg);
+        return;
+    }
+    if (!dti_by_hash(id)) {
+        snprintf(out, size, "warp: no area class with hash %08x in the engine's DTI table", id);
+        return;
+    }
+    if (!g_lookup_tramp && (id >> 24) == 0x91u)
+        install_lookup_detour();
+    if (!g_installed && !(g_installed = install_hook())) {
+        snprintf(out, size, "warp: cannot install the wrapper (see the log)");
         return;
     }
     g_id = id;
-    g_writes = 0;
-    snprintf(out, size, "warp: the next Continue starts section %08x", id);
+    snprintf(out, size, "warp: the next story section request loads section %08x", id);
 }

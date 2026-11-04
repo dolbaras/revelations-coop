@@ -347,6 +347,7 @@ void probe_install(void)
     capture_init();
     split_init();
     menu_install();
+    warp_install();
     r1_log("probe: ready (no inline hook until the capture module is asked for a role; experiments are a hot-loadable plug-in, see plug_cap.c)");
 }
 
