@@ -56,6 +56,8 @@ static unsigned g_gm_calls;
 static int g_idle_state = 4;               /* [+0x3FC] value that means "waiting for input" (confirmed or corrected by the first live run: menu idle <n>) */
 static int g_type_filter = -1;             /* menu type the hint / F6 are limited to (-1 = any title menu page) */
 static volatile int g_open;                /* lobby open: the stock update is skipped */
+static volatile int g_closing;             /* the lobby was just closed: the stock update stays frozen until every key / button is up (the closing key must not reach the stock menu: Esc went back to the title screen) */
+static unsigned g_close_ms, g_quiet;
 static l1_t *g_lobby;
 static l1_settings g_set = {0, L1_LEAD, L1_LAYOUT_SIDE, 0};
 static int g_lang = -1, g_lang_override = -1, g_lang_src;   /* g_lang_src: 0 default, 1 env, 2 ini, 3 steam */
@@ -77,7 +79,7 @@ static vf8_t orig_vf8;
 /* ---------------------------------------------------------------- the update wrapper */
 static void __attribute__((fastcall)) hook_vf8(void *self)
 {
-    if (!g_open) orig_vf8(self);   /* lobby open: the stock menu is frozen under the overlay */
+    if (!g_open && !g_closing) orig_vf8(self);   /* lobby open (or just closed, keys still down): the stock menu is frozen */
     unsigned s = (unsigned)self;
     g_gm_this = s;
     g_gm_state = (int)rd32(s + GM_STATE);
@@ -90,29 +92,6 @@ static void __attribute__((fastcall)) hook_vf8(void *self)
 }
 
 /* ---------------------------------------------------------------- language, stock words */
-static int steam_lang(void)
-{
-    void *ctx = steam_context();
-    if (!ctx) return -1;
-    unsigned apps = 0, vt = 0;
-    if (!r1_safe_read((char *)ctx + 0x18, &apps, 4) || apps < 0x10000) return -1;
-    if (!r1_safe_read((void *)apps, &vt, 4) || vt < 0x10000) return -1;
-    unsigned fn = 0;
-    if (!r1_safe_read((void *)(vt + 4 * 4), &fn, 4) || fn < 0x10000) return -1;   /* ISteamApps::GetCurrentGameLanguage is slot 4 of v008 */
-    HMODULE m = NULL;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)fn, &m) || !m) return -1;   /* inside a loaded module */
-    typedef const char *(__attribute__((thiscall)) * lang_t)(void *);
-    const char *s = ((lang_t)fn)((void *)apps);
-    if (!s) return -1;
-    char buf[32] = {0};
-    for (int i = 0; i < 24; i++) {   /* byte by byte: the string may end right before an unreadable page */
-        if (!r1_safe_read(s + i, &buf[i], 1)) return -1;
-        if (!buf[i]) break;
-    }
-    buf[24] = 0;
-    return l1_lang_from_steam(buf);
-}
-
 static int detect_lang(void)
 {
     char v[32];
@@ -120,10 +99,10 @@ static int detect_lang(void)
     int l = -1;
     if (r1_env("REV1_LANG", v, sizeof v) && (l = l1_lang_from_code(v)) >= 0) g_lang_src = 1;
     else if (g_lang_override >= 0) l = g_lang_override, g_lang_src = 2;
-    else if ((l = steam_lang()) >= 0) g_lang_src = 3;
+    else if ((l = l1_lang_from_langid(GetUserDefaultLangID())) >= 0) g_lang_src = 3;   /* the game picks its language from this too (its import: GetUserDefaultLangID), not from Steam */
     else l = 0, g_lang_src = 0;
     g_lang = l;
-    r1_log("menu: language %s (%s)", l1_lang_codes[l], g_lang_src == 1 ? "REV1_LANG" : g_lang_src == 2 ? "rev1_coop.ini" : g_lang_src == 3 ? "Steam game language" : "default");
+    r1_log("menu: language %s (%s)", l1_lang_codes[l], g_lang_src == 1 ? "REV1_LANG" : g_lang_src == 2 ? "rev1_coop.ini" : g_lang_src == 3 ? "system language (GetUserDefaultLangID)" : "default");
     return l;
 }
 
@@ -358,6 +337,9 @@ static void close_lobby(const char *why)
     l1_settings_get(g_lobby, &s);
     int changed = memcmp(&s, &g_set, sizeof s) != 0;
     g_set = s;
+    g_closing = 1;
+    g_close_ms = GetTickCount();
+    g_quiet = 0;
     g_open = 0;
     publish(NULL);
     if (changed || g_applied_armed < 0 || g_applied_armed != g_set.armed) {
@@ -380,6 +362,14 @@ static void menu_frame(void)
     l1_event ev[8];
     int want_open = 0;
     int n = l1_input_poll(&g_in, &raw, now, g_open, ev, 8, &want_open);
+    if (g_closing) {   /* wait until nothing is held (3 quiet polls) or 1.5 s, then give the menu back */
+        int any = raw.up | raw.down | raw.left | raw.right | raw.enter | raw.space | raw.esc | raw.f6 | raw.pad_buttons[0] | raw.pad_buttons[1];
+        any |= raw.ly[0] > 22000 || raw.ly[0] < -22000 || raw.lx[0] > 22000 || raw.lx[0] < -22000 || raw.ly[1] > 22000 || raw.ly[1] < -22000 || raw.lx[1] > 22000 || raw.lx[1] < -22000;
+        g_quiet = any ? 0 : g_quiet + 1;
+        if (g_quiet >= 3 || now - g_close_ms > 1500) g_closing = 0;
+        publish(NULL);
+        return;
+    }
     if (g_open) {
         if (!seen && now - g_gm_tick > 1500 && now - g_opened_ms > 1500) {   /* the title menu is gone (a test opened the lobby elsewhere is left alone for a while) */
             if (g_gm_this) close_lobby("title menu gone");

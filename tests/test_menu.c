@@ -192,7 +192,17 @@ int main(void)
     press(VK_RIGHT, 2);
     menu_cmd("view", st, sizeof st);
     CHECK(strstr(st, "Parker (partner)"));
-    press(VK_ESCAPE, 2);
+    g_keys[VK_ESCAPE] = 1;
+    frames(2);                       /* the first poll closes the lobby */
+    int oc = g_orig_calls;
+    frames(4);                       /* Esc is still held: the stock menu must stay frozen (Esc would take it back to the title screen) */
+    CHECK(g_orig_calls == oc);
+    menu_present(NULL);
+    int d0 = g_draws;
+    menu_present(NULL);
+    CHECK(g_draws == d0);            /* no overlay while the closing key is held */
+    g_keys[VK_ESCAPE] = 0;
+    frames(6);
     status(st, sizeof st);
     CHECK(strstr(st, "lobby closed"));
     CHECK(rec.enable == 1 && rec.own == 1 && rec.binds == 2);

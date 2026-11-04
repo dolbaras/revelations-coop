@@ -14,6 +14,24 @@ const char *const l1_lang_codes[L1_LANGS] = {"eng", "fre", "ita", "ger", "spa", 
 const char *const l1_lang_names[L1_LANGS] = {"English", "French", "Italian", "German", "Spanish", "Japanese", "Russian", "Polish", "Dutch", "Portuguese (Portugal)", "Portuguese (Brazil)",
                                              "Chinese (Simplified)", "Chinese (Traditional)"};
 
+int l1_lang_from_langid(unsigned id)
+{
+    switch (id & 0x3FF) {   /* primary language */
+    case 0x09: return 0;                                              /* English */
+    case 0x0C: return 1;                                              /* French */
+    case 0x10: return 2;                                              /* Italian */
+    case 0x07: return 3;                                              /* German */
+    case 0x0A: return 4;                                              /* Spanish */
+    case 0x11: return 5;                                              /* Japanese */
+    case 0x19: return 6;                                              /* Russian */
+    case 0x15: return 7;                                              /* Polish */
+    case 0x13: return 8;                                              /* Dutch */
+    case 0x16: return (id >> 10) == 2 ? 9 : 10;                       /* Portuguese: sublanguage 2 = Portugal, 1 = Brazil */
+    case 0x04: return (id == 0x0804 || id == 0x1004) ? 11 : 12;       /* Chinese: PRC and Singapore = simplified, the others traditional */
+    default: return -1;
+    }
+}
+
 int l1_lang_from_code(const char *code)
 {
     if (!code) return -1;

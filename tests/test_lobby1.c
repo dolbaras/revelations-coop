@@ -62,6 +62,11 @@ static void test_texts(void)
     /* language tables */
     CHECK(l1_lang_from_code("rus") == 6 && l1_lang_from_code("chT") == 12 && l1_lang_from_code("xx") == -1 && l1_lang_from_code(NULL) == -1);
     CHECK(l1_lang_from_steam("english") == 0 && l1_lang_from_steam("schinese") == 11 && l1_lang_from_steam("brazilian") == 10 && l1_lang_from_steam("portuguese") == 9);
+    CHECK(l1_lang_from_langid(0x0409) == 0 && l1_lang_from_langid(0x0809) == 0 && l1_lang_from_langid(0x040C) == 1 && l1_lang_from_langid(0x0C0C) == 1 && l1_lang_from_langid(0x0410) == 2);
+    CHECK(l1_lang_from_langid(0x0407) == 3 && l1_lang_from_langid(0x0C0A) == 4 && l1_lang_from_langid(0x040A) == 4 && l1_lang_from_langid(0x0411) == 5 && l1_lang_from_langid(0x0419) == 6);
+    CHECK(l1_lang_from_langid(0x0415) == 7 && l1_lang_from_langid(0x0413) == 8 && l1_lang_from_langid(0x0813) == 8 && l1_lang_from_langid(0x0816) == 9 && l1_lang_from_langid(0x0416) == 10);
+    CHECK(l1_lang_from_langid(0x0804) == 11 && l1_lang_from_langid(0x1004) == 11 && l1_lang_from_langid(0x0404) == 12 && l1_lang_from_langid(0x0C04) == 12);
+    CHECK(l1_lang_from_langid(0x0422) == -1 && l1_lang_from_langid(0x0412) == -1 && l1_lang_from_langid(0) == -1);   /* Ukrainian, Korean: the game has no such text: English */
     CHECK(l1_lang_from_steam("dutch") == 8 && l1_lang_from_steam("klingon") == -1);
     for (int i = 0; i < L1_LANGS; i++) CHECK(l1_lang_from_code(l1_lang_codes[i]) == i);
 }

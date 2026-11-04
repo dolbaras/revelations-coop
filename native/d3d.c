@@ -101,6 +101,7 @@ static HRESULT WINAPI hook_Present(IDirect3DDevice9 *dev, const RECT *s, const R
         lt_install();
         probe_install();
     }
+    menu_present(dev);   /* the co-op lobby / title hint (nothing happens unless the menu module published a scene); BEFORE the screenshots so that they show it */
     /* F11: only while the game window is really in front (never reacts to keys meant for another window) */
     static int f11_was;
     HWND gw = testmode_window();
@@ -114,7 +115,6 @@ static HRESULT WINAPI hook_Present(IDirect3DDevice9 *dev, const RECT *s, const R
         shot_next++;
         save_frame(dev);
     }
-    menu_present(dev);   /* the co-op lobby / title hint (nothing happens unless the menu module published a scene) */
     return real_Present(dev, s, d, w, r);
 }
 

@@ -27,6 +27,7 @@ extern const char *const l1_lang_codes[L1_LANGS];      /* message file suffixes 
 extern const char *const l1_lang_names[L1_LANGS];      /* English names */
 const char *l1_text(int id, int lang);                 /* UTF-8, falls back to English, never NULL */
 int l1_lang_from_steam(const char *steam_name);        /* "english", "french", "schinese", "brazilian" ... -> index; -1 unknown */
+int l1_lang_from_langid(unsigned id);                  /* Windows LANGID (GetUserDefaultLangID, what the game itself reads) -> index; -1 = not a game language */
 int l1_lang_from_code(const char *code);               /* "rus" -> 6; -1 unknown */
 /* words of the stock menus that the texts quote ("$1" Continue, "$2" Load Game, "$3" New Game, "$4" Campaign): read from the game's own Title_<lang>.gmd by menu.c, built-in fallback per language */
 void l1_set_stock_words(const char words[4][64]);
