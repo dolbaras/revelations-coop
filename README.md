@@ -12,11 +12,12 @@ What works on the real game (test copy, main PC):
   human's pause and item menu on his own pad, cutscenes / pause / game over in whole view, checkpoint reloads and the game's own Exit survive. Side by side or top / bottom.
   The engine already renders several viewports natively; the module switches viewport 2 on with the second camera manager and builds a second cockpit unit set with the engine's own
   calls. API for a lobby: `capture_bind`, `capture_set_own`, `split_set_layout`, `split_enable` (see `split.h`).
+- **Co-Op Play entry and lobby** (stage 6, `native/menu.c`, `lobby1.c`, `overlay.c`; written and tested offline, **not yet run in the game**): on the title menu a hint line offers the co-op screen (F6 or the gamepad BACK button). The screen sets: co-op on / off, which character player 1 plays (lead character or partner; player 2 takes the other), side by side or top / bottom, which gamepad is player 1's. Texts in the game's 13 languages (own strings; character names and the menu words come from the game's own message files). Settings: `rev1_coop.ini` in the game's config folder. The story is then started with the stock Continue / Load Game / New Game. Console: `menu status | open | close | view | set ... | gm`.
 - `native/steam.c`: logs the game's Steam calls; `REV1_ACHBLOCK=1` (set by the lab scripts) blocks achievement / stat writes in test runs.
 
 Layout: `native/` proxy (C, 32-bit, built with Zig: `sh native/build.sh`; hot-loadable experiment plug-ins `plug_*.c`: `build_plug.sh`, `build_split.sh`), `tools/r1console.py` console client.
 
-Variables: `REV1_LOG=<file>`, `REV1_CONSOLE=<port>` (UDP on 127.0.0.1), `REV1_ANYEXE=1` (lab only), `REV1_SPLIT=v|h` (start with the split screen requested, side by side / top-bottom),
+Variables: `REV1_LOG=<file>`, `REV1_CONSOLE=<port>` (UDP on 127.0.0.1), `REV1_ANYEXE=1` (lab only), `REV1_SPLIT=v|h` (start with the split screen requested, side by side / top-bottom), `REV1_MENU=0` (switch the Co-Op Play entry off), `REV1_LANG=<code>` (language of the lobby texts), `REV1_COOP_INI=<file>` (settings file),
 test-window variables of the lab (`REV1_WINPOS`, `REV1_WINSIZE`, `REV1_BACKGROUND`, `REV1_MUTE`, `REV1_ADAPTER`).
-Console words (UDP): `split status | on [v|h] | off | lay v|h | hud | menu | view | probe`, `splitkill` (emergency off from any thread), `cap status | bind | own | src | ...`.
+Console words (UDP): `menu status | open | close | view | set | gm`, `split status | on [v|h] | off | lay v|h | hud | menu | view | probe`, `splitkill` (emergency off from any thread), `cap status | bind | own | src | ...`.
 Licence: MIT.
