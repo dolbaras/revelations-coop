@@ -35,11 +35,15 @@
 #define GM_SHORTCUT 0x40C
 #define GM_COUNT 0x410
 #define GM_TYPE 0x9A0               /* menu type: 2 = campaign sub menu, 3 = main menu, 4 = single item */
+#define MGR_VTABLE 0x108CA30u       /* uTitleMenuManager vtable: the manager drives the pages (cursor, activation, back); its update is slot 8 */
+#define MGR_VF8_ORIG 0x841440u
 #define GM_NODES 0xAB4              /* seven shortcut GUI nodes */
 #define GM_MSGS 0xAD4
 
 static unsigned g_vtable = GM_VTABLE, g_expect_orig = GM_VF8_ORIG;   /* the offline harness replaces them */
+static unsigned g_mgr_vtable = MGR_VTABLE, g_mgr_expect = MGR_VF8_ORIG;
 void menu_test_set_addrs(unsigned vtable, unsigned expect_orig) { g_vtable = vtable, g_expect_orig = expect_orig; }
+void menu_test_set_mgr(unsigned vtable, unsigned expect_orig) { g_mgr_vtable = vtable, g_mgr_expect = expect_orig; }
 
 static unsigned rd32(unsigned a)
 {
@@ -74,7 +78,16 @@ static ov_scene g_scene;
 static unsigned g_scene_tick;
 
 typedef void(__attribute__((fastcall)) * vf8_t)(void *self);
-static vf8_t orig_vf8;
+static vf8_t orig_vf8, orig_mgr_vf8;
+static unsigned g_mgr_calls;
+
+/* The title menu MANAGER (page logic: cursor movement, activation, back) reads the keys / buttons itself: freezing only the page's own update let the cursor moves and the closing Esc through
+ * (live: the cursor ran to the last row, Esc went back to the title screen). Its update is frozen too while the lobby is open or just closed. */
+static void __attribute__((fastcall)) hook_mgr_vf8(void *self)
+{
+    g_mgr_calls++;
+    if (!g_open && !g_closing) orig_mgr_vf8(self);
+}
 
 /* ---------------------------------------------------------------- the update wrapper */
 static void __attribute__((fastcall)) hook_vf8(void *self)
@@ -451,12 +464,23 @@ void menu_install(void)
         return;
     }
     void *fake = (void *)g_vtable;
+    unsigned mcur = rd32(g_mgr_vtable + 4 * GM_VF8_SLOT);
+    if (mcur != g_mgr_expect) {
+        r1_log("menu: uTitleMenuManager vtable slot 8 is %08x, expected %08x: not this build, the menu module stays off", mcur, g_mgr_expect);
+        g_disabled = 1;
+        return;
+    }
     orig_vf8 = (vf8_t)cur;   /* set BEFORE the patch: the menu's update may run on another thread right after it */
+    orig_mgr_vf8 = (vf8_t)mcur;
     void *old = r1_patch_vtable(&fake, GM_VF8_SLOT, (void *)hook_vf8);
     if (!old) {
         r1_log("menu: cannot patch the vtable slot");
         g_disabled = 1;
         return;
+    }
+    void *fake2 = (void *)g_mgr_vtable;
+    if (!r1_patch_vtable(&fake2, GM_VF8_SLOT, (void *)hook_mgr_vf8)) {
+        r1_log("menu: cannot patch the manager's vtable slot (the page's own update is wrapped already: the entry still works, keys may leak into the stock menu)");
     }
     lt_add_frame_cb(menu_frame);
     g_installed = 1;

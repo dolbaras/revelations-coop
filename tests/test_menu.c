@@ -92,15 +92,19 @@ void overlay_set_hint_rect(float x, float y, float w, float h) { (void)x; (void)
 void overlay_stats(char *out, int size) { snprintf(out, (size_t)size, "overlay stub"); }
 
 /* ---------------------------------------------------------------- fake uGUI_GeneralMenu */
-static int g_orig_calls;
+static int g_orig_calls, g_mgr_orig_calls;
 static void __attribute__((fastcall)) fake_orig(void *self) { (void)self; g_orig_calls++; }
+static void __attribute__((fastcall)) fake_mgr_orig(void *self) { (void)self; g_mgr_orig_calls++; }
+static void **g_mvt;
 static void **g_vt;
+static int g_mgr_installed = 1;
 static unsigned char *g_obj;
 static void set_u32(unsigned off, unsigned v) { memcpy(g_obj + off, &v, 4); }
 
 static void game_frame(void)   /* what the game does in one pass: the object's update through its vtable, then the logic-thread callbacks */
 {
     ((void(__attribute__((fastcall)) *)(void *))g_vt[8])(g_obj);
+    if (g_mvt[8] != (void *)fake_mgr_orig || g_mgr_installed) ((void(__attribute__((fastcall)) *)(void *))g_mvt[8])(g_obj);   /* the manager's update (the object is a dummy for it) */
     if (g_cb) g_cb();
 }
 
@@ -132,6 +136,9 @@ int main(void)
     SetEnvironmentVariableA("REV1_LANG", "eng");
     g_vt = calloc(32, sizeof(void *));
     g_vt[8] = (void *)fake_orig;
+    g_mvt = calloc(32, sizeof(void *));
+    g_mvt[8] = (void *)fake_mgr_orig;
+    menu_test_set_mgr((unsigned)g_mvt, (unsigned)fake_mgr_orig);
     g_obj = calloc(1, 0xC00);
     set_u32(0x3FC, 1), set_u32(0x9A0, 3), set_u32(0x410, 3);
 
@@ -155,8 +162,9 @@ int main(void)
     CHECK(g_vt[8] != (void *)fake_orig);
     CHECK(g_cb != NULL);
     g_orig_calls = 0;
+    g_mgr_orig_calls = 0;
     frames(3);
-    CHECK(g_orig_calls == 3);   /* the stock update runs */
+    CHECK(g_orig_calls == 3 && g_mgr_orig_calls == 3);   /* the stock update and the page manager run */
     menu_present(NULL);
     CHECK(g_draws == 0);        /* menu in state 1: nothing is drawn */
     status(st, sizeof st);
@@ -176,9 +184,9 @@ int main(void)
     CHECK(strstr(st, "lobby OPEN"));
     g_keys[VK_F6] = 0;
     frames(2);
-    int before = g_orig_calls;
+    int before = g_orig_calls, mbefore = g_mgr_orig_calls;
     frames(4);
-    CHECK(g_orig_calls == before);   /* frozen while the lobby is open */
+    CHECK(g_orig_calls == before && g_mgr_orig_calls == mbefore);   /* frozen while the lobby is open: page update AND page manager (cursor / back keys) */
     menu_present(NULL);
     CHECK(g_drawn.kind == OV_LOBBY && !strcmp(g_drawn.v.title, "Co-Op Play"));
     CHECK(g_drawn.v.nrows == 7 && g_drawn.v.sel == 0);
@@ -194,9 +202,9 @@ int main(void)
     CHECK(strstr(st, "Parker (partner)"));
     g_keys[VK_ESCAPE] = 1;
     frames(2);                       /* the first poll closes the lobby */
-    int oc = g_orig_calls;
+    int oc = g_orig_calls, moc = g_mgr_orig_calls;
     frames(4);                       /* Esc is still held: the stock menu must stay frozen (Esc would take it back to the title screen) */
-    CHECK(g_orig_calls == oc);
+    CHECK(g_orig_calls == oc && g_mgr_orig_calls == moc);
     menu_present(NULL);
     int d0 = g_draws;
     menu_present(NULL);
