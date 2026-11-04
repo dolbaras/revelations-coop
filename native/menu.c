@@ -125,11 +125,40 @@ static int wr32m(unsigned a, unsigned v)
     *(volatile unsigned *)a = v;
     return 1;
 }
+static float rdfm(unsigned a)
+{
+    unsigned v = rd32(a);
+    float f;
+    memcpy(&f, &v, 4);
+    return f;
+}
+static int wrfm(unsigned a, float f)
+{
+    unsigned v;
+    memcpy(&v, &f, 4);
+    return wr32m(a, v);
+}
 
-/* the main page, seen for the first time: three rows with the label ids 8 / 9 / 10 */
+/* The page's rows are laid out by its own build code for the rows that exist when it runs: the node of a row added later stands at (0, 0) (live: the page had four items and showed three).
+ * Rows are 30 units apart (y = 411 / 441 / 471 at x = 640 in the 1280x720 GUI space; the node keeps its position at +0x40 / +0x44 and the target of its animation at +0xA0 / +0xA4):
+ * the new row gets the next place. */
+static void native_row_place(unsigned s, int idx)
+{
+    unsigned n0 = rd32(s + 0xA64), n1 = rd32(s + 0xA64 + 8), nn = rd32(s + 0xA64 + 8 * (unsigned)idx);
+    if (!n0 || !n1 || !nn) {
+        r1_log("menu: native row: the row nodes are not there (%08x %08x %08x): not placed", n0, n1, nn);
+        return;
+    }
+    float x = rdfm(n0 + 0x40), y0 = rdfm(n0 + 0x44), y1 = rdfm(n1 + 0x44), y = y0 + (y1 - y0) * (float)idx;
+    wrfm(nn + 0x40, x), wrfm(nn + 0x44, y), wrfm(nn + 0xA0, x), wrfm(nn + 0xA4, y);
+    r1_log("menu: native row placed at (%.0f, %.0f) (first row (%.0f, %.0f), spacing %.0f)", x, y, x, y0, y1 - y0);
+}
+
+/* the main page, every time it was (re)built: three rows with the label ids 8 / 9 / 10 (live: the page object stays, but its builder runs again after a visit to another page and resets
+ * the count to three, so this is not once per object: the count of three IS the condition, four means the row is there) */
 static void native_row_try(unsigned s)
 {
-    if (!g_row_enabled || s == g_row_page) return;
+    if (!g_row_enabled) return;
     if ((int)rd32(s + GM_TYPE) != 0 || (int)rd32(s + GM_COUNT) != 3) return;
     if (rd32(s + 0x41C) != 8 || rd32(s + 0x420) != 9 || rd32(s + 0x424) != 10) return;
     unsigned sg = rd32(g_sgui_ptr_va), res = sg ? rd32(sg + 0x108 + 4 * TITLE_BANK) : 0, tab = res ? rd32(res + 0x98) : 0, n = res ? rd32(res + 0x88) : 0;
@@ -149,6 +178,7 @@ static void native_row_try(unsigned s)
     g_row_index = (int)rd32(s + GM_COUNT);
     int state = (int)rd32(s + GM_STATE);
     g_additem((void *)s, MSG_LABEL, TITLE_BANK, MSG_HELP, TITLE_BANK, 0, 1, 0, 0);
+    native_row_place(s, g_row_index);
     g_row_page = s;
     g_row_adds++;
     r1_log("menu: native row added to the main page %08x (state %d, items now %d): label \"%s\", help \"%s\"", s, state, (int)rd32(s + GM_COUNT), g_row_label, g_row_help);

@@ -157,6 +157,13 @@ static unsigned char *mk_page(unsigned type, unsigned count, unsigned id0, unsig
     memcpy(p + 0x424, &id2, 4);
     unsigned one = 1;
     memcpy(p + 0x3FC, &one, 4);
+    for (int i = 0; i < 4; i++) {   /* the row nodes (records at +0xA64 + 8 * i): the first three are placed by the page, the fourth stands at (0, 0) */
+        unsigned char *nd = calloc(1, 0x100);
+        float x = i < 3 ? 640.0f : 0.0f, y = i < 3 ? 411.0f + 30.0f * (float)i : 0.0f;
+        memcpy(nd + 0x40, &x, 4), memcpy(nd + 0x44, &y, 4), memcpy(nd + 0xA0, &x, 4), memcpy(nd + 0xA4, &y, 4);
+        unsigned np = (unsigned)(size_t)nd;
+        memcpy(p + 0xA64 + 8 * i, &np, 4);
+    }
     return p;
 }
 
@@ -338,8 +345,24 @@ int main(void)
         unsigned cnt;
         memcpy(&cnt, main_page + 0x410, 4);
         CHECK(cnt == 4);
+        {   /* the new row's node got the next place: (640, 501) */
+            unsigned np;
+            float x, y, ty;
+            memcpy(&np, main_page + 0xA64 + 8 * 3, 4);
+            memcpy(&x, (unsigned char *)(size_t)np + 0x40, 4), memcpy(&y, (unsigned char *)(size_t)np + 0x44, 4), memcpy(&ty, (unsigned char *)(size_t)np + 0xA4, 4);
+            CHECK(x == 640.0f && y == 501.0f && ty == 501.0f);
+        }
         frames(5);
-        CHECK(g_add_calls == 1);                                 /* not again */
+        CHECK(g_add_calls == 1);                                 /* not again while the count is four */
+        {   /* the page is rebuilt (its builder resets the count to three): the row is added again, same object */
+            unsigned three = 3;
+            memcpy(main_page + 0x410, &three, 4);
+            frames(2);
+            CHECK(g_add_calls == 2);
+            unsigned c4;
+            memcpy(&c4, main_page + 0x410, 4);
+            CHECK(c4 == 4);
+        }
         /* decide handler: the new row opens the lobby, other rows / cancel go to the stock code */
         unsigned st4 = 4, cur;
         memcpy(main_page + 0x3FC, &st4, 4);
