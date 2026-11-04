@@ -131,6 +131,10 @@ void menu_install(void);                    /* once, from probe_install (game th
 void menu_present(void *d3d9_device);       /* Present hook (render thread): draws the scene the game thread published */
 void menu_before_reset(void);
 void menu_cmd(const char *arg, char *out, int size);   /* console "menu ..." (game thread) */
+
+/* warp.c: developer tool, start the campaign at another section (console "warp <hex scene id>") */
+void warp_install(void);
+void warp_cmd(const char *arg, char *out, int size);
 void menu_test_set_addrs(unsigned vtable, unsigned expect_orig);
 void menu_test_set_mgr(unsigned vtable, unsigned expect_orig);   /* offline harness: another vtable / original update function */
 

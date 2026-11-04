@@ -353,7 +353,7 @@ void probe_install(void)
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "plug", "P", "ctl", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -394,6 +394,8 @@ void probe_run(const char *cmd, char *out, int size)
         split_cmd(arg, out, size);
     } else if (!strcmp(name, "menu")) {   /* the co-op entry / lobby (menu.c): menu status | open | close | ev <...> | set <key>=<value> | lang <code> | view */
         menu_cmd(arg, out, size);
+    } else if (!strcmp(name, "warp")) {   /* developer tool (warp.c): warp <hex scene id> | off | status */
+        warp_cmd(arg, out, size);
     } else if (!strcmp(name, "plug")) {   /* plug load <dll path> | plug unload | plug status */
         if (!strncmp(arg, "load ", 5))
             plug_load(arg + 5, out, size);

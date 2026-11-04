@@ -62,6 +62,32 @@ static GetKeyboardState_t real_GetKeyboardState;
 static ClipCursor_t real_ClipCursor;
 static SetCursorPos_t real_SetCursorPos;
 static XInputGetState_t real_XInputGetState;
+static XInputGetState_t priv_XInputGetState;   /* REV1_PADS=1: XInputGetState of a private copy of the system's xinput1_4.dll (see priv_xinput_init) */
+
+/* The Steam overlay (gameoverlayrenderer.dll, loaded into the test copy by the Steam stub) hooks XInput for Steam Input and answers "connected, packet 0, all zero"
+ * to every poll while the game window is not the focused one - which is the normal state of a background test instance. XInputEnable(TRUE) did not help.
+ * A private copy of the system DLL under another name is a module of its own that the overlay does not know. Test mode only (REV1_PADS=1). */
+static void priv_xinput_init(void)
+{
+    char sys[MAX_PATH], tmp[MAX_PATH], src[MAX_PATH], dst[MAX_PATH];
+    if (!GetSystemDirectoryA(sys, sizeof sys) || !GetTempPathA(sizeof tmp, tmp))
+        return;
+    snprintf(src, sizeof src, "%s\\xinput1_4.dll", sys);
+    snprintf(dst, sizeof dst, "%sRev1CoopXInputPriv.dll", tmp);
+    if (!CopyFileA(src, dst, FALSE) && GetFileAttributesA(dst) == INVALID_FILE_ATTRIBUTES) {
+        r1_log("xinput: private copy %s -> %s failed (%lu)", src, dst, GetLastError());
+        return;
+    }
+    HMODULE m = LoadLibraryA(dst);
+    if (m)
+        priv_XInputGetState = (XInputGetState_t)GetProcAddress(m, "XInputGetState");
+    r1_log("xinput: private copy %s loaded %p, XInputGetState %p (REV1_PADS=1: the Steam overlay's XInput hook is bypassed)", dst, (void *)m, (void *)priv_XInputGetState);
+}
+
+static DWORD poll_real(DWORD user, XINPUT_STATE *st)
+{
+    return pads_allowed && priv_XInputGetState ? priv_XInputGetState(user, st) : real_XInputGetState(user, st);
+}
 
 /* The outer rectangle for the wanted client rectangle at win_x, win_y. */
 static void outer_rect(HWND w, int *x, int *y, int *cw, int *ch)
@@ -356,7 +382,7 @@ static int real_pad_read(XINPUT_STATE *st, DWORD *real_user)
     if (!real_XInputGetState || (background && !pads_allowed && !really_in_front()))
         return 0;
     DWORD now = GetTickCount();
-    if (real_user_cache >= 0 && real_XInputGetState((DWORD)real_user_cache, st) == ERROR_SUCCESS) {
+    if (real_user_cache >= 0 && poll_real((DWORD)real_user_cache, st) == ERROR_SUCCESS) {
         *real_user = (DWORD)real_user_cache;
         return 1;
     }
@@ -364,7 +390,7 @@ static int real_pad_read(XINPUT_STATE *st, DWORD *real_user)
         real_user_probe = now;
         real_user_cache = -1;
         for (int u = 0; u < 4; u++)
-            if (real_XInputGetState((DWORD)u, st) == ERROR_SUCCESS) {
+            if (poll_real((DWORD)u, st) == ERROR_SUCCESS) {
                 real_user_cache = u;
                 *real_user = (DWORD)u;
                 return 1;
@@ -377,6 +403,7 @@ static int real_pad_read(XINPUT_STATE *st, DWORD *real_user)
 static struct { DWORD ret; DWORD user; volatile LONG n; volatile LONG ok; } xsite[48];
 static volatile LONG n_xsite;
 static volatile LONG xuser_calls[8];
+static struct { volatile WORD buttons; volatile SHORT ly; volatile DWORD packet; volatile LONG nonzero; } xlast[4];
 
 static void xinput_note(DWORD user, DWORD ret, int ok)
 {
@@ -404,6 +431,20 @@ void testmode_xinput_sites(char *out, int size)
     for (int i = 0; i < 8; i++)
         if (xuser_calls[i])
             o += snprintf(out + o, size - o, " u%d=%ld", i, xuser_calls[i]);
+    for (int i = 0; i < 4; i++)
+        o += snprintf(out + o, size - o, "\nlast state the game got, user %d: buttons %04x ly %d packet %lu, polls with input: %ld", i, xlast[i].buttons, xlast[i].ly, (unsigned long)xlast[i].packet, xlast[i].nonzero);
+    if (real_XInputGetState) {   /* a direct call of the real function from here (console thread): is the pad data there at all? */
+        char mod[MAX_PATH] = "?";
+        HMODULE hm = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)real_XInputGetState, &hm) && hm)
+            GetModuleFileNameA(hm, mod, sizeof mod);
+        for (int i = 0; i < 2; i++) {
+            XINPUT_STATE t;
+            memset(&t, 0, sizeof t);
+            DWORD r = poll_real((DWORD)i, &t);
+            o += snprintf(out + o, size - o, "\nreal XInputGetState %p (%s) direct call user %d: r=%lu buttons %04x ly %d packet %lu", (void *)real_XInputGetState, mod, i, (unsigned long)r, t.Gamepad.wButtons, t.Gamepad.sThumbLY, (unsigned long)t.dwPacketNumber);
+        }
+    }
     o += snprintf(out + o, size - o, "\ncall sites (return address, user, calls, answered connected):");
     LONG n = n_xsite < 48 ? n_xsite : 48;
     for (LONG k = 0; k < n && o + 90 < size; k++)
@@ -459,7 +500,7 @@ static DWORD xinput_inner(DWORD i, XINPUT_STATE *st)
             r1_log("xinput: pads hidden while the window is not in front (REV1_BACKGROUND)");
         return ERROR_DEVICE_NOT_CONNECTED;
     }
-    DWORD r = real_XInputGetState(i, st);
+    DWORD r = poll_real(i, st);
     if (i < 4)
         InterlockedIncrement(&xinput_seen[i][r == ERROR_SUCCESS ? 0 : r == ERROR_DEVICE_NOT_CONNECTED ? 1 : 2]);
     if (r == ERROR_SUCCESS)
@@ -476,6 +517,13 @@ static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
     InterlockedIncrement(&xinput_calls);
     DWORD fr = xinput_inner(i, st);
     xinput_note(i, ret_addr, fr == ERROR_SUCCESS);
+    if (i < 4 && st && fr == ERROR_SUCCESS) {   /* what the game really gets (console `pads`): last state per user and how often a button was down */
+        xlast[i].buttons = st->Gamepad.wButtons;
+        xlast[i].ly = st->Gamepad.sThumbLY;
+        xlast[i].packet = st->dwPacketNumber;
+        if (st->Gamepad.wButtons || st->Gamepad.sThumbLX || st->Gamepad.sThumbLY)
+            InterlockedIncrement(&xlast[i].nonzero);
+    }
     return fr;
 }
 
@@ -499,6 +547,24 @@ static DWORD WINAPI hook_XInputGetCapabilities(DWORD i, DWORD flags, XINPUT_CAPA
         return ERROR_SUCCESS;
     }
     return real_XInputGetCapabilities ? real_XInputGetCapabilities(i, flags, c) : ERROR_DEVICE_NOT_CONNECTED;
+}
+
+/* XInputEnable (ordinal 5 of XINPUT1_3): the game turns XInput OFF when its window is not the active application, and XInput then answers every
+ * XInputGetState with "connected, packet 0, all zero" (found 2026-11-04: ViGEm pads reached an external process and the 32-bit XInput1_3 inside the game's own
+ * process, but the game's polls saw nothing). A test instance that must read virtual pads in the background (REV1_PADS=1) keeps XInput on. */
+typedef void (WINAPI *XInputEnable_t)(BOOL);
+static XInputEnable_t real_XInputEnable;
+static volatile LONG n_xenable_off;
+
+static void WINAPI hook_XInputEnable(BOOL enable)
+{
+    if (!enable && pads_allowed) {
+        if (InterlockedIncrement(&n_xenable_off) <= 3)
+            r1_log("xinput: the game asked XInputEnable(FALSE); kept on (REV1_PADS=1)");
+        enable = TRUE;
+    }
+    if (real_XInputEnable)
+        real_XInputEnable(enable);
 }
 
 static DWORD WINAPI hook_XInputSetState(DWORD i, XINPUT_VIBRATION *v)
@@ -751,6 +817,11 @@ void testmode_install(void)
         real_XInputGetState = (XInputGetState_t)r1_patch_iat("XINPUT1_3.dll", "#2", (void *)hook_XInputGetState);
         real_XInputSetState = (XInputSetState_t)r1_patch_iat("XINPUT1_3.dll", "#3", (void *)hook_XInputSetState);
         real_XInputGetCapabilities = (XInputGetCapabilities_t)r1_patch_iat("XINPUT1_3.dll", "#4", (void *)hook_XInputGetCapabilities);
+        real_XInputEnable = (XInputEnable_t)r1_patch_iat("XINPUT1_3.dll", "#5", (void *)hook_XInputEnable);
+        if (pads_allowed && real_XInputEnable)
+            real_XInputEnable(TRUE);
+        if (pads_allowed)
+            priv_xinput_init();
     }
     if (!(have_pos || have_size || background || winlog || adapter_mode[0]))
         return;
@@ -793,7 +864,7 @@ int testmode_pad_peek(int user, void *out)
     if (!real_XInputGetState || (background && !pads_allowed && !really_in_front()))
         return 0;
     XINPUT_STATE st;
-    if (real_XInputGetState((DWORD)user, &st) != ERROR_SUCCESS)
+    if (poll_real((DWORD)user, &st) != ERROR_SUCCESS)
         return 0;
     *g = st.Gamepad;
     return 1;
