@@ -9,6 +9,7 @@
  * It installs NO inline hook; it writes plain bytes once per logic pass (on_frame) and puts everything back on "off" / unload.
  *
  *   P split probe            read-only dump of viewports, camera managers, GUI rect
+ *   P split hud              read-only dump of the HUD managers (sIDCockpit) with their view masks
  *   P split on [dup|mgr1] [v|h]   dup: viewport 2 shows the SAME camera as viewport 0 (tests the engine path alone), mgr1 (default): viewport 2 = the second
  *                            camera manager with the partner (unit slot 1) as target. v = side by side (modes 4/5, default), h = top / bottom (2/3)
  *   P split off              back to the stock single view
@@ -276,6 +277,33 @@ static int probe(char *out, int size)
     return 1;
 }
 
+/* HUD probe (read-only): the six GUI managers of sIDCockpit ([0x1169120]+0x28..0x3C), their view masks (unit+0xC bits 16..25) and the children of the main cockpit */
+static int hud_probe(char *out, int size)
+{
+    int o = 0;
+#define P(...) do { if (o < size - 1) o += snprintf(out + o, (size_t)(size - o), __VA_ARGS__); } while (0)
+    unsigned ck = rd32(0x1169120);
+    char cn[96];
+    if (!ck) {
+        snprintf(out, (size_t)size, "no sIDCockpit yet ([0x1169120] = 0)");
+        return 1;
+    }
+    P("sIDCockpit %08x\n", ck);
+    for (unsigned k = 0; k < 6; k++) {
+        unsigned u = rd32(ck + 0x28 + 4 * k);
+        cname(u, cn, sizeof cn);
+        P(" mgr[%u] %08x %-28s flags %08x state %u viewmask %03x\n", k, u, cn, rd32(u + 0xC), rd32(u + 0xC) & 7, (rd32(u + 0xC) >> 16) & 0x3FF);
+    }
+    unsigned m = rd32(ck + 0x28), n = 0;
+    for (unsigned c = rd32(m + 0x3C); c && n < 40; c = rd32(c + 0x270), n++) {
+        cname(c, cn, sizeof cn);
+        P("   child %08x %-28s flags %08x en(bit14) %u skip(+274) %u viewmask %03x\n", c, cn, rd32(c + 0xC), (rd32(c + 0xC) >> 14) & 1, rd8(c + 0x274), (rd32(c + 0xC) >> 16) & 0x3FF);
+    }
+    P("   (%u children of the main cockpit listed)\n", n);
+#undef P
+    return 1;
+}
+
 static int on_cmd(const char *name, const char *arg, char *out, int size)
 {
     if (strcmp(name, "split"))
@@ -290,6 +318,8 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
     }
     if (!strcmp(sub, "probe"))
         return probe(out, size);
+    if (!strcmp(sub, "hud"))
+        return hud_probe(out, size);
     if (!strcmp(sub, "on")) {
         for (const char *p = a1; p; p = (p == a1) ? a2 : NULL) {
             if (!strcmp(p, "dup"))
@@ -349,7 +379,7 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         snprintf(out, (size_t)size, "vp%u %s = %d (the plug-in's own pass may overwrite it while split is on)", i, a2, v);
         return 1;
     }
-    snprintf(out, (size_t)size, "split: probe | on [dup|mgr1] [v|h] | off | lay v|h | cam dup|mgr1 | follow on|off | vp <i> <field> <v> | status");
+    snprintf(out, (size_t)size, "split: probe | hud | on [dup|mgr1] [v|h] | off | lay v|h | cam dup|mgr1 | follow on|off | vp <i> <field> <v> | status");
     return 1;
 }
 
