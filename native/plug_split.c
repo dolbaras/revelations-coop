@@ -28,12 +28,24 @@
 
 static const r1_api_t *A;
 
+#ifndef CAMROOT_PTR
 #define CAMROOT_PTR   0x11E00B8u
+#endif
+#ifndef SPLAYER_PTR
 #define SPLAYER_PTR   0x1169394u
+#endif
+#ifndef GAMESYS_PTR
 #define GAMESYS_PTR   0x1169108u
+#endif
+#ifndef COOPMGR_PTR
 #define COOPMGR_PTR   0x1169398u
+#endif
+#ifndef RENDER_PTR
 #define RENDER_PTR    0x11E1B9Cu
+#endif
+#ifndef CS_FLAG_GLOB
 #define CS_FLAG_GLOB  0x11E04ECu
+#endif
 #define VP_STRIDE     0x190u
 #define VP_BASE       0x30u
 #define VP_SECOND     2
