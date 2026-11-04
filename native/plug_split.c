@@ -186,11 +186,23 @@ static void apply(void)
     unsigned v2 = vp_addr(r, VP_SECOND), v0 = vp_addr(r, 0);
     /* The demo scheduler (cutscenes) and the title put their own camera object on viewport 0 (0x891E07: it keeps the old one in this+0x38 and restores it
      * afterwards). While viewport 0 does not show manager 0, the view is whole: layout 0 and viewport 2 off; the split comes back by itself. */
-    if (rd32(v0 + 4) != mgr0) {
+    /* LIVE (2026-11-04): the pause menu and the game-over screen are GUI units (sIDCockpit managers 2 = uGUI_GameOverHD, 3 = uGUI_PauseHD) that the engine draws in
+     * EVERY active viewport (view mask 0xF), i.e. squeezed into both halves. They are "running" when the unit flags have 0x400 | 0x800 set (pause: 0x60B2 -> 0x6CB2).
+     * Whole view meanwhile. */
+    int full_gui = 0;
+    {
+        unsigned ck = rd32(0x1169120);
+        for (unsigned k = 2; ck && k <= 3; k++) {
+            unsigned g = rd32(ck + 0x28 + 4 * k);
+            if (g && (rd32(g + 0xC) & 0xC00) == 0xC00)
+                full_gui = 1;
+        }
+    }
+    if (full_gui || rd32(v0 + 4) != mgr0) {
         if (!suspended) {
             suspended = 1;
             n_susp++;
-            A->log("plug_split: viewport 0 camera %08x is not manager 0 (%08x): whole view until it is back", rd32(v0 + 4), mgr0);
+            A->log("plug_split: whole view (%s): viewport 0 camera %08x, manager 0 %08x", full_gui ? "pause / game over screen" : "cutscene or other camera on viewport 0", rd32(v0 + 4), mgr0);
         }
         wr8(v2 + 0x10, 0);
         wr8(v0 + 0x13, sv.mode0);
@@ -199,7 +211,7 @@ static void apply(void)
     }
     if (suspended) {
         suspended = 0;
-        A->log("plug_split: viewport 0 shows manager 0 again: split resumes");
+        A->log("plug_split: gameplay view again: split resumes");
     }
     int fix = 0;
     if (rd32(v2 + 4) != want)
@@ -218,6 +230,13 @@ static void apply(void)
     if (fix && n_pass > 2)
         n_reasserted++;
     last_cam2 = want, last_mgr1 = mgr1;
+    if (src_mgr1) {
+        /* LIVE (2026-11-04): the engine creates manager 1 with the unit flags 0x400 | 0x800 cleared and never sets them (manager 0 gets them): it is not updated
+         * and stays at its default pose (0,200,-700). With both bits set it follows its target like manager 0. */
+        unsigned fl = rd32(mgr1 + 0xC);
+        if ((fl & 0xC00) != 0xC00)
+            wr32(mgr1 + 0xC, fl | 0xC00);
+    }
     if (src_mgr1 && follow) {
         unsigned u = unit_by_slot(1);
         if (u && rd32(mgr1 + 0x74) != u) {
@@ -225,6 +244,222 @@ static void apply(void)
             wr32(mgr1 + 0x78, u);
         }
     }
+}
+
+/* ---- H1 experiment: the stock HUD units are drawn once per viewport (view mask 0xF); is their data read at DRAW time? ----
+ * Hook on sUnit::draw (0x9B4760, __thiscall(sUnit, cmd), ret 4): while the viewport-2 pass draws, the own slot answers 1 (sCoopManager+0xF4 = 2, +0xF8 = 1; the
+ * capture module's own-slot hook falls through to the original code, which reads them), restored right after the call (the draw waits for its worker jobs). */
+#define TC __attribute__((thiscall))
+typedef struct {
+    unsigned target;
+    int n;
+    unsigned char orig[16];
+    void *tramp;
+    int on;
+} hk_t;
+
+static int hook_install(hk_t *h, unsigned target, const unsigned char *expect, int n, void *hook)
+{
+    unsigned char cur[16];
+    if (!A->safe_read((void *)target, cur, (unsigned)n) || memcmp(cur, expect, (size_t)n) != 0) {
+        A->log("plug_split: bytes at %08x differ from the expected build or are hooked already, not patching", target);
+        return 0;
+    }
+    unsigned char *t = VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!t)
+        return 0;
+    memcpy(t, cur, (size_t)n);
+    t[n] = 0xE9;
+    *(int *)(t + n + 1) = (int)((target + (unsigned)n) - (unsigned)(t + n + 5));
+    DWORD old;
+    if (!VirtualProtect((void *)target, (SIZE_T)n, PAGE_EXECUTE_READWRITE, &old))
+        return 0;
+    unsigned char *p = (unsigned char *)target;
+    memcpy(h->orig, cur, (size_t)n);
+    for (int i = 5; i < n; i++)
+        p[i] = 0x90;
+    *(int *)(p + 1) = (int)((unsigned)hook - (target + 5));
+    p[0] = 0xE9;
+    VirtualProtect((void *)target, (SIZE_T)n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void *)target, (SIZE_T)n);
+    h->target = target, h->n = n, h->tramp = t, h->on = 1;
+    return 1;
+}
+
+static void hook_remove(hk_t *h)
+{
+    if (!h->on)
+        return;
+    DWORD old;
+    if (VirtualProtect((void *)h->target, (SIZE_T)h->n, PAGE_EXECUTE_READWRITE, &old)) {
+        memcpy((void *)h->target, h->orig, (size_t)h->n);
+        VirtualProtect((void *)h->target, (SIZE_T)h->n, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), (void *)h->target, (SIZE_T)h->n);
+    }
+    h->on = 0;
+}
+
+static hk_t hk_draw;
+static void (TC *orig_draw)(unsigned self, unsigned cmd);
+static int hud1;               /* the experiment is armed */
+static unsigned n_draw_ovr, n_draw_all, n_hud_upd;
+
+static void TC hook_draw(unsigned self, unsigned cmd)
+{
+    n_draw_all++;
+    if (hud1 && on && !suspended && rd8(cmd + 0x158) == VP_SECOND) {
+        unsigned cm = rd32(COOPMGR_PTR);
+        unsigned f4 = rd32(cm + 0xF4), f8 = rd32(cm + 0xF8);
+        wr32(cm + 0xF4, 2);
+        wr32(cm + 0xF8, 1);
+        n_draw_ovr++;
+        if (hud1 >= 2) {   /* H1b: the HUD state is a scratch pad: prepare it for the other player right before this viewport draws (phases 8 and 9 of the main cockpit manager) */
+            unsigned ck = rd32(0x1169120), mgr = ck ? rd32(ck + 0x28) : 0;
+            if (mgr) {
+                ((void (__attribute__((fastcall)) *)(unsigned))0x7B10F0)(mgr);
+                ((void (__attribute__((fastcall)) *)(unsigned))0x7B0BA0)(mgr);
+                n_hud_upd++;
+            }
+        }
+        orig_draw(self, cmd);
+        wr32(cm + 0xF4, f4);
+        wr32(cm + 0xF8, f8);
+        return;
+    }
+    orig_draw(self, cmd);
+}
+
+/* ---- H2 experiment: a SECOND set of the cockpit (main manager + its children), drawn only in viewport 2 and updated as the other player ----
+ * Made with the engine's own calls (sIDCockpit ctor 0x849880 does the same for the stock set): cdecl factory 0x7AFFB0(size 0x98, align 0x10), ctor 0x7AFFE0
+ * (__fastcall(this)), children 0x7B06D0 (__fastcall(manager), ends with the child chain build 0x7B0220), then 0x9B5280 on the unit manager [0x11E0184]
+ * (__thiscall(sUnit, group 0x16, unit, 0, 0), ret 0x10). View masks (unit+0xC bits 16..25) decide the viewport: the new set gets bit 2 only, the stock main
+ * cockpit and the minimap get bit 0 only. The update phases of the new manager (0x7B10F0 / 0x7B0BA0, which also run its children) run with the own slot = 1. */
+#define FC __attribute__((fastcall))
+static unsigned hud2_mgr;
+static hk_t hk_v8h, hk_v9h;
+static void (FC *orig_v8h)(unsigned);
+static void (FC *orig_v9h)(unsigned);
+static unsigned hud2_orig[64][2];   /* unit, flags before we changed the view mask */
+static int hud2_norig;
+static unsigned n_h2_upd;
+
+static void own_scope_begin(unsigned *f4, unsigned *f8)
+{
+    unsigned cm = rd32(COOPMGR_PTR);
+    *f4 = rd32(cm + 0xF4), *f8 = rd32(cm + 0xF8);
+    wr32(cm + 0xF4, 2);
+    wr32(cm + 0xF8, 1);
+}
+static void own_scope_end(unsigned f4, unsigned f8)
+{
+    unsigned cm = rd32(COOPMGR_PTR);
+    wr32(cm + 0xF4, f4);
+    wr32(cm + 0xF8, f8);
+}
+static void FC hook_v8h(unsigned self)
+{
+    if (hud2_mgr && self == hud2_mgr) {
+        unsigned a, b;
+        own_scope_begin(&a, &b);
+        n_h2_upd++;
+        orig_v8h(self);
+        own_scope_end(a, b);
+        return;
+    }
+    orig_v8h(self);
+}
+static void FC hook_v9h(unsigned self)
+{
+    if (hud2_mgr && self == hud2_mgr) {
+        unsigned a, b;
+        own_scope_begin(&a, &b);
+        orig_v9h(self);
+        own_scope_end(a, b);
+        return;
+    }
+    orig_v9h(self);
+}
+
+static void set_view_mask(unsigned unit, unsigned mask, int remember)
+{
+    unsigned fl = rd32(unit + 0xC);
+    if (remember && hud2_norig < 64) {
+        hud2_orig[hud2_norig][0] = unit, hud2_orig[hud2_norig][1] = fl;
+        hud2_norig++;
+    }
+    wr32(unit + 0xC, (fl & ~0x3FF0000u) | (mask << 16));
+}
+/* mask on a manager and every child of its chain (+0x3C head, next at +0x270) */
+static int set_set_mask(unsigned mgr, unsigned mask, int remember)
+{
+    int n = 0;
+    set_view_mask(mgr, mask, remember);
+    for (unsigned c = rd32(mgr + 0x3C); c && n < 40; c = rd32(c + 0x270), n++)
+        set_view_mask(c, mask, remember);
+    return n;
+}
+
+static void hud2_restore_masks(void)
+{
+    for (int i = 0; i < hud2_norig; i++)
+        wr32(hud2_orig[i][0] + 0xC, (rd32(hud2_orig[i][0] + 0xC) & ~0x3FF0000u) | (hud2_orig[i][1] & 0x3FF0000u));
+    hud2_norig = 0;
+}
+
+static int hud2_make(char *out, int size)
+{
+    static const unsigned char b_v8[] = {0xA1, 0x10, 0x91, 0x16, 0x01, 0x83, 0xEC, 0x0C};
+    static const unsigned char b_v9[] = {0xA1, 0x10, 0x91, 0x16, 0x01, 0x57, 0x8B, 0xF9};
+    unsigned ck = rd32(0x1169120), su = rd32(0x11E0184);
+    if (!ck || !su || !rd32(ck + 0x28)) {
+        snprintf(out, (size_t)size, "hud2: no cockpit yet");
+        return 1;
+    }
+    if (hud2_mgr) {
+        snprintf(out, (size_t)size, "hud2: second cockpit exists (%08x)", hud2_mgr);
+        return 1;
+    }
+    if (!hk_v8h.on && !hook_install(&hk_v8h, 0x7B10F0, b_v8, 8, (void *)hook_v8h)) {
+        snprintf(out, (size_t)size, "hud2: cannot hook 0x7B10F0");
+        return 1;
+    }
+    orig_v8h = (void (FC *)(unsigned))hk_v8h.tramp;
+    if (!hk_v9h.on && !hook_install(&hk_v9h, 0x7B0BA0, b_v9, 8, (void *)hook_v9h)) {
+        snprintf(out, (size_t)size, "hud2: cannot hook 0x7B0BA0");
+        return 1;
+    }
+    orig_v9h = (void (FC *)(unsigned))hk_v9h.tramp;
+    unsigned mem = ((unsigned (*)(unsigned, unsigned))0x7AFFB0)(0x98, 0x10);
+    if (!mem) {
+        snprintf(out, (size_t)size, "hud2: allocation failed");
+        return 1;
+    }
+    unsigned m = ((unsigned (FC *)(unsigned))0x7AFFE0)(mem);
+    A->log("plug_split: hud2: allocated %08x, constructed %08x", mem, m);
+    ((void (FC *)(unsigned))0x7B06D0)(m);
+    A->log("plug_split: hud2: children built");
+    wr32(m + 0xC, rd32(m + 0xC) | 0x2000);
+    hud2_mgr = m;   /* from here on its update phases run as slot 1 */
+    int nk = set_set_mask(m, 4, 0);
+    ((void (TC *)(unsigned, unsigned, unsigned, unsigned, unsigned))0x9B5280)(su, 0x16, m, 0, 0);
+    A->log("plug_split: hud2: registered in group 0x16, %d children, flags %08x", nk, rd32(m + 0xC));
+    /* the stock main cockpit and the minimap only in viewport 0 */
+    int ns = set_set_mask(rd32(ck + 0x28), 1, 1);
+    set_view_mask(rd32(ck + 0x2C), 1, 1);
+    snprintf(out, (size_t)size, "hud2: second cockpit %08x made (%d children, view mask bit 2), stock cockpit restricted to viewport 0 (%d children)", m, nk, ns);
+    return 1;
+}
+
+static int hud1_set(int want)
+{
+    if (want && !hk_draw.on) {
+        static const unsigned char b_draw[] = {0x83, 0xEC, 0x18, 0x53, 0x55, 0x56, 0x57};
+        if (!hook_install(&hk_draw, 0x9B4760, b_draw, 7, (void *)hook_draw))
+            return 0;
+        orig_draw = (void (TC *)(unsigned, unsigned))hk_draw.tramp;
+    }
+    hud1 = want;
+    return 1;
 }
 
 /* ---- probe ---- */
@@ -299,6 +534,14 @@ static int hud_probe(char *out, int size)
         cname(c, cn, sizeof cn);
         P("   child %08x %-28s flags %08x en(bit14) %u skip(+274) %u viewmask %03x\n", c, cn, rd32(c + 0xC), (rd32(c + 0xC) >> 14) & 1, rd8(c + 0x274), (rd32(c + 0xC) >> 16) & 0x3FF);
     }
+    if (hud2_mgr) {
+        P(" hud2 manager %08x flags %08x state %u viewmask %03x%s", hud2_mgr, rd32(hud2_mgr + 0xC), rd32(hud2_mgr + 0xC) & 7, (rd32(hud2_mgr + 0xC) >> 16) & 0x3FF, "\n");
+        unsigned n2 = 0;
+        for (unsigned c = rd32(hud2_mgr + 0x3C); c && n2 < 40; c = rd32(c + 0x270), n2++) {
+            cname(c, cn, sizeof cn);
+            P("   h2 child %08x %-28s flags %08x viewmask %03x%s", c, cn, rd32(c + 0xC), (rd32(c + 0xC) >> 16) & 0x3FF, "\n");
+        }
+    }
     P("   (%u children of the main cockpit listed)\n", n);
 #undef P
     return 1;
@@ -320,6 +563,26 @@ static int on_cmd(const char *name, const char *arg, char *out, int size)
         return probe(out, size);
     if (!strcmp(sub, "hud"))
         return hud_probe(out, size);
+    if (!strcmp(sub, "hud2")) {   /* hud2 make | hud2 restore */
+        if (!strcmp(a1, "make"))
+            return hud2_make(out, size);
+        if (!strcmp(a1, "restore")) {
+            hud2_restore_masks();
+            if (hud2_mgr)
+                set_set_mask(hud2_mgr, 0, 0);
+            snprintf(out, (size_t)size, "hud2: stock view masks restored, second cockpit hidden (mask 0); extra updates so far %u", n_h2_upd);
+            return 1;
+        }
+        snprintf(out, (size_t)size, "hud2 make | hud2 restore (second cockpit %08x, updates %u)", hud2_mgr, n_h2_upd);
+        return 1;
+    }
+    if (!strcmp(sub, "hud1")) {   /* hud1 on|off: own slot = 1 while the viewport-2 pass draws (H1 experiment) */
+        int want = !strcmp(a1, "off") ? 0 : !strcmp(a1, "2") ? 2 : 1;
+        int ok = hud1_set(want);
+        snprintf(out, (size_t)size, "hud1 %s%s (draw hook %s, draws %u, overridden %u, extra cockpit updates %u)", want ? (want == 2 ? "2 (own slot + extra cockpit update)" : "1 (own slot only)") : "off", ok ? "" : " FAILED",
+                 hk_draw.on ? "installed" : "not installed", n_draw_all, n_draw_ovr, n_hud_upd);
+        return 1;
+    }
     if (!strcmp(sub, "on")) {
         for (const char *p = a1; p; p = (p == a1) ? a2 : NULL) {
             if (!strcmp(p, "dup"))
@@ -387,6 +650,13 @@ static void on_frame_(void) { apply(); }
 
 static void on_exit_(void)
 {
+    hud1 = 0;
+    hud2_restore_masks();
+    if (hud2_mgr)
+        set_set_mask(hud2_mgr, 0, 0);
+    hook_remove(&hk_draw);
+    hook_remove(&hk_v8h);
+    hook_remove(&hk_v9h);
     if (on || have_saved) {
         on = 0;
         restore();
