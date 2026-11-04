@@ -87,6 +87,22 @@ typedef struct {
 
 enum { L1R_NONE = 0, L1R_CLOSE };
 
+/* ---- raw input -> events (lobby1_input.c): keyboard keys and two gamepads, with auto repeat; the key / button that opened the screen must be released first ---- */
+typedef struct {
+    unsigned char up, down, left, right, enter, space, esc, f6;   /* keyboard, 1 = down */
+    unsigned short pad_buttons[2];                                /* XInput wButtons of physical users 0 and 1 (0 when not connected) */
+    short lx[2], ly[2];                                           /* left stick */
+} l1_raw;
+typedef struct {
+    int armed;                 /* the opening key has been released */
+    unsigned char prev[24];    /* previous down state per input */
+    unsigned next[24];         /* auto repeat deadlines */
+    int init;
+} l1_input;
+void l1_input_reset(l1_input *in);                                 /* call when the screen opens */
+/* open = the lobby is open. Returns the number of events written to ev (max entries); *want_open = 1 when the open gesture was made (F6 or the BACK button) while closed. */
+int l1_input_poll(l1_input *in, const l1_raw *raw, unsigned now_ms, int open, l1_event *ev, int max, int *want_open);
+
 typedef struct l1 l1_t;
 l1_t *l1_new(void);
 void l1_free(l1_t *l);
@@ -98,8 +114,9 @@ void l1_settings_get(l1_t *l, l1_settings *s);
 int l1_take_request(l1_t *l);                                     /* L1R_* once */
 int l1_changed(l1_t *l);                                          /* 1 once after the settings changed (persist them) */
 
-/* resolved assignment for the capture / split modules: unit slots and pad slots of the two humans */
-typedef struct { int unit1, unit2, pad1, pad2; } l1_assign;
+/* resolved assignment for the capture / split modules: unit slots of the two humans, their pad slots (player 1 is always on pad slot 0: the game's menus read slot 0 as "the local human")
+ * and whether the two PHYSICAL gamepads are exchanged at the XInput level (testmode_pad_swap_base): that is how "player 1 uses gamepad 2" is done. */
+typedef struct { int unit1, unit2, pad1, pad2, swap; } l1_assign;
 void l1_assign_get(const l1_settings *s, l1_assign *a);
 
 /* title-screen hint / banner line for the current settings */

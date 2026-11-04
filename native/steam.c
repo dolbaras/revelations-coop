@@ -241,11 +241,15 @@ static void wrap_stats(void *iface, const char *ver)
     }
 }
 
+static void *g_ctx;
+void *steam_context(void) { return g_ctx; }
+
 static void *__cdecl hook_ContextInit(void *data)
 {
     void *r = real_ContextInit(data);
     static int n;
     if (r) {
+        g_ctx = r;
         void *stats = NULL;
         r1_safe_read((char *)r + 0x14, &stats, 4);
         if (++n <= 3) {

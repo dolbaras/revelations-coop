@@ -162,10 +162,10 @@ static void test_model(void)
     /* the assignment for the capture / split modules */
     l1_assign a;
     l1_assign_get(&s, &a);
-    CHECK(a.unit1 == 0 && a.unit2 == 1 && a.pad1 == 1 && a.pad2 == 0);
+    CHECK(a.unit1 == 0 && a.unit2 == 1 && a.pad1 == 0 && a.pad2 == 1 && a.swap == 1);
     s.role = L1_PARTNER, s.pads_swapped = 0;
     l1_assign_get(&s, &a);
-    CHECK(a.unit1 == 1 && a.unit2 == 0 && a.pad1 == 0 && a.pad2 == 1);
+    CHECK(a.unit1 == 1 && a.unit2 == 0 && a.pad1 == 0 && a.pad2 == 1 && a.swap == 0);
     /* Done and Back close */
     ev(l, L1E_DOWN);
     l1_view_get(l, &v);
@@ -328,6 +328,78 @@ static void test_gmd(void)
     CHECK(gmd_parse(buf, (unsigned)off) == NULL);
 }
 
+static void test_input(void)
+{
+    l1_input in;
+    l1_raw r;
+    l1_event ev[8];
+    int want = 0, n;
+    memset(&r, 0, sizeof r);
+    l1_input_reset(&in);
+    /* closed: nothing happens, F6 opens (after the first neutral poll armed the input) */
+    n = l1_input_poll(&in, &r, 1000, 0, ev, 8, &want);
+    CHECK(n == 0 && !want);
+    r.f6 = 1;
+    r.enter = 1;   /* Enter is held too when the screen opens */
+    n = l1_input_poll(&in, &r, 1010, 0, ev, 8, &want);
+    CHECK(n == 0 && want == 1);
+    n = l1_input_poll(&in, &r, 1020, 0, ev, 8, &want);   /* still held: no second open gesture */
+    CHECK(n == 0 && want == 0);
+    /* the lobby opens with F6 still held and Enter held too: neither counts */
+    n = l1_input_poll(&in, &r, 1030, 1, ev, 8, &want);
+    CHECK(n == 0);
+    r.f6 = 0;
+    n = l1_input_poll(&in, &r, 1040, 1, ev, 8, &want);
+    CHECK(n == 0);
+    r.enter = 0;
+    n = l1_input_poll(&in, &r, 1050, 1, ev, 8, &want);
+    CHECK(n == 0);
+    /* navigation with repeat */
+    r.down = 1;
+    n = l1_input_poll(&in, &r, 1100, 1, ev, 8, &want);
+    CHECK(n == 1 && ev[0].kind == L1E_DOWN);
+    n = l1_input_poll(&in, &r, 1300, 1, ev, 8, &want);   /* before the first repeat (420 ms) */
+    CHECK(n == 0);
+    n = l1_input_poll(&in, &r, 1530, 1, ev, 8, &want);
+    CHECK(n == 1 && ev[0].kind == L1E_DOWN);
+    n = l1_input_poll(&in, &r, 1560, 1, ev, 8, &want);
+    CHECK(n == 0);
+    n = l1_input_poll(&in, &r, 1625, 1, ev, 8, &want);
+    CHECK(n == 1);
+    r.down = 0;
+    /* confirm and back by keyboard and pad A / B; F6 closes */
+    r.enter = 1; n = l1_input_poll(&in, &r, 2000, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_OK); r.enter = 0;
+    r.esc = 1; n = l1_input_poll(&in, &r, 2010, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_BACK); r.esc = 0;
+    n = l1_input_poll(&in, &r, 2020, 1, ev, 8, &want); CHECK(n == 0);
+    r.pad_buttons[1] = 0x1000; n = l1_input_poll(&in, &r, 2030, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_OK); r.pad_buttons[1] = 0;
+    r.pad_buttons[0] = 0x2000; n = l1_input_poll(&in, &r, 2040, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_BACK); r.pad_buttons[0] = 0;
+    n = l1_input_poll(&in, &r, 2050, 1, ev, 8, &want); CHECK(n == 0);
+    r.f6 = 1; n = l1_input_poll(&in, &r, 2060, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_BACK); r.f6 = 0;
+    r.pad_buttons[0] = 0x0020; n = l1_input_poll(&in, &r, 2070, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_BACK); r.pad_buttons[0] = 0;
+    /* d-pad and stick */
+    n = l1_input_poll(&in, &r, 2100, 1, ev, 8, &want); CHECK(n == 0);
+    r.pad_buttons[0] = 0x0001; n = l1_input_poll(&in, &r, 2110, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_UP); r.pad_buttons[0] = 0;
+    n = l1_input_poll(&in, &r, 2120, 1, ev, 8, &want);
+    r.lx[1] = 30000; n = l1_input_poll(&in, &r, 2130, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_RIGHT); r.lx[1] = -30000;
+    n = l1_input_poll(&in, &r, 2140, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_LEFT); r.lx[1] = 0;
+    r.ly[0] = -30000; n = l1_input_poll(&in, &r, 2150, 1, ev, 8, &want); CHECK(n == 1 && ev[0].kind == L1E_DOWN); r.ly[0] = 0;
+    r.ly[0] = 1000; n = l1_input_poll(&in, &r, 2160, 1, ev, 8, &want); CHECK(n == 0);   /* below the dead zone */
+    r.ly[0] = 0;
+    /* the BACK button opens from the closed state, the held button does not count twice */
+    l1_input_reset(&in);
+    n = l1_input_poll(&in, &r, 3000, 0, ev, 8, &want); CHECK(!want);
+    r.pad_buttons[1] = 0x0020; n = l1_input_poll(&in, &r, 3010, 0, ev, 8, &want); CHECK(want == 1);
+    n = l1_input_poll(&in, &r, 3020, 0, ev, 8, &want); CHECK(want == 0);
+    r.pad_buttons[1] = 0;
+    /* a key that is already down when the module starts never opens */
+    l1_input_reset(&in);
+    r.f6 = 1; n = l1_input_poll(&in, &r, 4000, 0, ev, 8, &want); CHECK(!want);
+    n = l1_input_poll(&in, &r, 4010, 0, ev, 8, &want); CHECK(!want);
+    r.f6 = 0; n = l1_input_poll(&in, &r, 4020, 0, ev, 8, &want); CHECK(!want);
+    r.f6 = 1; n = l1_input_poll(&in, &r, 4030, 0, ev, 8, &want); CHECK(want == 1);
+    (void)n;
+}
+
 int main(void)
 {
     test_texts();
@@ -336,6 +408,7 @@ int main(void)
     test_views_all_languages();
     test_ini();
     test_gmd();
+    test_input();
     printf("%d checks, %d failed\n", checks, fails);
     printf(fails ? "FAILED\n" : "ALL OK\n");
     return fails ? 1 : 0;

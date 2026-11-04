@@ -114,6 +114,7 @@ static HRESULT WINAPI hook_Present(IDirect3DDevice9 *dev, const RECT *s, const R
         shot_next++;
         save_frame(dev);
     }
+    menu_present(dev);   /* the co-op lobby / title hint (nothing happens unless the menu module published a scene) */
     return real_Present(dev, s, d, w, r);
 }
 
@@ -129,6 +130,7 @@ static void log_pp(const char *what, const D3DPRESENT_PARAMETERS *pp)
 static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
     log_pp("device Reset asked", pp);
+    menu_before_reset();
     if (testmode_force_windowed() && pp) {
         pp->Windowed = TRUE;                   /* a test instance never goes exclusive full screen; windowed needs refresh 0 */
         pp->FullScreen_RefreshRateInHz = 0;

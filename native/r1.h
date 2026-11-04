@@ -49,6 +49,8 @@ void testmode_dinput_stats(char *out, int size);
 int testmode_pad_peek(int user, void *xinput_gamepad_out);                    /* what XInputGetState(user) would give the game: synthetic first, else real; 1 = connected */
 void testmode_pad_swap(int on);                                                /* game pad slots 0 and 1 read the other physical pad (split screen: second human's menu) */
 int testmode_pad_swapped(void);
+void testmode_pad_swap_base(int on);                                           /* permanent exchange of the two physical pads (lobby: player 1 uses gamepad 2); XOR with testmode_pad_swap */
+int testmode_pad_swap_base_get(void);
 void testmode_xinput_sites(char *out, int size);                              /* which XInput users the game polls, from which call sites */
 
 /* inject.c: synthetic keyboard / mouse for test runs */
@@ -75,6 +77,7 @@ unsigned d3d_frames(void);
 /* steam.c: the game's own Steam calls (log only): init/callback timing, ISteamUserStats achievement calls */
 void steam_install(void);
 void steam_stats(char *out, int size);
+void *steam_context(void);   /* CSteamAPIContext* the game obtained from SteamInternal_ContextInit (NULL before) */
 
 /* lt.c: run code on the game's logic thread (hook in the thread proc), keep-alive for background test mode */
 void lt_install(void);
@@ -122,6 +125,12 @@ int classes_object_name(unsigned obj, char *out, int size);           /* just th
 /* console.c: UDP test console on 127.0.0.1:REV1_CONSOLE */
 void console_install(void);
 void console_exec(const char *cmd, char *out, int size);
+
+/* menu.c: the "Co-Op Play" entry in the title menu and the lobby (stage 6): hint + lobby overlay, settings, applies capture / split. d3d.c calls menu_present / menu_before_reset. */
+void menu_install(void);                    /* once, from probe_install (game thread) */
+void menu_present(void *d3d9_device);       /* Present hook (render thread): draws the scene the game thread published */
+void menu_before_reset(void);
+void menu_cmd(const char *arg, char *out, int size);   /* console "menu ..." (game thread) */
 
 /* mute.c: REV1_MUTE=1 keeps this process's audio sessions muted */
 void mute_install(void);

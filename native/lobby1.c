@@ -76,8 +76,9 @@ void l1_assign_get(const l1_settings *s, l1_assign *a)
 {
     a->unit1 = s->role == L1_PARTNER ? 1 : 0;
     a->unit2 = 1 - a->unit1;
-    a->pad1 = s->pads_swapped ? 1 : 0;
-    a->pad2 = 1 - a->pad1;
+    a->pad1 = 0;
+    a->pad2 = 1;
+    a->swap = s->pads_swapped ? 1 : 0;
 }
 
 /* ---------------------------------------------------------------- model */
@@ -237,8 +238,8 @@ void l1_view_get(l1_t *l, l1_view *v)
     const char *lead = lead_name(l), *part = partner_name(l);
     snprintf(v->card[0].chr, sizeof v->card[0].chr, "%s", a.unit1 == 0 ? lead : part);
     snprintf(v->card[1].chr, sizeof v->card[1].chr, "%s", a.unit2 == 0 ? lead : part);
-    snprintf(v->card[0].pad, sizeof v->card[0].pad, "%s", l1_text(a.pad1 == 0 ? L1T_PAD1 : L1T_PAD2, lang));
-    snprintf(v->card[1].pad, sizeof v->card[1].pad, "%s", l1_text(a.pad2 == 0 ? L1T_PAD1 : L1T_PAD2, lang));
+    snprintf(v->card[0].pad, sizeof v->card[0].pad, "%s", l1_text(a.swap ? L1T_PAD2 : L1T_PAD1, lang));
+    snprintf(v->card[1].pad, sizeof v->card[1].pad, "%s", l1_text(a.swap ? L1T_PAD1 : L1T_PAD2, lang));
     if (l->s.armed) {
         if (l->env.pads_connected <= 0) {
             snprintf(v->status, sizeof v->status, "%s", l1_text(L1T_WARN_NOPAD, lang));

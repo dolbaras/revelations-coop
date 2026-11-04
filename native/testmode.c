@@ -412,13 +412,16 @@ void testmode_xinput_sites(char *out, int size)
 
 /* split screen: while the second human's menu is open the game's pad slots 0 and 1 are fed from the OTHER physical pad (the menus read slot 0 as "the local human") */
 static volatile LONG pad_swap;
+static volatile LONG pad_swap_base;   /* the co-op lobby's "player 1 uses gamepad 2": a permanent exchange; the menu exchange above toggles on top of it (XOR) */
 void testmode_pad_swap(int on) { InterlockedExchange(&pad_swap, on != 0); }
 int testmode_pad_swapped(void) { return pad_swap != 0; }
+void testmode_pad_swap_base(int on) { InterlockedExchange(&pad_swap_base, on != 0); }
+int testmode_pad_swap_base_get(void) { return pad_swap_base != 0; }
 
 static DWORD xinput_inner(DWORD i, XINPUT_STATE *st)
 {
     static LONG logged;
-    if (pad_swap && i < 2)
+    if ((pad_swap ^ pad_swap_base) && i < 2)
         i ^= 1;
     if (i < 4 && synth[i].active && st) {
         if (synth[i].until && (LONG)(GetTickCount() - synth[i].until) >= 0) {
