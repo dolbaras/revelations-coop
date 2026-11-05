@@ -17,6 +17,7 @@
 #include <d3d9.h>
 #include <xinput.h>
 #include "coop_input.h"
+#include "padmap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,12 +32,14 @@ static WNDPROC game_wndproc;
 
 int testmode_background(void) { return background; }
 int testmode_force_windowed(void) { return background || have_pos || have_size; }
-HWND testmode_window(void) { return game_window; }
+static HWND main_window(void);
+HWND testmode_window(void) { return main_window(); }
 void testmode_window_size(int *w, int *h) { *w = have_size ? win_w : 0, *h = have_size ? win_h : 0; }
 
 static int really_in_front(void)
 {
-    return game_window && GetForegroundWindow() == game_window;
+    HWND w = main_window();
+    return w && GetForegroundWindow() == w;
 }
 
 typedef HWND (WINAPI *CreateWindowExA_t)(DWORD, LPCSTR, LPCSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
@@ -147,6 +150,42 @@ static LRESULT CALLBACK bg_wndprocW(HWND w, UINT msg, WPARAM wp, LPARAM lp) { re
 static int is_main_window(HWND hw, int wide)
 {
     return (DWORD)(wide ? GetWindowLongPtrW(hw, GWLP_WNDPROC) : GetWindowLongPtrA(hw, GWLP_WNDPROC)) == R1_WNDPROC;
+}
+
+/* A player's start has none of the window variables, so the CreateWindow hooks are not installed and game_window stays empty: the lobby's keys / mouse (menu.c in_foreground),
+ * the F11 key and the pad focus gate then saw "no window". The game's main window is found by its window procedure instead (once; looked up again at most twice a second). */
+static BOOL CALLBACK find_main_cb(HWND hw, LPARAM lp)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hw, &pid);
+    if (pid == GetCurrentProcessId() && (is_main_window(hw, 0) || is_main_window(hw, 1))) {
+        *(HWND *)lp = hw;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND found_window;
+static HWND find_main_window(void)
+{
+    static DWORD last_try;
+    if (found_window && IsWindow(found_window))
+        return found_window;
+    DWORD now = GetTickCount();
+    if (last_try && (LONG)(now - last_try) < 500)
+        return NULL;
+    last_try = now | 1;
+    HWND hw = NULL;
+    EnumWindows(find_main_cb, (LPARAM)&hw);
+    found_window = hw;
+    if (hw)
+        r1_log("window: the game's main window %p found by its window procedure (no CreateWindow hook in this start)", (void *)hw);
+    return hw;
+}
+
+static HWND main_window(void)
+{
+    return game_window ? game_window : find_main_window();
 }
 
 static void adopt_window(HWND hw, DWORD style, const char *cls, int wide)
@@ -462,11 +501,96 @@ int testmode_pad_swap_base_get(void) { return pad_swap_base != 0; }
 static volatile LONG pad_merge;
 void testmode_pad_merge(int on) { InterlockedExchange(&pad_merge, on != 0); }
 
-static DWORD xinput_inner(DWORD i, XINPUT_STATE *st)
+/* ---- routing of the game's XInput users to the physical pads (padmap.h): compact numbering, exchange, hidden duplicates ---- */
+static int dedup_on = 1;                 /* REV1_PADDEDUP=0 switches the duplicate detection off (tests that drive two virtual pads with the same stick values) */
+static volatile LONG pm_masks;           /* connected users (bits 0..3) | hidden duplicate users << 8 */
+static volatile LONG pm_valid, pm_lock;
+static DWORD pm_tick, pm_full_tick;
+static r1_dupdet_t pm_det;
+static LONG pm_logged = -1;
+
+static int pads_visible(void)
+{
+    return real_XInputGetState && !(background && !pads_allowed && !really_in_front());
+}
+
+/* Looks at every connected pad (the game polls all four users every frame as well; absent users are only scanned once a second) and keeps the list of usable pads. */
+static void pm_refresh(void)
+{
+    DWORD now = GetTickCount();
+    if (pm_valid && (LONG)(now - pm_tick) < 8)
+        return;
+    if (InterlockedCompareExchange(&pm_lock, 1, 0))
+        return;
+    LONG old = pm_masks;
+    unsigned old_conn = (unsigned)old & 15u, conn = 0, dup = 0;
+    r1_input_t st[R1_PM_USERS];
+    memset(st, 0, sizeof st);
+    pm_tick = now;
+    if (pads_visible()) {
+        int full = !pm_valid || (LONG)(now - pm_full_tick) >= 1000;
+        for (int u = 0; u < R1_PM_USERS; u++) {
+            XINPUT_STATE s;
+            if ((full || ((old_conn >> u) & 1u)) && poll_real((DWORD)u, &s) == ERROR_SUCCESS) {
+                conn |= 1u << u;
+                memcpy(&st[u], &s.Gamepad, sizeof st[u]);
+            }
+        }
+        if (full)
+            pm_full_tick = now;
+        else if (conn != old_conn)
+            pm_full_tick = 0;   /* a pad dropped out: look for the others at once */
+        if (dedup_on)
+            dup = r1_dupdet_feed(&pm_det, st, conn);
+    } else
+        r1_dupdet_reset(&pm_det);
+    LONG nm = (LONG)(conn | (dup << 8));
+    if (nm != pm_logged) {
+        r1_padlist_t l;
+        r1_padlist_build(&l, conn, dup);
+        r1_log("padmap: XInput users connected %x, hidden duplicates %x -> the game sees %d pad(s): game user 0=%d 1=%d 2=%d 3=%d (physical users)", conn, dup, l.n, l.phys[0], l.phys[1], l.phys[2],
+               l.phys[3]);
+        pm_logged = nm;
+    }
+    InterlockedExchange(&pm_masks, nm);
+    pm_valid = 1;
+    InterlockedExchange(&pm_lock, 0);
+}
+
+static void pm_list(r1_padlist_t *l)
+{
+    pm_refresh();
+    LONG m = pm_masks;
+    r1_padlist_build(l, (unsigned)m & 15u, ((unsigned)m >> 8) & 15u);
+}
+
+static int pad_exchanged(void) { return (pad_swap ^ pad_swap_base) != 0; }
+
+/* console `pads`: what the routing does now; also the window found by its window procedure next to the one the CreateWindow hook adopted */
+void testmode_padmap_stats(char *out, int size)
+{
+    r1_padlist_t l;
+    pm_list(&l);
+    LONG m = pm_masks;
+    HWND f = NULL;
+    EnumWindows(find_main_cb, (LPARAM)&f);
+    snprintf(out, (size_t)size, "padmap: connected %lx hidden duplicates %lx, game sees %d pad(s): game user -> physical user 0=%d 1=%d 2=%d 3=%d, exchange %d (menu %ld base %ld), duplicate detection %s; main window hook %p finder %p",
+             m & 15, (m >> 8) & 15, l.n, l.phys[0], l.phys[1], l.phys[2], l.phys[3], pad_exchanged(), pad_swap, pad_swap_base, dedup_on ? "on" : "off", (void *)game_window, (void *)f);
+}
+
+/* the physical user behind a game slot (after the exchange), -1 = none */
+static int pad_phys_of_slot(int slot)
+{
+    r1_padlist_t l;
+    pm_list(&l);
+    return r1_pad_phys(&l, slot);
+}
+
+/* what XInputGetState(i) answers: count = 0 for the mod's own peeks (no statistics) */
+static DWORD route_state(DWORD i, XINPUT_STATE *st, int count)
 {
     static LONG logged;
-    if ((pad_swap ^ pad_swap_base) && i < 2)
-        i ^= 1;
+    i = (DWORD)r1_pad_slot((int)i, pad_exchanged());
     if (i < 4 && synth[i].active && st) {
         if (synth[i].until && (LONG)(GetTickCount() - synth[i].until) >= 0) {
             memset(&synth[i].pad, 0, sizeof synth[i].pad);
@@ -501,18 +625,25 @@ static DWORD xinput_inner(DWORD i, XINPUT_STATE *st)
     if (background && !pads_allowed && !really_in_front()) {
         if (InterlockedIncrement(&logged) == 1)
             r1_log("xinput: pads hidden while the window is not in front (REV1_BACKGROUND)");
+        if (st)
+            memset(st, 0, sizeof *st);
         return ERROR_DEVICE_NOT_CONNECTED;
     }
-    DWORD r = poll_real(i, st);
-    if (i < 4)
+    int ph = i < 4 ? pad_phys_of_slot((int)i) : -1;
+    DWORD r = ph >= 0 ? poll_real((DWORD)ph, st) : ERROR_DEVICE_NOT_CONNECTED;
+    if (ph < 0 && st)
+        memset(st, 0, sizeof *st);
+    if (count && i < 4)
         InterlockedIncrement(&xinput_seen[i][r == ERROR_SUCCESS ? 0 : r == ERROR_DEVICE_NOT_CONNECTED ? 1 : 2]);
-    if (r == ERROR_SUCCESS)
+    if (r == ERROR_SUCCESS && count)
         InterlockedIncrement(&xinput_ok);
     static LONG n_pressed;
-    if (r == ERROR_SUCCESS && st && st->Gamepad.wButtons && InterlockedIncrement(&n_pressed) <= 5)
+    if (r == ERROR_SUCCESS && count && st && st->Gamepad.wButtons && InterlockedIncrement(&n_pressed) <= 5)
         r1_log("xinput: pad %lu buttons=%04x (seen by the game's own call)", i, st->Gamepad.wButtons);
     return r;
 }
+
+static DWORD xinput_inner(DWORD i, XINPUT_STATE *st) { return route_state(i, st, 1); }
 
 static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
 {
@@ -543,8 +674,9 @@ typedef DWORD (WINAPI *XInputSetState_t)(DWORD, XINPUT_VIBRATION *);
 static XInputGetCapabilities_t real_XInputGetCapabilities;
 static XInputSetState_t real_XInputSetState;
 
-static DWORD WINAPI hook_XInputGetCapabilities(DWORD i, DWORD flags, XINPUT_CAPABILITIES *c)
+static DWORD WINAPI hook_XInputGetCapabilities(DWORD user, DWORD flags, XINPUT_CAPABILITIES *c)
 {
+    DWORD i = (DWORD)r1_pad_slot((int)user, pad_exchanged());   /* the same routing as XInputGetState */
     if (i < 4 && (synth[i].active || keep_user[i]) && c) {
         memset(c, 0, sizeof *c);
         c->Type = XINPUT_DEVTYPE_GAMEPAD;
@@ -555,7 +687,10 @@ static DWORD WINAPI hook_XInputGetCapabilities(DWORD i, DWORD flags, XINPUT_CAPA
         c->Gamepad.sThumbLX = c->Gamepad.sThumbLY = c->Gamepad.sThumbRX = c->Gamepad.sThumbRY = (SHORT)-64;
         return ERROR_SUCCESS;
     }
-    return real_XInputGetCapabilities ? real_XInputGetCapabilities(i, flags, c) : ERROR_DEVICE_NOT_CONNECTED;
+    if (!real_XInputGetCapabilities)
+        return ERROR_DEVICE_NOT_CONNECTED;
+    int ph = i < 4 && !(human_user >= 0) ? pad_phys_of_slot((int)i) : (int)i;
+    return ph >= 0 ? real_XInputGetCapabilities((DWORD)ph, flags, c) : ERROR_DEVICE_NOT_CONNECTED;
 }
 
 /* XInputEnable (ordinal 5 of XINPUT1_3): the game turns XInput OFF when its window is not the active application, and XInput then answers every
@@ -576,15 +711,17 @@ static void WINAPI hook_XInputEnable(BOOL enable)
         real_XInputEnable(enable);
 }
 
-static DWORD WINAPI hook_XInputSetState(DWORD i, XINPUT_VIBRATION *v)
+static DWORD WINAPI hook_XInputSetState(DWORD user, XINPUT_VIBRATION *v)
 {
+    DWORD i = (DWORD)r1_pad_slot((int)user, pad_exchanged());   /* R1-3: rumble follows the same routing as the state, so it reaches the pad that the character is played on */
     if (i < 4 && (LONG)i == human_user && keep_user[i] && real_XInputGetState && real_XInputSetState && real_user_cache >= 0)   /* rumble goes to the human's real pad */
         return real_XInputSetState((DWORD)real_user_cache, v);
     if (i < 4 && (synth[i].active || keep_user[i]))
         return ERROR_SUCCESS;
     if (human_user >= 0)
         return ERROR_DEVICE_NOT_CONNECTED;
-    return real_XInputSetState ? real_XInputSetState(i, v) : ERROR_DEVICE_NOT_CONNECTED;
+    int ph = i < 4 ? pad_phys_of_slot((int)i) : -1;
+    return real_XInputSetState && ph >= 0 ? real_XInputSetState((DWORD)ph, v) : ERROR_DEVICE_NOT_CONNECTED;
 }
 
 /* The game ignores its pads unless it is the foreground window: a test instance that is meant to read virtual pads
@@ -812,6 +949,7 @@ void testmode_install(void)
     background = r1_env("REV1_BACKGROUND", v, sizeof v) && v[0] == '1';
     pads_allowed = r1_env("REV1_PADS", v, sizeof v) && v[0] == '1';   /* virtual test pads reach the game while it is in the background */
     winlog = r1_env("REV1_WINLOG", v, sizeof v) && v[0] == '1';
+    dedup_on = !(r1_env("REV1_PADDEDUP", v, sizeof v) && v[0] == '0');   /* hidden duplicates of one physical pad (padmap.h) */
     r1_env("REV1_ADAPTER", adapter_mode, sizeof adapter_mode);
     {
         real_MessageBoxA = (MessageBoxA_t)r1_patch_iat("USER32.dll", "MessageBoxA", (void *)hook_MessageBoxA);
@@ -852,28 +990,21 @@ void testmode_install(void)
            have_size ? "on" : "off", background, adapter_mode[0] ? adapter_mode : "game's");
 }
 
-/* The state the game would get from XInputGetState(user): a synthetic pad (console pad/padhold) first, else the real one (when allowed); 1 = connected */
+/* The state the game would get from XInputGetState(user): a synthetic pad (console pad/padhold) first, else the real one; 1 = connected.
+ * Same routing as the game's own call (exchange, compact numbering, hidden duplicates: R1-1 / R1-2 / R1-4); a REAL pad is only read while the window is in front (R1-5). */
 int testmode_pad_peek(int user, void *out)
 {
     XINPUT_GAMEPAD *g = (XINPUT_GAMEPAD *)out;
     if (user < 0 || user > 3)
         return 0;
-    if (synth[user].active) {
-        if (synth[user].until && (LONG)(GetTickCount() - synth[user].until) >= 0) {
-            memset(&synth[user].pad, 0, sizeof synth[user].pad);
-            synth[user].until = 0;
-            synth[user].packet++;
-            InterlockedExchange(&synth[user].active, synth[user].base_active);
-        }
-        if (synth[user].active) {
-            *g = synth[user].pad;
-            return 1;
-        }
-    }
-    if (!real_XInputGetState || (background && !pads_allowed && !really_in_front()))
+    int slot = r1_pad_slot(user, pad_exchanged());
+    if (!r1_pad_peek_allowed(slot < 4 && synth[slot].active, pads_allowed, really_in_front()))
+        return 0;
+    if (!real_XInputGetState)
         return 0;
     XINPUT_STATE st;
-    if (poll_real((DWORD)user, &st) != ERROR_SUCCESS)
+    memset(&st, 0, sizeof st);
+    if (route_state((DWORD)user, &st, 0) != ERROR_SUCCESS)
         return 0;
     *g = st.Gamepad;
     return 1;

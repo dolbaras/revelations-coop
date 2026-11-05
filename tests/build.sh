@@ -8,3 +8,5 @@ mkdir -p build
 ./build/test_lobby1.exe
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_padmerge.exe test_padmerge.c
 ./build/test_padmerge.exe
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_padmap.exe test_padmap.c
+./build/test_padmap.exe

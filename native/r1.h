@@ -52,6 +52,7 @@ int testmode_pad_swapped(void);
 void testmode_pad_swap_base(int on);                                           /* permanent exchange of the two physical pads (lobby: player 1 uses gamepad 2); XOR with testmode_pad_swap */
 int testmode_pad_swap_base_get(void);
 void testmode_pad_merge(int on);                                                /* while on, the game's pad 0 also carries the buttons / sticks of pad 1 (a full-screen question that either human may answer) */
+void testmode_padmap_stats(char *out, int size);                              /* console `pads`: routing of the game's users to the physical pads */
 void testmode_xinput_sites(char *out, int size);                              /* which XInput users the game polls, from which call sites */
 
 /* inject.c: synthetic keyboard / mouse for test runs */

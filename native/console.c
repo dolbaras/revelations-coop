@@ -261,6 +261,9 @@ static void run(const char *cmd, char *out, int size)
         int o = (int)strlen(out);
         out[o++] = '\n';
         testmode_xinput_sites(out + o, size - o);
+        o = (int)strlen(out);
+        out[o++] = '\n';
+        testmode_padmap_stats(out + o, size - o);
     } else if (!strcmp(name, "post")) {   /* post <hexmsg> [hexwparam] [hexlparam] to the game window */
         char m[16] = "0", wp[16] = "0", lp[16] = "0";
         sscanf(arg, "%15s %15s %15s", m, wp, lp);
