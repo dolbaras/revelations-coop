@@ -1,4 +1,4 @@
-Resident Evil Revelations Co-op - PRE-RELEASE 1 (version 0.0.1)
+Resident Evil Revelations Co-op - PRE-RELEASE 2 (version 0.0.2)
 ================================================================
 
 This is a test version. It is meant to be tried and reported on, not a finished release. Please read "Known problems" below.
@@ -27,12 +27,13 @@ and removes the shortcuts. Your saves are not touched; the lobby's settings file
 Needs: the Steam version of Resident Evil Revelations, build 13298487 (the installer checks rerev.exe and refuses any other one), Windows 10 or 11, PowerShell
 5.1 (part of Windows), two gamepads for two players. The mod changes no game file other than adding dinput8.dll; it does not touch the Steam stub or Raid.
 
-Known problems (pre-release 1)
-- The game can CRASH when the SECOND player (gamepad 2, the partner character) kills an enemy with a shot. Seen in the lab on a nearly dead enemy; the lead's kills and kills without co-op did not crash.
-  Save often (the game's checkpoints are fine) and tell us if it happens.
+Known problems (pre-release 2)
+- The game CRASHED in the lab when the SECOND player (gamepad 2) killed an enemy with a shot, on a fresh test save where the first player's bag is empty. It probably depends on that
+  test save and not on a normal one, but this is not proven. Save often (the game's checkpoints are fine) and tell us if it happens.
 - Not included yet: network co-op, a special rule for the parts of the story with only one playable character, a separate action prompt in each view (the prompt shows in both),
-  a wider field of view in the side-by-side layout (it is narrow; top / bottom is better), a sound listener per player.
-- Tested so far in a lab window with virtual gamepads; the normal start through the shortcut and two physical gamepads still need you.
+  a wider field of view in the side-by-side layout (it is narrower than top / bottom), a sound listener per player.
+- Checked by the tester on a normal desktop with keyboard and mouse: the lobby (row, F6, mouse), a kill by a mouse shot, a herb from the bag, death + Continue, both layouts.
+  Not tested: picking up a herb from the floor, two physical gamepads (virtual ones were used).
 
 Reporting a bug (please attach)
 - rev1_coop.log in the game folder (next to rerev.exe; the last runs are rev1_coop.1.log ... rev1_coop.4.log). A crash is written there with the line "AccessViolation".

@@ -22,20 +22,20 @@ A change to any of these needs a launcher that copes with both the old and the n
 
 ## Pre-releases (for testers; never installed by the shortcut)
 
-- **Scheme:** pre-releases are versions `0.0.N` (`0.0.1` = "Pre-release 1"), tag `v0.0.N`, created with `--prerelease`; the first full release is `0.1.0` or higher, so it sorts strictly above every
+- **Scheme:** pre-releases are versions `0.0.N` (`0.0.1` = "Pre-release 1", `0.0.2` = "Pre-release 2"), tag `v0.0.N`, created with `--prerelease`; the first full release is `0.1.0` or higher, so it sorts strictly above every
   pre-release and the launcher updates a pre-release install to it. GitHub's `releases/latest` never returns a pre-release (or a draft), so the shortcut's launcher never installs one by itself:
   testers install the zip / setup exe by hand. Never use `--latest` on a pre-release. Never label a pre-release with any "RC" wording.
 - **Freeze:** everything committed (`git status` clean), `sh tests/build.sh`, `sh tests/build_menu.sh`, `powershell -File tests\test_installer.ps1` green, `sh native/build.sh`, then
-  `powershell -File tools\package.ps1 -Version 0.0.1 -Exe -Dist ..\work\dist-pre1` (zip + setup exe; record both SHA-256 in the release notes).
+  `powershell -File tools\package.ps1 -Version 0.0.2 -Exe -Dist ..\work\dist-pre2` (zip + setup exe; record both SHA-256 in the release notes).
 - **Publish checklist (the lead, after the owner's word):**
   1. `git status` clean in the mod repository; the commit to tag is the one the package was built from (`git log -1`); no personal paths / names / e-mail in the tree
      (search the tree for drive-letter paths and e-mail addresses: nothing may be found).
   2. `git push origin main`
-  3. `git tag -a v0.0.1 -m "Pre-release 1"` then `git push origin v0.0.1` (commit identity: the noreply one of the repository owner).
-  4. `gh release create v0.0.1 --repo dolbaras/revelations-coop --prerelease --title "Pre-release 1 (0.0.1)" --notes-file <relnotes body> <dist>\revelations-coop-0.0.1.zip <dist>\revelations-coop-setup-0.0.1.exe`
-  5. Check: `gh release view v0.0.1 --repo dolbaras/revelations-coop --json isPrerelease,tagName,assets` (isPrerelease true, both assets there, the zip's digest equals the recorded SHA-256);
-     `gh api repos/dolbaras/revelations-coop/releases/latest` must NOT return v0.0.1 (404 while there is no full release).
-  6. Tell the testers: install `revelations-coop-setup-0.0.1.exe` or run `Install Co-op.bat` from the zip; report with `rev1_coop.log` (see the players' readme).
+  3. `git tag -a v0.0.2 -m "Pre-release 2"` then `git push origin v0.0.2` (commit identity: the noreply one of the repository owner).
+  4. `gh release create v0.0.2 --repo dolbaras/revelations-coop --prerelease --title "Pre-release 2 (0.0.2)" --notes-file <relnotes body> <dist>\revelations-coop-0.0.2.zip <dist>\revelations-coop-setup-0.0.2.exe`
+  5. Check: `gh release view v0.0.2 --repo dolbaras/revelations-coop --json isPrerelease,tagName,assets` (isPrerelease true, both assets there, the zip's digest equals the recorded SHA-256);
+     `gh api repos/dolbaras/revelations-coop/releases/latest` must NOT return v0.0.2 (404 while there is no full release).
+  6. Tell the testers: install `revelations-coop-setup-0.0.2.exe` or run `Install Co-op.bat` from the zip; report with `rev1_coop.log` (see the players' readme).
 
 ## Building
 
