@@ -66,6 +66,7 @@ static GetKeyboardState_t real_GetKeyboardState;
 static ClipCursor_t real_ClipCursor;
 static SetCursorPos_t real_SetCursorPos;
 static XInputGetState_t real_XInputGetState;
+static DWORD (WINAPI *priv_XInputSetState)(DWORD, void *);   /* the same private copy: rumble (the overlay's Steam Input hook swallows it in a background test) */
 static XInputGetState_t priv_XInputGetState;   /* REV1_PADS=1: XInputGetState of a private copy of the system's xinput1_4.dll (see priv_xinput_init) */
 
 /* The Steam overlay (gameoverlayrenderer.dll, loaded into the test copy by the Steam stub) hooks XInput for Steam Input and answers "connected, packet 0, all zero"
@@ -85,6 +86,8 @@ static void priv_xinput_init(void)
     HMODULE m = LoadLibraryA(dst);
     if (m)
         priv_XInputGetState = (XInputGetState_t)GetProcAddress(m, "XInputGetState");
+    if (m)
+        priv_XInputSetState = (DWORD(WINAPI *)(DWORD, void *))GetProcAddress(m, "XInputSetState");
     r1_log("xinput: private copy %s loaded %p, XInputGetState %p (REV1_PADS=1: the Steam overlay's XInput hook is bypassed)", dst, (void *)m, (void *)priv_XInputGetState);
 }
 
@@ -711,6 +714,8 @@ static void WINAPI hook_XInputEnable(BOOL enable)
         real_XInputEnable(enable);
 }
 
+static volatile LONG rumble_game[4], rumble_phys[4];
+
 static DWORD WINAPI hook_XInputSetState(DWORD user, XINPUT_VIBRATION *v)
 {
     DWORD i = (DWORD)r1_pad_slot((int)user, pad_exchanged());   /* R1-3: rumble follows the same routing as the state, so it reaches the pad that the character is played on */
@@ -721,7 +726,22 @@ static DWORD WINAPI hook_XInputSetState(DWORD user, XINPUT_VIBRATION *v)
     if (human_user >= 0)
         return ERROR_DEVICE_NOT_CONNECTED;
     int ph = i < 4 ? pad_phys_of_slot((int)i) : -1;
-    return real_XInputSetState && ph >= 0 ? real_XInputSetState((DWORD)ph, v) : ERROR_DEVICE_NOT_CONNECTED;
+    if (i < 4)
+        InterlockedIncrement(&rumble_game[i]);
+    if (ph < 0 || !real_XInputSetState)
+        return ERROR_DEVICE_NOT_CONNECTED;
+    InterlockedIncrement(&rumble_phys[ph]);
+    return pads_allowed && priv_XInputSetState ? priv_XInputSetState((DWORD)ph, v) : real_XInputSetState((DWORD)ph, v);
+}
+
+/* console `rumble <game user> <large 0..255> <small 0..255>`: the call the game makes, through the same hook; prints where it went */
+void testmode_rumble_test(int user, int large, int small, char *out, int size)
+{
+    XINPUT_VIBRATION vib;
+    vib.wLeftMotorSpeed = (WORD)(large * 257), vib.wRightMotorSpeed = (WORD)(small * 257);
+    DWORD r = hook_XInputSetState((DWORD)user, &vib);
+    snprintf(out, (size_t)size, "rumble game user %d (large %d small %d): result %lu; calls per game user %ld/%ld/%ld/%ld, delivered per physical pad %ld/%ld/%ld/%ld; exchange %d", user, large, small, r,
+             rumble_game[0], rumble_game[1], rumble_game[2], rumble_game[3], rumble_phys[0], rumble_phys[1], rumble_phys[2], rumble_phys[3], pad_exchanged());
 }
 
 /* The game ignores its pads unless it is the foreground window: a test instance that is meant to read virtual pads

@@ -256,6 +256,10 @@ static void run(const char *cmd, char *out, int size)
         testmode_dinput_stats(out, size);
     } else if (!strcmp(name, "steam")) {
         steam_stats(out, size);
+    } else if (!strcmp(name, "rumble")) {   /* rumble <game user> [large] [small]: the game's vibration call through the routing hook */
+        int u = 0, l = 255, sm = 255;
+        sscanf(arg, "%d %d %d", &u, &l, &sm);
+        testmode_rumble_test(u, l, sm, out, size);
     } else if (!strcmp(name, "pads")) {
         testmode_xinput_stats(out, size);
         int o = (int)strlen(out);
