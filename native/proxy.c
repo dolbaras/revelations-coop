@@ -287,6 +287,28 @@ static LONG CALLBACK log_access_violation(EXCEPTION_POINTERS *x)
             n++;
         }
     }
+    /* the engine's assertion routine 0x401370 (file, line, format, ...) ends in a deliberate write to address 0: its arguments sit above the vsnprintf frame; print the words and
+     * what they point to when it is text (stage 6c: a real kill by the second human crashed here, the message names the singleton / pointer that was null) */
+    if ((DWORD)((BYTE *)r->ExceptionAddress - exe) == 0x1396) {
+        for (DWORD off = 0x390; off <= 0x3b0; off += 4) {
+            DWORD v = 0;
+            char t[100];
+            memset(t, 0, sizeof t);
+            if (!r1_safe_read((const void *)(c->Esp + off), &v, 4))
+                break;
+            if (v > 0x10000 && r1_safe_read((const void *)v, t, 96)) {
+                int ok = 1, k = 0;
+                for (; k < 96 && t[k]; k++)
+                    if ((unsigned char)t[k] < 32 || (unsigned char)t[k] > 126)
+                        ok = 0;
+                t[95] = 0;
+                if (!ok || k < 3)
+                    t[0] = 0;
+            } else
+                t[0] = 0;
+            r1_log("  assert word [esp+%03lx] = %08lx %s%s%s", (unsigned long)off, (unsigned long)v, t[0] ? "\"" : "", t, t[0] ? "\"" : "");
+        }
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
