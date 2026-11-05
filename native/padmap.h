@@ -61,13 +61,14 @@ static inline int r1_pad_peek_allowed(int synthetic_active, int pads_allowed_tes
 }
 
 /* ---- duplicate detection ---- */
-#define R1_DUP_MIN_SAME 90        /* informative identical samples (about 1.5 s of play at 60 samples a second) before a pair counts as a mirror */
+#define R1_DUP_MIN_SAME 60        /* identical CHANGES of the state (a moving stick changes it at every sample: about half a second) before a pair counts as a mirror */
 #define R1_DUP_MAX_RATIO 8        /* a mirror may differ in at most 1 of 8 informative samples (a transfer delay of a virtual pad) */
 #define R1_DUP_HALVE 1024         /* counters are halved when they sum up to this (old evidence fades) */
 
 typedef struct {
     unsigned short same[R1_PM_USERS][R1_PM_USERS], diff[R1_PM_USERS][R1_PM_USERS];
     unsigned char mirror[R1_PM_USERS][R1_PM_USERS];
+    r1_input_t prev[R1_PM_USERS][R1_PM_USERS];   /* the last identical informative state of the pair: a constant state is no evidence (virtual test pads rest at the same odd value) */
 } r1_dupdet_t;
 
 static inline int r1_dup_neutral(const r1_input_t *a)
@@ -75,7 +76,7 @@ static inline int r1_dup_neutral(const r1_input_t *a)
     return !a->buttons && !a->lt && !a->rt && !a->lx && !a->ly && !a->rx && !a->ry;
 }
 
-/* an identical state that carries analog evidence: a stick axis off zero but not pinned at the rim (two humans pushing both sticks to the stop would be identical too) */
+/* an identical state that carries analog evidence (and, see r1_dupdet_feed, that has CHANGED since the last such sample): a stick axis off zero but not pinned at the rim (two humans pushing both sticks to the stop would be identical too) */
 static inline int r1_dup_informative(const r1_input_t *a)
 {
     short v[4] = {a->lx, a->ly, a->rx, a->ry};
@@ -94,12 +95,15 @@ static inline unsigned r1_dupdet_feed(r1_dupdet_t *d, const r1_input_t st[R1_PM_
         for (int b = a + 1; b < R1_PM_USERS; b++) {
             if (!(((conn >> a) & 1u) && ((conn >> b) & 1u))) {   /* a pad that is gone forgets its history */
                 d->same[a][b] = d->diff[a][b] = d->mirror[a][b] = 0;
+                memset(&d->prev[a][b], 0, sizeof d->prev[a][b]);
                 continue;
             }
             int eq = memcmp(&st[a], &st[b], sizeof(r1_input_t)) == 0;
-            if (eq && r1_dup_informative(&st[a]))
-                d->same[a][b]++;
-            else if (!eq && !(r1_dup_neutral(&st[a]) && r1_dup_neutral(&st[b])))
+            if (eq && r1_dup_informative(&st[a])) {
+                if (memcmp(&st[a], &d->prev[a][b], sizeof(r1_input_t)) != 0)
+                    d->same[a][b]++;
+                d->prev[a][b] = st[a];
+            } else if (!eq && !(r1_dup_neutral(&st[a]) && r1_dup_neutral(&st[b])))
                 d->diff[a][b]++;
             if ((unsigned)d->same[a][b] + d->diff[a][b] >= R1_DUP_HALVE)
                 d->same[a][b] >>= 1, d->diff[a][b] >>= 1;

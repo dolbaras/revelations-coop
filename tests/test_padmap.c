@@ -145,6 +145,28 @@ int main(void)
 
     r1_dupdet_reset(&d);
     hide = 0;
+    for (int k = 0; k < 5000; k++) {   /* two virtual test pads at rest: the same odd constant stick value (seen live: ly -1869 on both), nothing ever changes */
+        sample(&st[0], 0, -1869, 0);
+        st[1] = st[0];
+        hide = r1_dupdet_feed(&d, st, 3);
+    }
+    CHECK(hide == 0, "R1-4: two pads that sit at the same constant non-zero stick value are no evidence (virtual pads of the lab; real pads differ)");
+
+    r1_dupdet_reset(&d);
+    hide = 0;
+    for (int k = 0; k < R1_DUP_MIN_SAME - 1; k++) {   /* just short of the evidence */
+        sample(&st[0], (short)(5000 + k), 200, 0);
+        st[1] = st[0];
+        hide = r1_dupdet_feed(&d, st, 3);
+    }
+    CHECK(hide == 0, "R1-4: one change short of the evidence: no verdict");
+    sample(&st[0], 9000, 200, 0);
+    st[1] = st[0];
+    hide = r1_dupdet_feed(&d, st, 3);
+    CHECK(hide == 2, "R1-4: the change that completes the evidence: hidden");
+
+    r1_dupdet_reset(&d);
+    hide = 0;
     for (int k = 0; k < 1000; k++) {   /* identical digital buttons only (D-pad menus): no analog evidence */
         memset(&st[0], 0, sizeof st[0]);
         st[0].buttons = 0x0001;
