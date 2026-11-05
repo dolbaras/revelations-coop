@@ -1,12 +1,18 @@
 # Resident Evil Revelations co-op (work in progress)
 
 Network co-op and split screen for the story campaign of Resident Evil: Revelations (2013 PC, Steam build 13298487, `rerev.exe`, 32-bit).
-Status: **developer build, not released.** The proxy gates on the exe SHA-256 (other builds: it only forwards `DirectInput8Create`), works on the live game
-and never touches Raid (every module stops and removes its hooks while a Raid scene / session is active). Nothing here modifies game files or the Steam stub.
+Status: **pre-release for testing** (package version 0.0.1, GitHub "pre-release", never installed automatically by the shortcut's launcher). Not a finished release: see the known problems below.
+The proxy gates on the exe SHA-256 (other builds: it only forwards `DirectInput8Create`), works on the live game and never touches Raid (every module stops and removes its hooks while a Raid scene / session is active). Nothing here modifies game files or the Steam stub.
+
+**Version scheme.** Pre-releases are 0.0.1, 0.0.2, ... (tag `v0.0.N`, marked "pre-release" on GitHub, title "Pre-release N"); the first full release is 0.1.0 or higher. The launcher parses the tag as a .NET `[version]` and only follows `releases/latest`, so the first full release updates every pre-release install and a pre-release is never pushed to anybody who did not install it by hand.
+
+**Known problems of pre-release 1** (also in `docs/release-readme.txt`):
+- **Crash on a real shot that kills an enemy, reproduced for the second human** (pad 1, unit slot 1, co-op on): the game ends with an access violation at `exe+1396` (the engine's assertion routine, called from the kill record `FUN_0089eca0`). The lead's kill in co-op and a kill without co-op did not crash in the lab. Cause not fixed yet (analysis in progress); `rev1_coop.log` names the assertion text.
+- Not included: network co-op (not started), a solo-part rule (no section with one human unit was found), the action prompt is one global panel drawn in both views, the field of view of the side-by-side layout is narrow (about 40 degrees horizontal), one sound listener.
+- Not verified: a start of the game through the shortcut without any lab variables on a normal desktop (every live test so far ran as a background test window with test variables; F6, the mouse on the lobby and F11 depend on the window being found, which is built but only checked in the test window); gamepad tests used virtual XInput pads (ViGEm), not yet two physical pads.
 
 What works on the real game (test copy, main PC):
 
-Open before a first release: killing an enemy by shooting and picking up herbs in split screen were not shown yet, the action prompt (a global panel) shows in both views, the field of view in the side-by-side layout is narrow (about 40 degrees against 73), one sound listener, a solo section on a healthy start was not found, and the network part (campaign over the network, after the Revelations 2 world sync) is not started. The first release will bring split screen and network together.
 
 - **Second human on one PC** (`native/capture.c`, console `cap ...`): the AI partner of the campaign is taken over by a second pad (aim, fire, reload, melee, weapon change,
   menus), by a remote input record (network layer API) or by a script; the own slot decides who the engine creates as the human.

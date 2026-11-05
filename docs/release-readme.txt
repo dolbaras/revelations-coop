@@ -1,5 +1,7 @@
-Resident Evil Revelations Co-op
-================================
+Resident Evil Revelations Co-op - PRE-RELEASE 1 (version 0.0.1)
+================================================================
+
+This is a test version. It is meant to be tried and reported on, not a finished release. Please read "Known problems" below.
 
 Two players on one PC, split screen, for the story campaign of Resident Evil: Revelations (2013 PC, Steam build 13298487).
 
@@ -25,10 +27,21 @@ and removes the shortcuts. Your saves are not touched; the lobby's settings file
 Needs: the Steam version of Resident Evil Revelations, build 13298487 (the installer checks rerev.exe and refuses any other one), Windows 10 or 11, PowerShell
 5.1 (part of Windows), two gamepads for two players. The mod changes no game file other than adding dinput8.dll; it does not touch the Steam stub or Raid.
 
+Known problems (pre-release 1)
+- The game can CRASH when the SECOND player (gamepad 2, the partner character) kills an enemy with a shot. Seen in the lab on a nearly dead enemy; the lead's kills and kills without co-op did not crash.
+  Save often (the game's checkpoints are fine) and tell us if it happens.
+- Not included yet: network co-op, a special rule for the parts of the story with only one playable character, a separate action prompt in each view (the prompt shows in both),
+  a wider field of view in the side-by-side layout (it is narrow; top / bottom is better), a sound listener per player.
+- Tested so far in a lab window with virtual gamepads; the normal start through the shortcut and two physical gamepads still need you.
+
+Reporting a bug (please attach)
+- rev1_coop.log in the game folder (next to rerev.exe; the last runs are rev1_coop.1.log ... rev1_coop.4.log). A crash is written there with the line "AccessViolation".
+- rev1_coop.ini from %LOCALAPPDATA%\CAPCOM\RESIDENT EVIL REVELATIONS (a few lines: your lobby settings), and a short description: which part of the story, which gamepads (Xbox / other / Steam Input), what you pressed.
+
 Limits (honest)
 - The installer and the setup .exe are not code-signed: Windows SmartScreen may warn. The zip works the same way.
 - Gamepad support in the lobby and in the game uses XInput (Xbox-compatible pads).
 - Pad numbering gaps (a pad on XInput user 2 only), the exchange "player 1 uses gamepad 2" and rumble follow one rule; a gamepad that Windows shows twice (a Steam Input or remapper copy next to the physical pad) is recognised after a few seconds of play and counted as one gamepad. If two real pads are ever taken for one, start the game with the variable REV1_PADDEDUP=0.
-- Network co-op is not part of this version.
+- Network co-op is not part of this version (not started).
 
 Licence: MIT (LICENSE.txt). Not affiliated with Capcom.
