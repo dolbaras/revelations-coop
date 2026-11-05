@@ -154,12 +154,18 @@ static HRESULT WINAPI hook_CreateDevice(IDirect3D9 *d3d, UINT adapter, D3DDEVTYP
     D3DADAPTER_IDENTIFIER9 id;
     memset(&id, 0, sizeof id);
     IDirect3D9_GetAdapterIdentifier(d3d, use, 0, &id);
-    r1_log("CreateDevice asked adapter %u, using %u (%s) %ux%u fmt=%d windowed=%d (was %s) buffers=%u msaa=%d flags=0x%lx", adapter, use,
-           id.Description, pp ? pp->BackBufferWidth : 0, pp ? pp->BackBufferHeight : 0, pp ? pp->BackBufferFormat : 0, pp ? pp->Windowed : -1,
+    r1_log("CreateDevice asked adapter %u, using %u (%s, vendor 0x%04lx device 0x%04lx) %ux%u fmt=%d windowed=%d (was %s) buffers=%u msaa=%d flags=0x%lx", adapter, use,
+           id.Description, (unsigned long)id.VendorId, (unsigned long)id.DeviceId, pp ? pp->BackBufferWidth : 0, pp ? pp->BackBufferHeight : 0, pp ? pp->BackBufferFormat : 0, pp ? pp->Windowed : -1,
            was_full ? "full screen" : "windowed", pp ? pp->BackBufferCount : 0, pp ? pp->MultiSampleType : 0, flags);
+    if (testmode_need_vendor() && id.VendorId != testmode_need_vendor()) {   /* REV1_VENDOR: never render on another GPU (the owner's discrete card is for his own game) */
+        r1_log("CreateDevice ABORT: adapter %u is vendor 0x%04lx, REV1_VENDOR requires 0x%04x: the process ends before any device exists", use, (unsigned long)id.VendorId,
+               testmode_need_vendor());
+        TerminateProcess(GetCurrentProcess(), 0x5A5A);
+        return D3DERR_NOTAVAILABLE;
+    }
     HRESULT hr = real_CreateDevice(d3d, use, type, focus, flags, pp, out);
     r1_log("CreateDevice -> hr=0x%08lx", (unsigned long)hr);
-    if (FAILED(hr) && use != adapter)
+    if (FAILED(hr) && use != adapter && !testmode_need_vendor())
         hr = real_CreateDevice(d3d, adapter, type, focus, flags, pp, out);
     if (SUCCEEDED(hr) && out && *out) {
         void *p;

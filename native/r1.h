@@ -35,6 +35,7 @@ void testmode_install(void);
 void testmode_wrap_dinput(void *dinput);
 int testmode_background(void);
 int testmode_adapter_pick(void *d3d, HWND focus, unsigned asked);
+unsigned testmode_need_vendor(void);        /* REV1_VENDOR: required PCI vendor of the render adapter (0 = any) */
 int testmode_force_windowed(void);          /* 1 = test instance: never exclusive full screen */
 void testmode_window_size(int *w, int *h);  /* wanted client size, 0 when not set */
 HWND testmode_window(void);

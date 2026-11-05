@@ -93,6 +93,20 @@ int main(int argc, char **argv)
             l1_free(l);
         }
     }
+    /* the device Reset path of the game: everything is released and built again (a double free of the shared Japanese face crashed the live game on the first Reset) */
+    for (int round = 0; round < 3; round++) {
+        overlay_release();
+        memset(&sc, 0, sizeof sc);
+        sc.kind = OV_HINT, sc.lang = round;
+        snprintf(sc.hint, sizeof sc.hint, "F6 / Back");
+        unsigned *px = NULL;
+        if (!overlay_render_to_bitmap(&sc, w, h, &px)) {
+            fprintf(stderr, "FAIL: render after release %d\n", round);
+            return 1;
+        }
+    }
+    overlay_release();
+    printf("reset cycle: 3 x release + render ok\n");
     printf("rendered %d languages to %s\n", L1_LANGS, dir);
     return 0;
 }

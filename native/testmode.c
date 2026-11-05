@@ -4,7 +4,8 @@
  *
  *   REV1_WINPOS=x,y     the game window's client area at x,y (screen coordinates) and kept there
  *   REV1_WINSIZE=w,h    the client area w x h (the game's back buffer follows in windowed mode)
- *   REV1_ADAPTER=window the Direct3D 9 device on the adapter that drives the window's monitor; =<n> adapter n
+ *   REV1_ADAPTER=window the Direct3D 9 device on the adapter that drives the window's monitor; =<n> adapter n; =vendor:<hex> the first adapter of that PCI vendor (8086 = Intel)
+ *   REV1_VENDOR=<hex>   the device is created ONLY on an adapter of this PCI vendor (8086 Intel, 10de NVIDIA): otherwise the instance ends at once (no fallback to another adapter)
  *   REV1_BACKGROUND=1   never full screen, never takes focus, keeps running when not in front; keyboard, mouse,
  *                       pads and the cursor reach it only while it really is the foreground window (it never reads
  *                       or clips the owner's input meant for another window)
@@ -26,7 +27,8 @@
 
 static int pads_allowed;
 static int have_pos, win_x, win_y, have_size, win_w, win_h, background, winlog;
-static char adapter_mode[16];
+static char adapter_mode[32];
+static unsigned need_vendor;   /* REV1_VENDOR: 0 = any */
 static HWND game_window;
 static WNDPROC game_wndproc;
 
@@ -969,6 +971,16 @@ int testmode_adapter_pick(void *d3dv, HWND focus, unsigned asked)
         UINT want = (UINT)atoi(adapter_mode);
         return want < n ? (int)want : (int)asked;
     }
+    if (!strncmp(adapter_mode, "vendor:", 7)) {
+        unsigned want = (unsigned)strtoul(adapter_mode + 7, NULL, 16);
+        for (UINT i = 0; i < n; i++) {
+            D3DADAPTER_IDENTIFIER9 id;
+            memset(&id, 0, sizeof id);
+            if (SUCCEEDED(d3d->lpVtbl->GetAdapterIdentifier(d3d, i, 0, &id)) && id.VendorId == want)
+                return (int)i;
+        }
+        return (int)asked;
+    }
     if (strcmp(adapter_mode, "window") == 0) {
         HMONITOR mon = have_pos ? MonitorFromPoint((POINT){win_x + 50, win_y + 50}, MONITOR_DEFAULTTONEAREST)
                                 : MonitorFromWindow(focus, MONITOR_DEFAULTTONEAREST);
@@ -978,6 +990,8 @@ int testmode_adapter_pick(void *d3dv, HWND focus, unsigned asked)
     }
     return (int)asked;
 }
+
+unsigned testmode_need_vendor(void) { return need_vendor; }
 
 void testmode_install(void)
 {
@@ -991,6 +1005,8 @@ void testmode_install(void)
     winlog = r1_env("REV1_WINLOG", v, sizeof v) && v[0] == '1';
     dedup_on = !(r1_env("REV1_PADDEDUP", v, sizeof v) && v[0] == '0');   /* hidden duplicates of one physical pad (padmap.h) */
     r1_env("REV1_ADAPTER", adapter_mode, sizeof adapter_mode);
+    if (r1_env("REV1_VENDOR", v, sizeof v))
+        need_vendor = (unsigned)strtoul(v, NULL, 16);
     {
         real_MessageBoxA = (MessageBoxA_t)r1_patch_iat("USER32.dll", "MessageBoxA", (void *)hook_MessageBoxA);
         real_DialogBoxParamA = (DialogBoxParamA_t)r1_patch_iat("USER32.dll", "DialogBoxParamA", (void *)hook_DialogBoxParamA);
@@ -1010,7 +1026,7 @@ void testmode_install(void)
         if (pads_allowed)
             priv_xinput_init();
     }
-    if (!(have_pos || have_size || background || winlog || adapter_mode[0]))
+    if (!(have_pos || have_size || background || winlog || adapter_mode[0] || need_vendor))
         return;
     real_CreateWindowExA = (CreateWindowExA_t)r1_patch_iat("USER32.dll", "CreateWindowExA", (void *)hook_CreateWindowExA);
     real_CreateWindowExW = (CreateWindowExW_t)r1_patch_iat("USER32.dll", "CreateWindowExW", (void *)hook_CreateWindowExW);

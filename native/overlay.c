@@ -356,7 +356,8 @@ static struct {
 static void rt_free(void)
 {
     for (int c = 0; c < 4; c++)
-        for (int r = 0; r < 2; r++) gt_font_free(RT.font[c][r]);
+        for (int r = 0; r < 2; r++)
+            if (c != 1) gt_font_free(RT.font[c][r]);   /* class 1 (Japanese) shares the pointers of class 0: one free only */
     gt_img_free(&RT.common);
     memset(&RT, 0, sizeof RT);
 }
@@ -382,6 +383,9 @@ static void rt_init(void)
 {
     if (RT.tried) return;
     RT.tried = 1;
+    LARGE_INTEGER q0, q1, qf;
+    QueryPerformanceFrequency(&qf);
+    QueryPerformanceCounter(&q0);
     char path[520];
     if (g_rt_arc[0]) snprintf(path, sizeof path, "%s", g_rt_arc);
     else {
@@ -418,7 +422,9 @@ static void rt_init(void)
         }
         free(t);
     }
-    r1_log("overlay: game material %s (fonts %s, sprites %s) from %s", RT.ok || RT.sprites_ok ? "loaded" : "NOT available", RT.ok ? "ok" : "missing", RT.sprites_ok ? "ok" : "missing", path);
+    QueryPerformanceCounter(&q1);
+    r1_log("overlay: game material %s (fonts %s, sprites %s) in %lld ms from %s", RT.ok || RT.sprites_ok ? "loaded" : "NOT available", RT.ok ? "ok" : "missing",
+           RT.sprites_ok ? "ok" : "missing", qf.QuadPart ? (long long)((q1.QuadPart - q0.QuadPart) * 1000 / qf.QuadPart) : -1LL, path);
 }
 
 /* bilinear alpha of an atlas page, clamped to the rectangle [x0, x0 + w) x [y0, y0 + h) */
