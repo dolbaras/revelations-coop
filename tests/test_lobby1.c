@@ -36,7 +36,7 @@ static void test_texts(void)
             CHECKF(s && s[0], "text %d lang %d empty", id, lang);
             CHECKF(utf8_ok(s), "text %d lang %d is not valid UTF-8", id, lang);
             CHECKF(strlen(s) < 280, "text %d lang %d too long (%zu)", id, lang, strlen(s));
-            if (lang && id != L1T_PADS && id != L1T_PAD1 && id != L1T_PAD2 && id != L1T_PARTNER)   /* these words are the same in some languages */
+            if (lang && id != L1T_PADS && id != L1T_PAD1 && id != L1T_PAD2 && id != L1T_PARTNER && id != L1T_LEG_OK)   /* these words are the same in some languages */
                 CHECKF(strcmp(s, l1_text(id, 0)) != 0, "text %d lang %d equals English", id, lang);
         }
     /* the sentence that quotes stock words has all four placeholders in every language and expands to no placeholder */

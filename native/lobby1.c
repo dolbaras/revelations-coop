@@ -230,6 +230,9 @@ void l1_view_get(l1_t *l, l1_view *v)
     if (l->sel < 0 || l->sel >= v->nrows) l->sel = 0;
     v->sel = l->sel;
     snprintf(v->hint, sizeof v->hint, "%s", l1_text(L1T_HINT, lang));
+    snprintf(v->leg_ok, sizeof v->leg_ok, "%s", l1_text(L1T_LEG_OK, lang));
+    snprintf(v->leg_back, sizeof v->leg_back, "%s", l1_text(L1T_LEG_BACK, lang));
+    v->pads = l->env.pads_connected;
     l1_assign a;
     l1_assign_get(&l->s, &a);
     v->cards_on = l->s.armed;

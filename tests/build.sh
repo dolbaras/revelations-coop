@@ -10,3 +10,9 @@ mkdir -p build
 ./build/test_padmerge.exe
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_padmap.exe test_padmap.c
 ./build/test_padmap.exe
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_gametex.exe test_gametex.c ../native/gametex.c
+ARC=""
+for d in "${GAME_DIR:-}" ../../game ../../work/game; do
+    [ -n "$d" ] && [ -f "$d/nativePC/archive/gui/resident.arc" ] && ARC="$d/nativePC/archive/gui/resident.arc" && break
+done
+if [ -n "$ARC" ]; then ./build/test_gametex.exe "$ARC" rev1; else echo "(no game folder found: only the inflate checks run; set GAME_DIR=<game folder>)"; ./build/test_gametex.exe; fi
