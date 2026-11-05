@@ -196,6 +196,8 @@ static const char *const T[L1T_COUNT][L1_LANGS] = {
     [L1T_ROW_HELP] = {"Two players, one PC (split screen).", "Deux joueurs, un PC (écran partagé).", "Due giocatori, un PC (schermo diviso).", "Zwei Spieler, ein PC (geteilter Bildschirm).",
                       "Dos jugadores, un PC (pantalla dividida).", "1台のPCで2人プレイ（分割画面）。", "Два игрока, один ПК (разделённый экран).", "Dwóch graczy, jeden komputer (podzielony ekran).",
                       "Twee spelers, één pc (gesplitst scherm).", "Dois jogadores, um PC (ecrã dividido).", "Dois jogadores, um PC (tela dividida).", "一台电脑两名玩家（分屏）。", "一台電腦兩名玩家（分割畫面）。"},
+    [L1T_LEG_OK] = {"OK", "OK", "OK", "OK", "OK", "決定", "OK", "OK", "OK", "OK", "OK", "确定", "確定"},
+    [L1T_LEG_BACK] = {"Back", "Retour", "Indietro", "Zurück", "Atrás", "戻る", "Назад", "Wstecz", "Terug", "Voltar", "Voltar", "返回", "返回"},
 };
 
 const char *l1_text(int id, int lang)

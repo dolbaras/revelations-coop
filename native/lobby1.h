@@ -19,6 +19,7 @@ enum l1_text {
     L1T_TITLE, L1T_SUBTITLE, L1T_COOP, L1T_ON, L1T_OFF, L1T_P1PLAYS, L1T_P2PLAYS, L1T_LEAD, L1T_PARTNER, L1T_LAYOUT, L1T_SIDE, L1T_TOPBOTTOM, L1T_PADS,
     L1T_PADS_NORMAL, L1T_PADS_SWAPPED, L1T_PADS_FOUND, L1T_DONE, L1T_HINT, L1T_ST_ON, L1T_ST_OFF, L1T_WARN_NOPAD, L1T_WARN_ONEPAD, L1T_PLAYER1, L1T_PLAYER2,
     L1T_PAD1, L1T_PAD2, L1T_NOTE_SAVE, L1T_NOTE_SOLO, L1T_HINT_TITLE, L1T_BANNER_ON, L1T_BANNER_OFF, L1T_NEXT_SECTION, L1T_RAID_NOTE,
+    L1T_LEG_OK, L1T_LEG_BACK,   /* the key legend at the bottom of the lobby ("A  OK   B  Back") */
     L1T_ROW_LABEL, L1T_ROW_HELP,   /* the native title menu row (menu.c): its label and its one-line help, put into the dead "menu_gamestart" / "memo_gamestart" messages */
     L1T_COUNT
 };
@@ -85,6 +86,8 @@ typedef struct {
     char hint[240];
     char note[300];
     char note2[300];
+    char leg_ok[24], leg_back[24];   /* legend words */
+    int pads;           /* gamepads connected: the legend shows round A / B buttons, else keyboard keys */
 } l1_view;
 
 enum { L1R_NONE = 0, L1R_CLOSE };

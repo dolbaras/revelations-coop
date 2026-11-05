@@ -4,6 +4,8 @@
  * buffer with UpdateSurface + StretchRect: no BeginScene, no sprite, no render state touched, nothing at all happens while no scene is set. (D3DX sprites / fonts stalled
  * the game's render thread there; do not use them.) Opaque only: StretchRect does not blend.
  * Layout is done in a virtual 1920x1080 space (16:9, centred on wider windows) and scaled to the back buffer.
+ * The lobby is not drawn on a flat colour: when it opens, the finished game frame is read back once (GetRenderTargetData), blurred, graded to the menu's teal and darkened with a vignette,
+ * and that picture is the backdrop (the lobby stays a still image; without a readback it falls back to a plain teal-black vignette). Hint strip: opaque, as before.
  */
 #ifndef OVERLAY_H
 #define OVERLAY_H
@@ -29,5 +31,6 @@ unsigned overlay_frames(void);                               /* frames copied so
 void overlay_stats(char *out, int size);
 /* offline: render a scene into a 32-bit top-down bitmap of w x h pixels without any device (tests/overlay_preview.c); returns 0 on failure */
 int overlay_render_to_bitmap(const ov_scene *sc, int w, int h, unsigned **pixels_out);
+void overlay_set_preview_backdrop(const unsigned *px, int w, int h);   /* offline: the picture that stands for the game frame behind the lobby (32-bit top-down, may be NULL) */
 
 #endif
