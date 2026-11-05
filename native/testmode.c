@@ -168,6 +168,17 @@ static BOOL CALLBACK find_main_cb(HWND hw, LPARAM lp)
     return TRUE;
 }
 
+static BOOL CALLBACK find_sub_cb(HWND hw, LPARAM lp)   /* console `pads` only */
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hw, &pid);
+    if (pid == GetCurrentProcessId() && hw == game_window) {
+        *(HWND *)lp = hw;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static HWND found_window;
 static HWND find_main_window(void)
 {
@@ -577,6 +588,8 @@ void testmode_padmap_stats(char *out, int size)
     LONG m = pm_masks;
     HWND f = NULL;
     EnumWindows(find_main_cb, (LPARAM)&f);
+    if (!f && game_window)   /* a test copy subclasses its window (REV1_BACKGROUND): the window procedure is ours then; show that the enumeration finds the same window */
+        EnumWindows(find_sub_cb, (LPARAM)&f);
     snprintf(out, (size_t)size, "padmap: connected %lx hidden duplicates %lx, game sees %d pad(s): game user -> physical user 0=%d 1=%d 2=%d 3=%d, exchange %d (menu %ld base %ld), duplicate detection %s; main window hook %p finder %p",
              m & 15, (m >> 8) & 15, l.n, l.phys[0], l.phys[1], l.phys[2], l.phys[3], pad_exchanged(), pad_swap, pad_swap_base, dedup_on ? "on" : "off", (void *)game_window, (void *)f);
 }

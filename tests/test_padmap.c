@@ -127,6 +127,15 @@ int main(void)
 
     r1_dupdet_reset(&d);
     hide = 0;
+    for (int k = 0; k < 600; k++) {   /* a copy that is updated a moment later: every 6th sample lies between the two updates and shows the previous step on the copy */
+        sample(&st[0], (short)(12000 * (k % 40 - 20) / 20), 5000, 0);
+        sample(&st[1], (short)(12000 * ((k % 6 == 0 ? k - 1 : k) % 40 - 20) / 20), 5000, 0);
+        hide = r1_dupdet_feed(&d, st, 3);
+    }
+    CHECK(hide == 2, "R1-4: a copy that lags one step in every 6th sample (small differences) is still a duplicate (tolerance)");
+
+    r1_dupdet_reset(&d);
+    hide = 0;
     for (int k = 0; k < 1000; k++) {   /* two humans: one stick moves, the other pad rests */
         sample(&st[0], (short)(12000 + k % 100), 9000, 0);
         sample(&st[1], 0, 0, 0);

@@ -86,6 +86,18 @@ static inline int r1_dup_informative(const r1_input_t *a)
     return 0;
 }
 
+/* two samples of the two users count as "the same" when buttons are equal and every axis is within a small tolerance: a virtual copy of a pad is updated a moment after the
+ * physical pad, so a sample that lands between the two updates differs by one step of the moving stick (live: two ViGEm pads fed identical moving states were never flagged with exact equality) */
+#define R1_DUP_TOL_STICK 1500
+#define R1_DUP_TOL_TRIG 8
+static inline int r1_dup_near(const r1_input_t *a, const r1_input_t *b)
+{
+    int d[4] = {a->lx - b->lx, a->ly - b->ly, a->rx - b->rx, a->ry - b->ry};
+    for (int i = 0; i < 4; i++)
+        if (d[i] > R1_DUP_TOL_STICK || d[i] < -R1_DUP_TOL_STICK)
+            return 0;
+    return a->buttons == b->buttons && a->lt - b->lt <= R1_DUP_TOL_TRIG && b->lt - a->lt <= R1_DUP_TOL_TRIG && a->rt - b->rt <= R1_DUP_TOL_TRIG && b->rt - a->rt <= R1_DUP_TOL_TRIG;
+}
 static inline void r1_dupdet_reset(r1_dupdet_t *d) { memset(d, 0, sizeof *d); }
 
 /* One round of samples of every connected user (st[u] valid where conn has bit u). Returns the mask of users hidden as duplicates (the higher user of each mirrored pair). */
@@ -98,11 +110,10 @@ static inline unsigned r1_dupdet_feed(r1_dupdet_t *d, const r1_input_t st[R1_PM_
                 memset(&d->prev[a][b], 0, sizeof d->prev[a][b]);
                 continue;
             }
-            int eq = memcmp(&st[a], &st[b], sizeof(r1_input_t)) == 0;
+            int eq = r1_dup_near(&st[a], &st[b]);
             if (eq && r1_dup_informative(&st[a])) {
-                if (memcmp(&st[a], &d->prev[a][b], sizeof(r1_input_t)) != 0)
-                    d->same[a][b]++;
-                d->prev[a][b] = st[a];
+                if (memcmp(&st[a], &d->prev[a][b], sizeof(r1_input_t)) != 0)   /* any change of the state since the last evidence sample */
+                    d->same[a][b]++, d->prev[a][b] = st[a];
             } else if (!eq && !(r1_dup_neutral(&st[a]) && r1_dup_neutral(&st[b])))
                 d->diff[a][b]++;
             if ((unsigned)d->same[a][b] + d->diff[a][b] >= R1_DUP_HALVE)
