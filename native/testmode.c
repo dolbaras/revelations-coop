@@ -522,6 +522,7 @@ static volatile LONG pm_valid, pm_lock;
 static DWORD pm_tick, pm_full_tick;
 static r1_dupdet_t pm_det;
 static LONG pm_logged = -1;
+static unsigned long pm_count;
 
 static int pads_visible(void)
 {
@@ -541,6 +542,7 @@ static void pm_refresh(void)
     r1_input_t st[R1_PM_USERS];
     memset(st, 0, sizeof st);
     pm_tick = now;
+    pm_count++;
     if (pads_visible()) {
         int full = !pm_valid || (LONG)(now - pm_full_tick) >= 1000;
         for (int u = 0; u < R1_PM_USERS; u++) {
@@ -590,8 +592,8 @@ void testmode_padmap_stats(char *out, int size)
     EnumWindows(find_main_cb, (LPARAM)&f);
     if (!f && game_window)   /* a test copy subclasses its window (REV1_BACKGROUND): the window procedure is ours then; show that the enumeration finds the same window */
         EnumWindows(find_sub_cb, (LPARAM)&f);
-    snprintf(out, (size_t)size, "padmap: connected %lx hidden duplicates %lx, game sees %d pad(s): game user -> physical user 0=%d 1=%d 2=%d 3=%d, exchange %d (menu %ld base %ld), duplicate detection %s; main window hook %p finder %p",
-             m & 15, (m >> 8) & 15, l.n, l.phys[0], l.phys[1], l.phys[2], l.phys[3], pad_exchanged(), pad_swap, pad_swap_base, dedup_on ? "on" : "off", (void *)game_window, (void *)f);
+    snprintf(out, (size_t)size, "padmap: connected %lx hidden duplicates %lx, game sees %d pad(s): game user -> physical user 0=%d 1=%d 2=%d 3=%d, exchange %d (menu %ld base %ld), duplicate detection %s (pair 0/1: identical %u, different %u, mirror %d, refreshes %lu); main window hook %p finder %p",
+             m & 15, (m >> 8) & 15, l.n, l.phys[0], l.phys[1], l.phys[2], l.phys[3], pad_exchanged(), pad_swap, pad_swap_base, dedup_on ? "on" : "off", pm_det.same[0][1], pm_det.diff[0][1], pm_det.mirror[0][1], pm_count, (void *)game_window, (void *)f);
 }
 
 /* the physical user behind a game slot (after the exchange), -1 = none */
