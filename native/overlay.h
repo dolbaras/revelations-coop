@@ -31,6 +31,7 @@ unsigned overlay_frames(void);                               /* frames copied so
 void overlay_stats(char *out, int size);
 /* offline: render a scene into a 32-bit top-down bitmap of w x h pixels without any device (tests/overlay_preview.c); returns 0 on failure */
 int overlay_render_to_bitmap(const ov_scene *sc, int w, int h, unsigned **pixels_out);
+void overlay_set_game_archive(const char *resident_arc);   /* where the game's own fonts / sprites are read from (default: <exe folder>\nativePC\archive\gui\resident.arc); offline preview sets it */
 void overlay_set_preview_backdrop(const unsigned *px, int w, int h);   /* offline: the picture that stands for the game frame behind the lobby (32-bit top-down, may be NULL) */
 
 #endif

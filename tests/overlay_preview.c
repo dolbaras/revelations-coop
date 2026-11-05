@@ -1,7 +1,7 @@
 /*
  * overlay_preview.c - renders the lobby screen and the title hint of every language into BMP files without the game (GDI only), to look at layout and fonts.
- *   sh tests/build_preview.sh  ->  tests/build/overlay_preview.exe <out dir> [width height [backdrop.bmp [lang code]]]
- * backdrop.bmp (24 / 32-bit BMP) stands for the game frame behind the lobby (a stock menu screenshot); lang code (eng, rus, jpn ...) renders one language only.
+ *   sh tests/build_preview.sh  ->  tests/build/overlay_preview.exe <out dir> [width height [backdrop.bmp [lang code [resident.arc]]]]
+ * backdrop.bmp (24 / 32-bit BMP) stands for the game frame behind the lobby (a stock menu screenshot); lang code (eng, rus, jpn ...) renders one language only (all = every language); resident.arc = nativePC\\archive\\gui\\resident.arc of the game (its own fonts and sprites; without it the imitation is drawn).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +60,8 @@ int main(int argc, char **argv)
         if (bpx) overlay_set_preview_backdrop(bpx, bw, bh);
         else fprintf(stderr, "cannot read the backdrop %s\n", argv[4]);
     }
-    const char *only = argc > 5 ? argv[5] : NULL;
+    const char *only = argc > 5 && strcmp(argv[5], "all") ? argv[5] : NULL;
+    if (argc > 6) overlay_set_game_archive(argv[6]);
     static ov_scene sc;
     for (int lang = 0; lang < L1_LANGS; lang++) {
         if (only && strcmp(only, l1_lang_codes[lang])) continue;

@@ -104,7 +104,12 @@ static void gdi_free(void)
     free(G.bg), free(G.cap);
     memset(&G, 0, sizeof G);
 }
-void overlay_release(void) { gdi_free(); }
+static void rt_free(void);
+void overlay_release(void)
+{
+    gdi_free();
+    rt_free();
+}
 
 static int gdi_make_bitmap(int w, int h)
 {
@@ -326,6 +331,330 @@ static void glow_run(const wchar_t *ws, int n, HFONT f, int extra, int x0, int b
 
 static float g_glow_strength = 0.55f;
 
+/* ---------------------------------------------------------------- the game's own material (gametex.c)
+ * Fonts and sprites are read from the installed game's archives (nativePC\archive\gui\resident.arc: the fonts Caption / Font_eng / ..._chS / ..._chT and the interface atlas
+ * common_00_ID) on first use, decoded on the CPU and cached; nothing is shipped. Any failure leaves RT.ok = 0 and the GDI / imitation drawing stays in charge. */
+#include "gametex.h"
+
+static char g_rt_arc[520];
+void overlay_set_game_archive(const char *path)
+{
+    snprintf(g_rt_arc, sizeof g_rt_arc, "%s", path ? path : "");
+}
+
+typedef struct { int x, y, w, h; } rt_rect;
+enum { SPR_ARC, SPR_RING, SPR_DISC, SPR_FRAME, SPR_SPARK, SPR_COUNT };
+static struct {
+    int tried, ok, sprites_ok;
+    gt_font *font[4][2];   /* [language class][0 caption face, 1 body face] */
+    gt_img common;
+    rt_rect spr[SPR_COUNT];
+    unsigned stat_real, stat_gdi;   /* strings drawn with the real face / by GDI */
+    float capmid[4][2];             /* vertical middle of a capital H inside the glyph cell, atlas pixels (0 = not measured) */
+} RT;
+
+static void rt_free(void)
+{
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 2; r++) gt_font_free(RT.font[c][r]);
+    gt_img_free(&RT.common);
+    memset(&RT, 0, sizeof RT);
+}
+
+/* tight box of the visible (alpha > 12) pixels inside a coarse rectangle of the atlas */
+static rt_rect rt_tighten(const gt_img *im, int x, int y, int w, int h)
+{
+    int x0 = im->w, y0 = im->h, x1 = -1, y1 = -1;
+    for (int yy = y; yy < y + h && yy < im->h; yy++)
+        for (int xx = x; xx < x + w && xx < im->w; xx++)
+            if ((im->px[(size_t)yy * (size_t)im->w + (size_t)xx] >> 24) > 12) {
+                if (xx < x0) x0 = xx;
+                if (xx > x1) x1 = xx;
+                if (yy < y0) y0 = yy;
+                if (yy > y1) y1 = yy;
+            }
+    rt_rect r = {x0, y0, x1 - x0 + 1, y1 - y0 + 1};
+    if (x1 < 0) r.w = r.h = 0;
+    return r;
+}
+
+static void rt_init(void)
+{
+    if (RT.tried) return;
+    RT.tried = 1;
+    char path[520];
+    if (g_rt_arc[0]) snprintf(path, sizeof path, "%s", g_rt_arc);
+    else {
+        char exe[520];
+        DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+        char *slash = n ? strrchr(exe, '\\') : NULL;
+        if (!slash) return;
+        *slash = 0;
+        snprintf(path, sizeof path, "%s\\nativePC\\archive\\gui\\resident.arc", exe);
+    }
+    static const char *const gfd[4][2] = {{"id_bhr\\00_font\\Caption", "id_bhr\\00_font\\Font_eng"}, {"id_bhr\\00_font\\Caption", "id_bhr\\00_font\\Font_eng"},
+                                          {"id_bhr\\00_font\\Caption_chS", "id_bhr\\00_font\\Font_chS"}, {"id_bhr\\00_font\\Caption_chT", "id_bhr\\00_font\\Font_chT"}};
+    static const char *const pages[4][2] = {{"id_bhr\\00_font\\Caption_%02d_ID", "id_bhr\\00_font\\Font_eng_%02d_ID"}, {"id_bhr\\00_font\\Caption_%02d_ID", "id_bhr\\00_font\\Font_eng_%02d_ID"},
+                                            {"id_bhr\\00_font\\Caption_chS_%02d_ID", "id_bhr\\00_font\\Font_chS_%02d_ID"}, {"id_bhr\\00_font\\Caption_chT_%02d_ID", "id_bhr\\00_font\\Font_chT_%02d_ID"}};
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 2; r++) {
+            if (c == 1) RT.font[c][r] = RT.font[0][r];   /* Japanese: the Latin face and the same table (kana and kanji live in Font_eng) */
+            else RT.font[c][r] = gt_font_open(path, gfd[c][r], pages[c][r]);
+        }
+    RT.ok = RT.font[0][0] && RT.font[0][1];
+    unsigned size = 0;
+    unsigned char *t = gt_arc_read(path, "id_bhr\\05_option\\tex_HD\\common_00_ID", &size);
+    if (t) {
+        if (gt_tex_decode(t, size, &RT.common) && RT.common.w == 1024 && RT.common.h == 256) {
+            const gt_img *im = &RT.common;
+            RT.spr[SPR_ARC] = rt_tighten(im, 380, 126, 644, 48);
+            RT.spr[SPR_RING] = rt_tighten(im, 14, 128, 56, 54);
+            RT.spr[SPR_DISC] = rt_tighten(im, 331, 132, 48, 52);
+            RT.spr[SPR_FRAME] = rt_tighten(im, 172, 54, 90, 60);
+            RT.spr[SPR_SPARK] = rt_tighten(im, 608, 172, 24, 20);
+            RT.sprites_ok = 1;
+            for (int i = 0; i < SPR_COUNT; i++)
+                if (RT.spr[i].w < 4 || RT.spr[i].h < 4) RT.sprites_ok = 0;
+        }
+        free(t);
+    }
+    r1_log("overlay: game material %s (fonts %s, sprites %s) from %s", RT.ok || RT.sprites_ok ? "loaded" : "NOT available", RT.ok ? "ok" : "missing", RT.sprites_ok ? "ok" : "missing", path);
+}
+
+/* bilinear alpha of an atlas page, clamped to the rectangle [x0, x0 + w) x [y0, y0 + h) */
+static float rt_alpha(const gt_img *pg, float u, float v, float x0, float y0, float x1, float y1)
+{
+    if (u < x0) u = x0;
+    if (v < y0) v = y0;
+    if (u > x1) u = x1;
+    if (v > y1) v = y1;
+    int iu = (int)(u - 0.5f), iv = (int)(v - 0.5f);
+    float fu = u - 0.5f - (float)iu, fv = v - 0.5f - (float)iv;
+    if (u - 0.5f < 0) iu = 0, fu = 0;
+    if (v - 0.5f < 0) iv = 0, fv = 0;
+    int iu1 = iu + 1 < pg->w ? iu + 1 : iu, iv1 = iv + 1 < pg->h ? iv + 1 : iv;
+    float a00 = (float)(pg->px[(size_t)iv * (size_t)pg->w + (size_t)iu] >> 24), a10 = (float)(pg->px[(size_t)iv * (size_t)pg->w + (size_t)iu1] >> 24);
+    float a01 = (float)(pg->px[(size_t)iv1 * (size_t)pg->w + (size_t)iu] >> 24), a11 = (float)(pg->px[(size_t)iv1 * (size_t)pg->w + (size_t)iu1] >> 24);
+    return ((a00 * (1 - fu) + a10 * fu) * (1 - fv) + (a01 * (1 - fu) + a11 * fu) * fv) / 255.0f;
+}
+
+typedef struct { const gt_glyph *g; const gt_img *pg; } rt_g;
+
+/* the glyph of a code point in the caption face (role 0) or the body face (role 1), falling back to the other face (kana and kanji live in the body face) */
+static int rt_find(int cls, int role, unsigned cp, rt_g *out)
+{
+    for (int k = 0; k < 2; k++) {
+        gt_font *f = RT.font[cls][k == 0 ? role : 1 - role];
+        const gt_glyph *g = gt_font_find(f, cp);
+        if (!g || g->w == 0) {
+            if (g && cp == 0x20) {   /* a space: no pixels, advance only */
+                out->g = g, out->pg = NULL;
+                return 1;
+            }
+            continue;
+        }
+        const gt_img *pg = gt_font_page(f, g->page);
+        if (!pg || g->x + g->w > pg->w || g->y4 / 4 + g->h4 / 4 > pg->h) continue;
+        out->g = g, out->pg = pg;
+        return 1;
+    }
+    return 0;
+}
+
+/* vertical middle of the capital letters of a face inside its glyph cell: lines are centred on it, so the caption face and the body face share a baseline */
+static float rt_capmid(int cls, int role)
+{
+    if (RT.capmid[cls][role] > 0) return RT.capmid[cls][role];
+    float mid = 14.0f;
+    gt_font *f = RT.font[cls][role];
+    const gt_glyph *g = gt_font_find(f, 'H');
+    const gt_img *pg = g ? gt_font_page(f, g->page) : NULL;
+    if (g && pg && g->y4 / 4 + g->h4 / 4 <= pg->h) {
+        int top = -1, bot = -1, gy = g->y4 / 4, gh = g->h4 / 4;
+        for (int y = 0; y < gh; y++)
+            for (int x = 0; x < g->w; x++)
+                if ((pg->px[(size_t)(gy + y) * (size_t)pg->w + (size_t)(g->x + x)] >> 24) > 110) {
+                    if (top < 0) top = y;
+                    bot = y;
+                    break;
+                }
+        if (top >= 0) mid = ((float)top + (float)bot + 1.0f) * 0.5f;
+    }
+    RT.capmid[cls][role] = mid;
+    return mid;
+}
+
+/* the cell height used to scale: both faces are 28 px high in the atlas, the pixel size we are asked for (px) maps to 24 atlas pixels */
+#define RT_EM 24.0f
+
+/* looks every character up; returns the width in device pixels at scale s with extra spacing, or -1 when a glyph is missing */
+static float rt_measure(const wchar_t *ws, int n, int cls, int role, float s, float extra, rt_g *gl)
+{
+    float w = 0;
+    for (int i = 0; i < n; i++) {
+        if (!rt_find(cls, role, ws[i], &gl[i])) return -1;
+        w += (float)gl[i].g->adv * s + extra;
+    }
+    return w - (n ? extra : 0);
+}
+
+/* draws (or, with mask, accumulates) a laid-out run; x = left of the first glyph, ycell = top of the atlas cell in device pixels */
+static void rt_draw_run(const rt_g *gl, int n, float x, float ytop, float s, float extra, unsigned rgb, float amul, unsigned char *mask, int mw, int mh, int mox, int moy)
+{
+    for (int i = 0; i < n; i++) {
+        if (gl[i].pg) {
+            const gt_glyph *g = gl[i].g;
+            float gw = (float)g->w * s, gh = (float)(g->h4 / 4) * s, gy0 = (float)(g->y4 / 4);
+            int dx0 = (int)floorf(x), dy0 = (int)floorf(ytop), dx1 = (int)ceilf(x + gw), dy1 = (int)ceilf(ytop + gh);
+            for (int dy = dy0; dy < dy1; dy++)
+                for (int dx = dx0; dx < dx1; dx++) {
+                    float u = (float)g->x + ((float)dx + 0.5f - x) / s, v = gy0 + ((float)dy + 0.5f - ytop) / s;
+                    float a = rt_alpha(gl[i].pg, u, v, (float)g->x, gy0, (float)(g->x + g->w), gy0 + (float)(g->h4 / 4)) * amul;
+                    if (a <= 0.01f) continue;
+                    if (mask) {
+                        int mx = dx - mox, my = dy - moy;
+                        if (mx >= 0 && my >= 0 && mx < mw && my < mh) {
+                            unsigned v8 = (unsigned)(a * 255.0f);
+                            if (v8 > mask[my * mw + mx]) mask[my * mw + mx] = (unsigned char)v8;
+                        }
+                    } else
+                        put_dev(dx, dy, rgb, (unsigned)(a * 255.0f + 0.5f));
+                }
+        }
+        x += (float)gl[i].g->adv * s + extra;
+    }
+}
+
+/* one line; returns 1 when drawn with the real face (0: the caller uses GDI) */
+static int rt_line(const wchar_t *ws, int n, float bx, float by, float bw, float bh, float pxd, int role, DWORD color, int align, float sp, int flags, float *width_out)
+{
+    if (!RT.ok || n <= 0 || n > 400) return 0;
+    rt_g gl[400];
+    float s = pxd / RT_EM, extra = sp * pxd;
+    float w = rt_measure(ws, n, g_cls, role, s, extra, gl);
+    if (w < 0) return 0;
+    if (width_out) {
+        *width_out = w;
+        return 1;
+    }
+    if (w > bw && bw > 0) {   /* shrink to the box, down to 60 % */
+        float k = bw / w;
+        if (k < 0.6f) k = 0.6f;
+        s *= k, extra *= k;
+        w = rt_measure(ws, n, g_cls, role, s, extra, gl);
+    }
+    float x = align == TA_CENTER_ ? bx + (bw - w) * 0.5f : align == TA_RIGHT_ ? bx + bw - w : bx;
+    float cellh = (float)gt_font_cell(RT.font[g_cls][role] ? RT.font[g_cls][role] : RT.font[0][0]) * s;
+    if (cellh <= 0) cellh = 28.0f * s;
+    float ytop = by + bh * 0.5f - rt_capmid(g_cls, role) * s;
+    (void)cellh;
+    if (flags & TF_GLOW) {   /* soft glow: the run into a mask, blurred, added in the text colour */
+        int rad = (int)(pxd * 0.18f) > 2 ? (int)(pxd * 0.18f) : 2, pad = rad * 3;
+        int mw = (int)w + 2 * pad + 2, mh = (int)cellh + 2 * pad + 2;
+        if (mw > 3000 || mh > 600) goto plain;
+        unsigned char *m = (unsigned char *)calloc((size_t)mw * (size_t)mh, 1);
+        if (m) {
+            int mox = (int)floorf(x) - pad, moy = (int)floorf(ytop) - pad;
+            rt_draw_run(gl, n, x, ytop, s, extra, 0xFFFFFF, 1.0f, m, mw, mh, mox, moy);
+            blur_u8(m, mw, mh, rad);
+            for (int yy = 0; yy < mh; yy++)
+                for (int xx = 0; xx < mw; xx++) {
+                    unsigned a = (unsigned)(m[yy * mw + xx] * g_glow_strength * 2.2f);
+                    if (a > 255) a = 255;
+                    put_dev(mox + xx, moy + yy, color & 0xFFFFFF, a);
+                }
+            free(m);
+        }
+    }
+plain:
+    rt_draw_run(gl, n, x, ytop, s, extra, color & 0xFFFFFF, 1.0f, NULL, 0, 0, 0, 0);
+    return 1;
+}
+
+static int rt_is_break(wchar_t c) { return c == L' ' || c == 0x3000; }
+static int rt_is_cjk(wchar_t c) { return c >= 0x2E80 && c <= 0xFFEF && c != 0xFF0C && c != 0x3001 && c != 0x3002; }
+
+/* wrapped text: greedy lines in the box, the size shrinks until the lines fit the height; returns 0 when a glyph is missing */
+static int rt_wrap(const wchar_t *ws, int n, float bx, float by, float bw, float bh, float pxd, int role, DWORD color, int align, float sp)
+{
+    if (!RT.ok || n <= 0 || n > 400) return 0;
+    rt_g gl[400];
+    float s = pxd / RT_EM, minS = s * 0.6f;
+    if (rt_measure(ws, n, g_cls, role, s, 0, gl) < 0) return 0;
+    for (int it = 0; it < 10; it++) {
+        float extra = sp * s * RT_EM, line_h = (float)gt_font_cell(RT.font[0][role]) * s * 1.12f;
+        int starts[64], ends[64], nl = 0, pos = 0;
+        while (pos < n && nl < 64) {
+            float w = 0;
+            int last_ok = pos, i = pos;
+            while (i < n) {
+                float cw = (float)gl[i].g->adv * s + extra;
+                if (w + cw > bw && i > pos) break;
+                w += cw, i++;
+                if (rt_is_break(ws[i - 1]) || (rt_is_cjk(ws[i - 1]) && i < n)) last_ok = i;
+            }
+            int e = i;
+            if (i < n && last_ok > pos) e = last_ok;
+            starts[nl] = pos, ends[nl] = e, nl++;
+            pos = e;
+            while (pos < n && ws[pos] == L' ') pos++;
+        }
+        if (((float)nl * line_h <= bh + 1.0f) || s <= minS) {
+            for (int l = 0; l < nl; l++) {
+                int a = starts[l], b = ends[l];
+                while (b > a && ws[b - 1] == L' ') b--;
+                float lw = 0;
+                for (int i = a; i < b; i++) lw += (float)gl[i].g->adv * s + extra;
+                lw -= b > a ? extra : 0;
+                float x = align == TA_CENTER_ ? bx + (bw - lw) * 0.5f : align == TA_RIGHT_ ? bx + bw - lw : bx;
+                rt_draw_run(gl + a, b - a, x, by + (float)l * line_h, s, extra, color & 0xFFFFFF, 1.0f, NULL, 0, 0, 0, 0);
+            }
+            return 1;
+        }
+        s *= 0.93f;
+    }
+    return 1;
+}
+
+/* a sprite of the interface atlas, stretched to (dx, dy, dw, dh) in virtual units, tinted with rgb (the sprite's alpha is the shape) */
+static void spr_draw(int id, float dx, float dy, float dw, float dh, unsigned rgb, float amax, int flipx)
+{
+    if (!RT.sprites_ok) return;
+    const rt_rect *r = &RT.spr[id];
+    float x0 = g_ox + dx * g_scale, y0 = g_oy + dy * g_scale, x1 = g_ox + (dx + dw) * g_scale, y1 = g_oy + (dy + dh) * g_scale;
+    for (int y = (int)floorf(y0); y < (int)ceilf(y1); y++)
+        for (int x = (int)floorf(x0); x < (int)ceilf(x1); x++) {
+            float fx = ((float)x + 0.5f - x0) / (x1 - x0), fy = ((float)y + 0.5f - y0) / (y1 - y0);
+            if (fx < 0 || fx > 1 || fy < 0 || fy > 1) continue;
+            if (flipx) fx = 1.0f - fx;
+            float a = rt_alpha(&RT.common, (float)r->x + fx * (float)r->w, (float)r->y + fy * (float)r->h, (float)r->x, (float)r->y, (float)(r->x + r->w), (float)(r->y + r->h)) * amax;
+            if (a > 0.5f) put_dev(x, y, rgb, (unsigned)a);
+        }
+}
+
+/* the rounded frame as a nine-patch (corners keep their size) */
+static void spr_frame(float dx, float dy, float dw, float dh, unsigned rgb, float amax)
+{
+    if (!RT.sprites_ok) return;
+    const rt_rect *r = &RT.spr[SPR_FRAME];
+    float m = 8.0f;   /* source margin = corner size in the atlas */
+    float sc = 1.0f;
+    float sx[4] = {(float)r->x, (float)r->x + m, (float)(r->x + r->w) - m, (float)(r->x + r->w)}, sy[4] = {(float)r->y, (float)r->y + m, (float)(r->y + r->h) - m, (float)(r->y + r->h)};
+    float ddx[4] = {dx, dx + m * sc, dx + dw - m * sc, dx + dw}, ddy[4] = {dy, dy + m * sc, dy + dh - m * sc, dy + dh};
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 3; i++) {
+            float px0 = g_ox + ddx[i] * g_scale, px1 = g_ox + ddx[i + 1] * g_scale, py0 = g_oy + ddy[j] * g_scale, py1 = g_oy + ddy[j + 1] * g_scale;
+            for (int y = (int)floorf(py0); y < (int)ceilf(py1); y++)
+                for (int x = (int)floorf(px0); x < (int)ceilf(px1); x++) {
+                    float fx = ((float)x + 0.5f - px0) / (px1 - px0), fy = ((float)y + 0.5f - py0) / (py1 - py0);
+                    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) continue;
+                    float u = sx[i] + fx * (sx[i + 1] - sx[i]), v = sy[j] + fy * (sy[j + 1] - sy[j]);
+                    float a = rt_alpha(&RT.common, u, v, sx[i], sy[j], sx[i + 1], sy[j + 1]) * amax;
+                    if (a > 0.5f) put_dev(x, y, rgb, (unsigned)a);
+                }
+        }
+}
+
 /* text in a box (virtual coordinates). One line: aligned in the box, shrunk to fit its width, centred vertically on the capital height.
  * TF_WRAP: several lines from the top of the box, shrunk to fit its height. sp = letter spacing in em (halved for CJK). TF_UP: capitals (Latin, Cyrillic, Greek). */
 static void text(const char *s, float x, float y, float w, float h, int px, int role, DWORD color, int align, float sp, int flags)
@@ -344,6 +673,15 @@ static void text(const char *s, float x, float y, float w, float h, int px, int 
     float bx = g_ox + x * g_scale, by = g_oy + y * g_scale, bw = w * g_scale, bh = h * g_scale;
     float pxd = (float)px * g_scale * fs;
     float pxmin = pxd * 0.6f;
+    rt_init();
+    if (RT.ok) {   /* the game's own face when every character is in it */
+        int done = (flags & TF_WRAP) ? rt_wrap(ws, n, bx, by, bw, bh, (float)px * g_scale, role, color, align, sp) : rt_line(ws, n, bx, by, bw, bh, (float)px * g_scale, role, color, align, sp, flags, NULL);
+        if (done) {
+            RT.stat_real++;
+            return;
+        }
+        RT.stat_gdi++;
+    }
     SetBkMode(G.dc, TRANSPARENT);
     SetTextColor(G.dc, RGB((color >> 16) & 255, (color >> 8) & 255, color & 255));
     if (flags & TF_WRAP) {
@@ -403,6 +741,11 @@ static float text_w(const char *s, int px, int role, float sp, int flags)
     fontspec(g_cls, role, &face, &weight, &fs);
     if (g_cls != 0) sp *= 0.5f;
     float pxd = (float)px * g_scale * fs;
+    rt_init();
+    if (RT.ok) {
+        float rw = 0;
+        if (rt_line(ws, n, 0, 0, 0, 0, (float)px * g_scale, role, 0, 0, sp, 0, &rw)) return rw / g_scale;
+    }
     HFONT f = gdi_font((int)(pxd + 0.5f), role, g_cls);
     if (!f) return 0;
     SelectObject(G.dc, f);
@@ -505,12 +848,21 @@ static void ornament_line(float y, float x0, float x1, float cx)
 {
     hline_fade(x0, x1, y, 1.6f, C_LINE, 190, 0.35f);
     rect_px(cx - 0.8f, y - 22, 1.6f, 44, 0x90000000 | C_LINE);   /* vertical tick through the line, as in the game's frames */
-    disc(cx, y, 4.5f, 0xA0E8F2, 220);
-    disc(cx, y, 9.0f, C_HI, 46);
+    if (RT.sprites_ok) spr_draw(SPR_SPARK, cx - 15, y - 13, 30, 26, 0xD8F6FF, 255, 0);
+    else {
+        disc(cx, y, 4.5f, 0xA0E8F2, 220);
+        disc(cx, y, 9.0f, C_HI, 46);
+    }
 }
 
 static void draw_arc(float ycentre, float yedge)
 {
+    if (RT.sprites_ok) {   /* the game's own arc, once for each half of the screen */
+        float ext = g_ox / g_scale;
+        spr_draw(SPR_ARC, -ext, yedge - 4, 960 + ext, ycentre - yedge + 12, C_LINE + 0x203030, 235, 0);
+        spr_draw(SPR_ARC, 960, yedge - 4, 960 + ext, ycentre - yedge + 12, C_LINE + 0x203030, 235, 1);
+        return;
+    }
     /* the long shallow curve over the top of the stock screens, drawn in segments of one pixel column */
     int w = G.w;
     for (int x = 0; x < w; x++) {
@@ -578,7 +930,8 @@ static void draw_legend(const l1_view *v, float cy)
 static void draw_card(const l1_card *c, float x, float y, float w, float h, unsigned accent)
 {
     rect_px(x, y, w, h, 0xB4040E12);
-    frame_px(x, y, w, h, 1.6f, 0xFF000000 | ((accent >> 1) & 0x7F7F7F) | 0x101818);
+    if (RT.sprites_ok) spr_frame(x, y, w, h, accent, 235);
+    else frame_px(x, y, w, h, 1.6f, 0xFF000000 | ((accent >> 1) & 0x7F7F7F) | 0x101818);
     hline_fade(x, x + w, y, 3.0f, accent, 230, 0.0f);
     disc(x + w * 0.5f, y, 5, 0xE0F4F8, 230);
     text(c->who, x + 22, y + 14, w - 44, 30, 20, 0, C_INFO | 0xFF000000, TA_LEFT_, 0.16f, TF_UP);
@@ -602,7 +955,12 @@ static void draw_lobby(const ov_scene *sc)
         const l1_row *r = &v->rows[i];
         int sel = i == v->sel;
         float y = ly + step * (float)i;
-        if (sel) {
+        if (sel && RT.sprites_ok) {   /* the stock selection: a soft disc and two thin circles behind the item */
+            float cyy = y + rh / 2;
+            spr_draw(SPR_DISC, axis - 230, cyy - 62, 460, 124, 0x2FA6B8, 120, 0);
+            spr_draw(SPR_RING, axis - 52, cyy - 52, 104, 104, C_HI, 190, 0);
+            spr_draw(SPR_RING, axis - 74, cyy - 74, 148, 148, C_HI, 80, 0);
+        } else if (sel) {
             glow_ellipse(axis, y + rh / 2, 560, 46, 0x2FA6B8, 150);
             ring_ellipse(axis, y + rh / 2, 520, 31, 1.6f, C_HI, 105);
             ring_ellipse(axis, y + rh / 2, 548, 38, 1.2f, C_HI, 40);
@@ -827,6 +1185,6 @@ int overlay_row_at_client(int px, int py, int cw, int ch, int *vx, int *vy)
 
 void overlay_stats(char *out, int size)
 {
-    snprintf(out, (size_t)size, "overlay: %u frames copied, failures: font %u surface %u, backdrop captured %u / fallback %u, face %s, scale %.2f, back buffer %dx%d", g_frames, g_fail_font, g_fail_tex, g_bd_ok,
-             g_bd_fail, g_have_bahn > 0 ? "Bahnschrift" : "Segoe UI", g_scale, g_bbw, g_bbh);
+    snprintf(out, (size_t)size, "overlay: %u frames copied, failures: font %u surface %u, backdrop captured %u / fallback %u, game material %s (strings: %u real face, %u GDI %s), scale %.2f, back buffer %dx%d", g_frames,
+             g_fail_font, g_fail_tex, g_bd_ok, g_bd_fail, RT.ok ? "loaded" : "not available", RT.stat_real, RT.stat_gdi, g_have_bahn > 0 ? "Bahnschrift" : "Segoe UI", g_scale, g_bbw, g_bbh);
 }
