@@ -28,6 +28,7 @@ Needs: the Steam version of Resident Evil Revelations, build 13298487 (the insta
 Limits (honest)
 - The installer and the setup .exe are not code-signed: Windows SmartScreen may warn. The zip works the same way.
 - Gamepad support in the lobby and in the game uses XInput (Xbox-compatible pads).
+- Pad numbering gaps (a pad on XInput user 2 only), the exchange "player 1 uses gamepad 2" and rumble follow one rule; a gamepad that Windows shows twice (a Steam Input or remapper copy next to the physical pad) is recognised after a few seconds of play and counted as one gamepad. If two real pads are ever taken for one, start the game with the variable REV1_PADDEDUP=0.
 - Network co-op is not part of this version.
 
 Licence: MIT (LICENSE.txt). Not affiliated with Capcom.
