@@ -88,6 +88,7 @@ static struct {
     int have_bg;
     unsigned bg_stamp;   /* tick of the capture series start */
     int bg_shots;        /* captures made in this series */
+    int bg_final;        /* the last capture was a real picture (not a fade to black): no more shots */
     int lobby_was_on;
     struct { int px, role, cls; HFONT f; } fonts[40];
 } G;
@@ -711,7 +712,15 @@ static int capture_frame(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb)
     return ok;
 }
 
-/* the backdrop is taken from the game frame when the lobby opens and twice more shortly after (a fade-in must not freeze as black); the lobby is a still picture */
+/* mean brightness (0..255) of a captured frame, sampled */
+static int frame_mean(const unsigned *px, int w, int h)
+{
+    unsigned long sum = 0, n = 0;
+    for (size_t i = 0, total = (size_t)w * (size_t)h; i < total; i += 17, n++) sum += ((px[i] >> 16) & 255) + ((px[i] >> 8) & 255) + (px[i] & 255);
+    return n ? (int)(sum / (n * 3)) : 0;
+}
+
+/* the backdrop is taken from the game frame when the lobby opens; while that frame is black (a fade) it is taken again every 300 ms, up to 6 shots; the lobby is a still picture */
 static int backdrop_update(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb, int lobby_on, unsigned now)
 {
     if (!lobby_on) {
@@ -719,8 +728,8 @@ static int backdrop_update(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb, int lob
         return 0;
     }
     int need = 0;
-    if (!G.lobby_was_on || !G.bg) G.bg_stamp = now, G.bg_shots = 0, need = 1;
-    else if ((G.bg_shots == 1 && now - G.bg_stamp > 400) || (G.bg_shots == 2 && now - G.bg_stamp > 1500)) need = 1;
+    if (!G.lobby_was_on || !G.bg) G.bg_stamp = now, G.bg_shots = 0, G.bg_final = 0, need = 1;
+    else if (!G.bg_final && now - G.bg_stamp > 300u * (unsigned)G.bg_shots) need = 1;
     G.lobby_was_on = 1;
     if (!need) return 0;
     if (!G.bg) G.bg = (unsigned *)malloc((size_t)G.w * (size_t)G.h * 4);
@@ -730,6 +739,7 @@ static int backdrop_update(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb, int lob
     if (cap) g_bd_ok++;
     else g_bd_fail++;
     G.bg_shots++;
+    G.bg_final = !cap || frame_mean(G.cap, G.w, G.h) >= 5 || G.bg_shots >= 6;
     return 1;
 }
 
