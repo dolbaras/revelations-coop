@@ -661,6 +661,52 @@ static void spr_frame(float dx, float dy, float dw, float dh, unsigned rgb, floa
         }
 }
 
+/* GDI text through a private white-on-black bitmap: the coverage becomes the alpha of `rgb` over the picture (the colour is exact and the weight is tuned to the thin real face;
+ * drawing straight into the frame bitmap came out as plain white in the live check of the Chinese rows whose characters the game's face lacks).
+ * wrap = 0: one line, (x, base) = left end and baseline in device pixels; wrap = 1: DrawText into the box (x, y, w, h). */
+static void gdi_text_masked(const wchar_t *ws, int n, HFONT f, int extra, int x, int y, int w, int h, int base, int wrap, int align, unsigned rgb, float k)
+{
+    TEXTMETRICW tm;
+    SelectObject(G.dc, f);
+    GetTextMetricsW(G.dc, &tm);
+    int pad = 6;
+    int rx = wrap ? x : x - pad, ry = wrap ? y : base - tm.tmAscent - pad;
+    int rw = wrap ? w : w + 2 * pad, rh = wrap ? h + 40 : tm.tmHeight + 2 * pad;
+    if (rw < 4 || rh < 4 || rw > 3000 || rh > 900) return;
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader, bi.bmiHeader.biWidth = rw, bi.bmiHeader.biHeight = -rh, bi.bmiHeader.biPlanes = 1, bi.bmiHeader.biBitCount = 32, bi.bmiHeader.biCompression = BI_RGB;
+    unsigned *px = NULL;
+    HDC sdc = GetDC(NULL);
+    HDC dc = CreateCompatibleDC(sdc);
+    HBITMAP bmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&px, NULL, 0);
+    ReleaseDC(NULL, sdc);
+    if (dc && bmp && px) {
+        HGDIOBJ ob = SelectObject(dc, bmp), of = SelectObject(dc, f);
+        memset(px, 0, (size_t)rw * (size_t)rh * 4);
+        SetBkMode(dc, TRANSPARENT), SetTextColor(dc, RGB(255, 255, 255)), SetTextCharacterExtra(dc, extra);
+        if (wrap) {
+            RECT rc = {0, 0, w, h + 40};
+            DrawTextW(dc, ws, n, &rc, DT_WORDBREAK | DT_NOPREFIX | (align == TA_CENTER_ ? DT_CENTER : align == TA_RIGHT_ ? DT_RIGHT : DT_LEFT));
+        } else {
+            SetTextAlign(dc, TA_LEFT | TA_BASELINE);
+            ExtTextOutW(dc, pad, pad + tm.tmAscent, 0, NULL, ws, (UINT)n, NULL);
+        }
+        GdiFlush();
+        for (int yy = 0; yy < rh; yy++)
+            for (int xx = 0; xx < rw; xx++) {
+                unsigned c = px[(size_t)yy * (size_t)rw + (size_t)xx];
+                unsigned cov = ((c & 255) + ((c >> 8) & 255) + ((c >> 16) & 255)) / 3;
+                unsigned a = (unsigned)((float)cov * k);
+                if (a > 255) a = 255;
+                if (a) put_dev(rx + xx, ry + yy, rgb, a);
+            }
+        SelectObject(dc, of), SelectObject(dc, ob);
+    }
+    if (bmp) DeleteObject(bmp);
+    if (dc) DeleteDC(dc);
+}
+
 /* text in a box (virtual coordinates). One line: aligned in the box, shrunk to fit its width, centred vertically on the capital height.
  * TF_WRAP: several lines from the top of the box, shrunk to fit its height. sp = letter spacing in em (halved for CJK). TF_UP: capitals (Latin, Cyrillic, Greek). */
 static void text(const char *s, float x, float y, float w, float h, int px, int role, DWORD color, int align, float sp, int flags)
@@ -689,7 +735,6 @@ static void text(const char *s, float x, float y, float w, float h, int px, int 
         RT.stat_gdi++;
     }
     SetBkMode(G.dc, TRANSPARENT);
-    SetTextColor(G.dc, RGB((color >> 16) & 255, (color >> 8) & 255, color & 255));
     if (flags & TF_WRAP) {
         HFONT f = NULL;
         RECT rc;
@@ -704,9 +749,8 @@ static void text(const char *s, float x, float y, float w, float h, int px, int 
             if ((float)rc.bottom <= bh || pxd <= pxmin) break;
             pxd *= 0.93f;
         }
-        rc.left = (LONG)bx, rc.top = (LONG)by, rc.right = (LONG)(bx + bw), rc.bottom = (LONG)(by + bh + 40);
-        DrawTextW(G.dc, ws, n, &rc, DT_WORDBREAK | DT_NOPREFIX | (align == TA_CENTER_ ? DT_CENTER : align == TA_RIGHT_ ? DT_RIGHT : DT_LEFT));
         SetTextCharacterExtra(G.dc, 0);
+        gdi_text_masked(ws, n, f, (int)(sp * pxd), (int)bx, (int)by, (int)bw, (int)bh, 0, 1, align, color & 0xFFFFFF, 0.9f);
         return;
     }
     HFONT f = NULL;
@@ -726,11 +770,7 @@ static void text(const char *s, float x, float y, float w, float h, int px, int 
     float tx = align == TA_CENTER_ ? bx + (bw - (float)vis) * 0.5f : align == TA_RIGHT_ ? bx + bw - (float)vis : bx;
     int base = (int)(by + bh * 0.5f + pxd * 0.36f + 0.5f);
     if (flags & TF_GLOW) glow_run(ws, n, f, extra, (int)tx, base, vis, color & 0xFFFFFF, g_glow_strength);
-    SelectObject(G.dc, f);
-    SetTextCharacterExtra(G.dc, extra);
-    SetTextAlign(G.dc, TA_LEFT | TA_BASELINE);
-    ExtTextOutW(G.dc, (int)tx, base, 0, NULL, ws, (UINT)n, NULL);
-    SetTextCharacterExtra(G.dc, 0);
+    gdi_text_masked(ws, n, f, extra, (int)tx, 0, vis, 0, base, 0, align, color & 0xFFFFFF, 0.9f);
 }
 
 /* width of a single line in virtual units, as text() would draw it (no shrinking) */
