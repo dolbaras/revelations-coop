@@ -161,7 +161,12 @@ static BOOL CALLBACK find_main_cb(HWND hw, LPARAM lp)
 {
     DWORD pid = 0;
     GetWindowThreadProcessId(hw, &pid);
-    if (pid == GetCurrentProcessId() && (is_main_window(hw, 0) || is_main_window(hw, 1))) {
+    if (pid != GetCurrentProcessId())
+        return TRUE;
+    /* by the window procedure (not after something subclassed the window: the Steam overlay does in a normal start - live 2026-11-05, the finder found nothing) or by the game's class name */
+    char cls[32] = "";
+    GetClassNameA(hw, cls, sizeof cls);
+    if (is_main_window(hw, 0) || is_main_window(hw, 1) || (!strcmp(cls, "BHRUE") && IsWindowVisible(hw) && !GetWindow(hw, GW_OWNER))) {
         *(HWND *)lp = hw;
         return FALSE;
     }
