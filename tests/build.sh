@@ -10,6 +10,8 @@ mkdir -p build
 ./build/test_padmerge.exe
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_padmap.exe test_padmap.c
 ./build/test_padmap.exe
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_devreset.exe test_devreset.c
+./build/test_devreset.exe
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_gametex.exe test_gametex.c ../native/gametex.c
 ARC=""
 for d in "${GAME_DIR:-}" ../../game ../../work/game; do

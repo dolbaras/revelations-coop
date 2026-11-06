@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "r1.h"
+#include "devreset.h"
 
 typedef IDirect3D9 *(WINAPI *Direct3DCreate9_t)(UINT);
 typedef HRESULT (WINAPI *CreateDevice_t)(IDirect3D9 *, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS *, IDirect3DDevice9 **);
@@ -127,6 +128,22 @@ static void log_pp(const char *what, const D3DPRESENT_PARAMETERS *pp)
            pp->EnableAutoDepthStencil, pp->AutoDepthStencilFormat, pp->Flags, pp->FullScreen_RefreshRateInHz, pp->PresentationInterval, GetCurrentThreadId());
 }
 
+/* device-lost recovery (devreset.h): the game shows a fatal error box at the first lost Reset, so the wait is here */
+#define DEVRESET_BUDGET_MS 20000u
+#define DEVRESET_POLL_MS   100u
+struct devreset_ctx {
+    IDirect3DDevice9 *dev;
+    D3DPRESENT_PARAMETERS *pp;
+};
+static long devreset_coop(void *c) { return (long)IDirect3DDevice9_TestCooperativeLevel(((struct devreset_ctx *)c)->dev); }
+static long devreset_reset(void *c)
+{
+    struct devreset_ctx *x = c;
+    return (long)real_Reset(x->dev, x->pp);
+}
+static void devreset_sleep(void *c, unsigned ms) { (void)c; Sleep(ms); }
+static unsigned devreset_now(void *c) { (void)c; return (unsigned)GetTickCount(); }
+
 static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
     log_pp("device Reset asked", pp);
@@ -138,6 +155,16 @@ static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *p
     HRESULT hr = real_Reset(dev, pp);
     r1_log("device Reset %ux%u windowed=%d -> hr=0x%08lx", pp ? pp->BackBufferWidth : 0, pp ? pp->BackBufferHeight : 0, pp ? pp->Windowed : -1,
            (unsigned long)hr);
+    if (devreset_is_lost((long)hr)) {
+        struct devreset_ctx x = {dev, pp};
+        unsigned tries = 0;
+        r1_log("device lost on Reset (hr=0x%08lx): waiting up to %u s for TestCooperativeLevel, then Reset again", (unsigned long)hr,
+               DEVRESET_BUDGET_MS / 1000u);
+        hr = (HRESULT)devreset_wait((long)hr, devreset_coop, devreset_reset, devreset_sleep, devreset_now, &x,
+                                    DEVRESET_BUDGET_MS, DEVRESET_POLL_MS, &tries);
+        r1_log("device Reset after the wait: %u more Reset call(s) -> hr=0x%08lx%s", tries, (unsigned long)hr,
+               devreset_is_lost((long)hr) ? " (still lost: the game will show its error)" : " (recovered)");
+    }
     return hr;
 }
 
