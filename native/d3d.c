@@ -163,7 +163,7 @@ static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *p
         hr = (HRESULT)devreset_wait((long)hr, devreset_coop, devreset_reset, devreset_sleep, devreset_now, &x,
                                     DEVRESET_BUDGET_MS, DEVRESET_POLL_MS, &tries);
         r1_log("device Reset after the wait: %u more Reset call(s) -> hr=0x%08lx%s", tries, (unsigned long)hr,
-               devreset_is_lost((long)hr) ? " (still lost: the game will show its error)" : " (recovered)");
+               devreset_is_lost((long)hr) ? " (still lost: the game will show its error)" : " (no longer lost: returned to the game)");
     }
     return hr;
 }
