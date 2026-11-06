@@ -76,6 +76,7 @@ void inject_vk_from_dik(int dik, int *vk);
 /* d3d.c: Direct3D 9 creation/device/Present hooks, screenshots (F11, console "shot", REV1_SHOTS) */
 void d3d_install(void);
 void d3d_request_shot(void);
+void d3d_devreset_request(int n);   /* test: the next Present makes n Reset calls answer DEVICELOST (console `devreset <n>`) */
 unsigned d3d_frames(void);
 
 /* steam.c: the game's own Steam calls (log only): init/callback timing, ISteamUserStats achievement calls */

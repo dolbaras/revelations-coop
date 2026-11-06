@@ -18,6 +18,7 @@
 
 #include "r1.h"
 #include "devreset.h"
+#include "devreset.h"
 
 typedef IDirect3D9 *(WINAPI *Direct3DCreate9_t)(UINT);
 typedef HRESULT (WINAPI *CreateDevice_t)(IDirect3D9 *, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS *, IDirect3DDevice9 **);
@@ -27,6 +28,20 @@ static Direct3DCreate9_t real_Direct3DCreate9;
 static CreateDevice_t real_CreateDevice;
 static Present_t real_Present;
 static Reset_t real_Reset;
+
+/* test hook (console `devreset <n>`, test instances only): the next n Reset calls answer DEVICELOST without the device
+   being lost, so the wait in hook_Reset can be run for real. Requested here, run by hook_Present on the render thread. */
+static LONG devreset_inject, devreset_test_pending;
+static D3DPRESENT_PARAMETERS dr_pp;   /* the last parameters of CreateDevice / Reset, for the test Reset */
+static HRESULT do_reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
+{
+    if (devreset_inject > 0) {
+        devreset_inject--;
+        return (HRESULT)DEVRESET_LOST;
+    }
+    return real_Reset(dev, pp);
+}
+void d3d_devreset_request(int n) { InterlockedExchange(&devreset_test_pending, n); }
 
 static char shot_dir[MAX_PATH];
 static int shot_secs[32], shot_count, shot_next, shot_serial;
@@ -91,9 +106,19 @@ done:
     IDirect3DSurface9_Release(bb);
 }
 
+static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp);
+
 static HRESULT WINAPI hook_Present(IDirect3DDevice9 *dev, const RECT *s, const RECT *d, HWND w, const RGNDATA *r)
 {
     unsigned n = ++frames;
+    LONG tn = InterlockedExchange(&devreset_test_pending, 0);
+    if (tn > 0) {   /* `devreset <n>` (test): a Reset on this (render) thread with n injected lost answers */
+        D3DPRESENT_PARAMETERS tp = dr_pp;
+        devreset_inject = tn;
+        HRESULT th = hook_Reset(dev, &tp);
+        r1_log("devreset test: %ld injected lost answers, Reset returned 0x%08lx, %ld injections left", (long)tn, (unsigned long)th, (long)devreset_inject);
+        devreset_inject = 0;
+    }
     if (n == 1) {
         char st[160];
         r1_text_state(st, sizeof st);
@@ -139,7 +164,7 @@ static long devreset_coop(void *c) { return (long)IDirect3DDevice9_TestCooperati
 static long devreset_reset(void *c)
 {
     struct devreset_ctx *x = c;
-    return (long)real_Reset(x->dev, x->pp);
+    return (long)do_reset(x->dev, x->pp);
 }
 static void devreset_sleep(void *c, unsigned ms) { (void)c; Sleep(ms); }
 static unsigned devreset_now(void *c) { (void)c; return (unsigned)GetTickCount(); }
@@ -152,7 +177,9 @@ static HRESULT WINAPI hook_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *p
         pp->Windowed = TRUE;                   /* a test instance never goes exclusive full screen; windowed needs refresh 0 */
         pp->FullScreen_RefreshRateInHz = 0;
     }
-    HRESULT hr = real_Reset(dev, pp);
+    if (pp)
+        dr_pp = *pp;
+    HRESULT hr = do_reset(dev, pp);
     r1_log("device Reset %ux%u windowed=%d -> hr=0x%08lx", pp ? pp->BackBufferWidth : 0, pp ? pp->BackBufferHeight : 0, pp ? pp->Windowed : -1,
            (unsigned long)hr);
     if (devreset_is_lost((long)hr)) {
@@ -197,6 +224,8 @@ static HRESULT WINAPI hook_CreateDevice(IDirect3D9 *d3d, UINT adapter, D3DDEVTYP
     if (SUCCEEDED(hr) && out && *out) {
         void *p;
         t0 = GetTickCount();
+        if (pp)
+            dr_pp = *pp;
         if ((p = r1_patch_vtable(*out, 16, (void *)hook_Reset)))
             real_Reset = (Reset_t)p;
         if ((p = r1_patch_vtable(*out, 17, (void *)hook_Present)))
