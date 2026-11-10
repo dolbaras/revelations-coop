@@ -221,7 +221,12 @@ Pre-releases were published from `mod\` main directly (`git push origin main`, `
 
 ## Release status
 
-Public packages so far: **pre-release 1 (0.0.1)** and **pre-release 2 (0.0.2)**, both GitHub pre-releases; `releases/latest` answers 404 (2026-11-09). The first full release is `0.1.0`.
+Public packages so far: **pre-release 1 (0.0.1)** and **pre-release 2 (0.0.2)**, both GitHub pre-releases, and the first full release **0.1.0** (tag `v0.1.0`, `--latest`,
+published 2026-11-10 from the public commit `6394f13`, an export of rev1-int `3cfa42e`; zip `17f3348f...`, setup exe `453c35dd...`, `dinput8.dll` `486dc173...`).
+Checked after the publication (2026-11-10, throw-away copies, no window): `tests\test_installer.ps1 -Online` 264 of 264; the 0.0.2 launcher of a copy with 0.0.2 installed,
+through the real feed (`-NoStart -NoWindow`, no `-Feed`): `installed 0.0.2, latest v0.1.0`, `checksum ok 17F3348F...8B71`, `installer exit 0`, `version.txt` 0.1.0, one shortcut,
+the uninstall byte for byte back to the copy before 0.0.2; the setup exe from the release page with `-Quiet`: exit 0, the launcher then says `installed 0.1.0, latest v0.1.0`.
+Not checked: the player's window path (progress window, installer window), a start through Steam, SmartScreen on a browser download.
 
 Verified offline for 0.1.0 (2026-11-09, no game started, no window shown):
 - `tests\test_installer.ps1 -OldZip work\dist-pre2c\revelations-coop-0.0.2.zip -Online`: 271 of 271 (the game-running case skipped: a lab game ran). The same test on the
