@@ -1,10 +1,14 @@
 ﻿# Resident Evil Revelations Co-op installer / uninstaller for players (shipped in the release zip as "Install Co-op.bat" + coop-installer.ps1 + coop-texts.ps1,
-# the payload in the "files" folder next to them). Built from installer.src.ps1 by tools\package.ps1 (it fills in the shared blocks).
+# the payload in the "files" folder next to them). Built by tools\package.ps1 from tools\installer.ps1.
 #   install: finds the game folder (this folder, the Steam install record, the Steam libraries, or the player picks it), checks that rerev.exe is the supported
 #            Steam build (13298487), keeps a dinput8.dll of someone else's in <game>\coop-backup, copies the mod (dinput8.dll + coop\) and writes
-#            <game>\coop\install.txt (what it installed, what it backed up).
-#   update:  the same over an older version; originals already backed up are kept.
-#   remove:  deletes what install.txt lists and puts the backed-up files back. The game's saves and the co-op settings file
+#            <game>\coop\install.txt (what it installed, what it backed up). When that dinput8.dll is an Ultimate ASI Loader (the loader of the Fusion
+#            Fix and of most ASI mods) a copy of it runs on as winmm.dll, so its plugins stay on (Chain-Plan).
+#   update:  the same over an older version; originals already backed up are kept. A dinput8.dll another mod put over the co-op one meanwhile
+#            becomes the original.
+#   remove:  deletes what install.txt lists and puts the backed-up files back (a dinput8.dll another mod put over the co-op one, or a loader copy the
+#            player changed, stays); also the mod's logs next to rerev.exe (rev1_coop.log, rev1_coop.N.log)
+#            and rev1_coop\shots + rev1_coop\ when they are empty (screenshots stay). The game's saves and the co-op settings file
 #            (%LOCALAPPDATA%\CAPCOM\RESIDENT EVIL REVELATIONS\rev1_coop.ini) are not touched.
 # A window shows the steps and a progress bar (also on the taskbar button). -Quiet: no window, the same steps written to the console (test scripts).
 # -Game without -Uninstall starts installing into that folder right away.
@@ -21,7 +25,7 @@ param([string] $Game = "", [switch] $Uninstall, [switch] $Quiet, [switch] $Ignor
 $ErrorActionPreference = "Stop"
 # (tests: the launcher starts a new release's installer without -AnyExe; RE1_COOP_ANYEXE=1 does the same)
 if ($env:RE1_COOP_ANYEXE -eq "1") { $AnyExe = [switch]::Present }
-# The setup exe (re-revelations-coop-setup-<version>.exe, tools\mkinstaller) unpacks this installer into a temp folder and says where it lies (COOP_SETUP_DIR:
+# The setup exe (revelations-coop-setup-<version>.exe, tools\mkinstaller) unpacks this installer into a temp folder and says where it lies (COOP_SETUP_DIR:
 # the game is looked for there too) and which file to write as the first act (COOP_SETUP_FLAG: a failed run without it = PowerShell never ran the script).
 if ($env:COOP_SETUP_FLAG -and -not $Quiet) { try { [IO.File]::WriteAllText($env:COOP_SETUP_FLAG, "1") } catch { } }
 $script:setupDir = if ($env:COOP_SETUP_DIR -and (Test-Path -LiteralPath $env:COOP_SETUP_DIR -PathType Container)) { $env:COOP_SETUP_DIR } else { $null }
@@ -184,13 +188,15 @@ function Find-Games {
 }
 
 function Read-Manifest($g) {
-    $m = @{ files = @(); backups = @(); shortcuts = @(); version = "" }
+    $m = @{ files = @(); backups = @(); shortcuts = @(); chains = @(); version = "" }
     $f = Join-Path $g "coop\install.txt"
     if (Test-Path -LiteralPath $f) {
         foreach ($line in Get-Content -LiteralPath $f) {
             if ($line -match '^version=(.*)$') { $m.version = $Matches[1] }
             elseif ($line -match '^file=(.*)$') { $m.files += $Matches[1] }
             elseif ($line -match '^backup=(.*)$') { $m.backups += $Matches[1] }
+            # (0.2.0: a copy the install made for the player's ASI loader, see Chain-Plan; also listed as file=)
+            elseif ($line -match '^chain=(.*)$') { if ($script:CHAIN.Contains($Matches[1])) { $m.chains += $Matches[1] } }
             # (a line with several shortcuts, or an empty one: split after each .lnk, drop the empty ones)
             elseif ($line -match '^shortcut=(.*)$') { $m.shortcuts += @([regex]::Split($Matches[1], '(?<=\.lnk) ') | Where-Object { $_ }) }
         }
@@ -208,6 +214,86 @@ function Has-Text($p, [string[]] $words) {
     $false
 }
 function Is-CoopDll($p) { Has-Text $p @($script:DLL_MARK) }
+
+# The machine and the exported names of a PE file, read from its bytes (nothing of it runs); $null for anything that is not one.
+function Pe-Exports($p) {
+    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $null }
+    try { $b = [IO.File]::ReadAllBytes($p) } catch { return $null }
+    $n = $b.Length
+    if ($n -lt 0x40 -or $b[0] -ne 0x4D -or $b[1] -ne 0x5A) { return $null }
+    $pe = [long][BitConverter]::ToUInt32($b, 0x3C)
+    if ($pe + 26 -gt $n -or [Text.Encoding]::ASCII.GetString($b, [int]$pe, 4) -ne "PE`0`0") { return $null }
+    $machine = [BitConverter]::ToUInt16($b, $pe + 4); $nsec = [BitConverter]::ToUInt16($b, $pe + 6); $optsize = [BitConverter]::ToUInt16($b, $pe + 20)
+    $opt = $pe + 24; $sec = $opt + $optsize
+    if ($sec + 40 * $nsec -gt $n) { return $null }
+    $magic = [BitConverter]::ToUInt16($b, $opt)
+    $dirs = if ($magic -eq 0x10B) { $opt + 96 } elseif ($magic -eq 0x20B) { $opt + 112 } else { return $null }
+    if ($dirs + 8 -gt $opt + $optsize) { return $null }
+    # (an RVA's offset in the file by the section table, -1 outside the file)
+    $secs = @(for ($i = 0; $i -lt $nsec; $i++) { $s = $sec + 40 * $i
+        @{ va = [long][BitConverter]::ToUInt32($b, $s + 12); vs = [long][BitConverter]::ToUInt32($b, $s + 8); raw = [long][BitConverter]::ToUInt32($b, $s + 16); ptr = [long][BitConverter]::ToUInt32($b, $s + 20) } })
+    $off = { param([long] $rva)
+        foreach ($s in $secs) { $span = [Math]::Max($s.vs, $s.raw)
+            if ($rva -ge $s.va -and $rva -lt $s.va + $span) { $o = $rva - $s.va; if ($o -ge $s.raw -or $s.ptr + $o -ge $n) { return -1 }; return $s.ptr + $o } }
+        -1 }
+    $names = New-Object System.Collections.Generic.HashSet[string]
+    $erva = [long][BitConverter]::ToUInt32($b, $dirs)
+    $ed = if ($erva) { & $off $erva } else { -1 }
+    if ($ed -ge 0 -and $ed + 40 -le $n) {
+        $cnt = [long][BitConverter]::ToUInt32($b, $ed + 24)
+        $np = & $off ([long][BitConverter]::ToUInt32($b, $ed + 32))
+        if ($np -ge 0 -and $cnt -le 65536) {
+            for ($i = 0; $i -lt $cnt -and $np + 4 * $i + 4 -le $n; $i++) {
+                $so = & $off ([long][BitConverter]::ToUInt32($b, $np + 4 * $i))
+                if ($so -lt 0) { continue }
+                $e = $so; while ($e -lt $n -and $b[$e] -ne 0 -and $e - $so -lt 512) { $e++ }
+                [void]$names.Add([Text.Encoding]::ASCII.GetString($b, [int]$so, [int]($e - $so)))
+            }
+        }
+    }
+    @{ machine = $machine; names = $names }
+}
+
+# An Ultimate ASI Loader that can stand in for winmm.dll: 32-bit (the game is), exports IsUltimateASILoader (the name plugins and other loaders know it by) and
+# winmm's timeGetTime (it serves winmm.dll). Both builds a player may have do: v10.0.2 and the Fusion Fix's v7.8.0 (2026-11-07).
+function Is-AsiLoader($p) {
+    $x = Pe-Exports $p
+    [bool]($x -and $x.machine -eq 0x14C -and $x.names.Contains("IsUltimateASILoader") -and $x.names.Contains("timeGetTime"))
+}
+
+function Same-File($a, $b) {
+    (Test-Path -LiteralPath $a -PathType Leaf) -and (Test-Path -LiteralPath $b -PathType Leaf) -and
+        ((Get-Item -LiteralPath $a).Length -eq (Get-Item -LiteralPath $b).Length) -and ((Sha256-File $a) -eq (Sha256-File $b))
+}
+
+# The player's Ultimate ASI Loader keeps running next to the mod. It knows itself only by its file name: as dinput8_real.dll (the mod's chain rule) it shows
+# "This library isn't supported." and closes the game (its source; native/chain_logic.h), so the copy is named winmm.dll, a name the loader serves (it forwards winmm's
+# functions to the system winmm.dll) and rerev.exe imports: Windows loads it from the game folder at the start, the loader then loads its plugins (scripts\*.asi) as
+# it does as dinput8.dll. The original stays in coop-backup\dinput8.dll; the loader's own settings file dinput8.ini goes along as winmm.ini (it reads <its name>.ini).
+# Copy -> where it comes from (relative to the game folder).
+$script:CHAIN = [ordered]@{ "winmm.dll" = "coop-backup\dinput8.dll"; "winmm.ini" = "dinput8.ini" }
+
+# What the install does for a foreign dinput8.dll kept in coop-backup: state "asi" (the loader runs as winmm.dll), "off" (the file stays off: not such a loader, or a
+# winmm.dll of someone else's is in the folder already), "" (none); keep = copies of an earlier install that are still the same as their source; make = copies to make.
+# A copy that is no longer the same as its source is the player's now: it is left alone and no longer listed.
+function Chain-Plan($g, $old, $backups) {
+    $plan = @{ state = ""; keep = @(); make = @() }
+    if ($backups -notcontains "dinput8.dll") { return $plan }
+    $plan.state = "off"
+    if (-not (Is-AsiLoader (Join-Path $g "coop-backup\dinput8.dll"))) { return $plan }
+    foreach ($name in $script:CHAIN.Keys) {
+        $from = Join-Path $g $script:CHAIN[$name]; $dst = Join-Path $g $name
+        if (-not (Test-Path -LiteralPath $from -PathType Leaf)) { continue }
+        if (Test-Path -LiteralPath $dst) {
+            if (($old.chains -contains $name) -and (Same-File $dst $from)) { $plan.keep += $name }
+            elseif ($name -eq "winmm.dll") { Ui-Log (L "winmmtaken"); $plan.keep = @(); $plan.make = @(); return $plan }
+        } else { $plan.make += $name }
+        # (the settings file only goes along with the loader)
+        if ($name -eq "winmm.dll" -and $plan.keep -notcontains $name -and $plan.make -notcontains $name) { return $plan }
+    }
+    $plan.state = "asi"
+    $plan
+}
 
 # The game running from this folder (a copy elsewhere does not lock these files).
 function Game-Running($g) {
@@ -234,10 +320,19 @@ function Do-Uninstall($g) {
     Lock-Install
     Ui-Step "rm" "run"
     $all = @($m.files)
+    $leftIn = New-Object System.Collections.Generic.List[string]
     $i = 0
     foreach ($rel in $all) {
         $i++
         Ui-Progress (5 + 50 * $i / [Math]::Max(1, $all.Count)) $rel
+        # (a copy made for the player's ASI loader goes only while it is still the same as its source: the loader in coop-backup, the player's dinput8.ini)
+        if ($m.chains -contains $rel -and (Test-Path -LiteralPath (Join-Path $g $rel)) -and -not (Same-File (Join-Path $g $rel) (Join-Path $g $script:CHAIN[$rel]))) {
+            Ui-Log ((L "leftalone") + $rel); continue
+        }
+        # (a dinput8.dll another mod put over the co-op one after the install is the player's now: it stays, and the older original in coop-backup is not put back over it)
+        if ($rel -eq "dinput8.dll" -and (Test-Path -LiteralPath (Join-Path $g $rel)) -and -not (Is-CoopDll (Join-Path $g $rel))) {
+            Ui-Log ((L "leftin") + $rel); $leftIn.Add($rel); continue
+        }
         Remove-Item -LiteralPath (Join-Path $g $rel) -Force -ErrorAction SilentlyContinue
     }
     Ui-Log (L "nrem" $($all.Count))
@@ -251,18 +346,29 @@ function Do-Uninstall($g) {
     foreach ($rel in $m.backups) {
         $i++
         Ui-Progress (55 + 35 * $i / [Math]::Max(1, $m.backups.Count)) $rel
+        if ($leftIn -contains $rel) { continue }
         $b = Join-Path $g "coop-backup\$rel"
         if (Test-Path -LiteralPath $b) { Copy-Item -LiteralPath $b (Join-Path $g $rel) -Force; Ui-Log ((L "putback") + $rel) }
     }
     Ui-Step "restore" "done"
     Ui-Step "clean" "run"
-    Ui-Progress 95 "coop, coop-backup"
+    Ui-Progress 95 "coop, coop-backup, rev1_coop.log"
     Remove-Item -LiteralPath (Join-Path $g "coop") -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $g "coop-backup") -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $g "Uninstall Co-op.bat") -Force -ErrorAction SilentlyContinue
+    # What the mod's DLL itself leaves next to rerev.exe when the game ran: its log (rev1_coop.log, the older starts rev1_coop.1.log ... .4.log)
+    # and, after a screenshot (F11), rev1_coop\shots. The logs go; the two folders only when empty (screenshots are the player's own).
+    foreach ($f in @(Get-ChildItem -LiteralPath $g -Filter "rev1_coop*.log" -File -ErrorAction SilentlyContinue)) {
+        if ($f.Name -match '^rev1_coop(\.[0-9])?\.log$') { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    foreach ($d in (Join-Path $g "rev1_coop\shots"), (Join-Path $g "rev1_coop")) {
+        if ((Test-Path -LiteralPath $d -PathType Container) -and -not @(Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue).Count) {
+            Remove-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+        }
+    }
     Ui-Step "clean" "done"
     Ui-Progress 100 ""
-    @{ removed = $m.version }
+    @{ removed = $m.version; left = $leftIn.Count }
 }
 
 # A command line argument as the C runtime parses it back.
@@ -451,10 +557,34 @@ function Do-Install($g) {
     # The install record as far as it got: a failure later on can still be removed or retried. coop\version.txt goes last, once everything is in: the launcher
     # reads it, and an update that broke off is tried again at the next start.
     $links = @($old.shortcuts)
+    $chains = New-Object System.Collections.Generic.List[string]
     $writeRecord = {
-        $lines = @("version=$version") + ($files | ForEach-Object { "file=$_" }) + ($backups | ForEach-Object { "backup=$_" }) + ($links | ForEach-Object { "shortcut=$_" })
+        $lines = @("version=$version") + ($files | ForEach-Object { "file=$_" }) + ($backups | ForEach-Object { "backup=$_" }) + ($chains | ForEach-Object { "chain=$_" }) +
+                 ($links | ForEach-Object { "shortcut=$_" })
         New-Item -ItemType Directory -Force (Join-Path $g "coop") | Out-Null
         Set-Content -LiteralPath (Join-Path $g "coop\install.txt") -Value $lines -Encoding UTF8
+    }
+    # A dinput8.dll another mod put over the co-op one after an earlier install (an ASI loader, a fix): the player's now, kept like any other file of someone
+    # else's before the co-op DLL goes back in. It replaces an older original in coop-backup (the file the player put there last is the one the removal puts
+    # back); copies made from that older one (Chain-Plan) go with it and are made again from this one.
+    $proxyPath = Join-Path $g "dinput8.dll"
+    if (($old.files -contains "dinput8.dll") -and (Test-Path -LiteralPath $proxyPath) -and -not (Is-CoopDll $proxyPath)) {
+        foreach ($c in $old.chains) {
+            $cp = Join-Path $g $c
+            if (Same-File $cp (Join-Path $g $script:CHAIN[$c])) { Remove-Item -LiteralPath $cp -Force -ErrorAction SilentlyContinue }
+        }
+        $bk = Join-Path $g "coop-backup\dinput8.dll"
+        New-Item -ItemType Directory -Force (Split-Path $bk -Parent) | Out-Null
+        Copy-Item -LiteralPath $proxyPath $bk -Force
+        if ($backups -notcontains "dinput8.dll") {
+            $backups.Add("dinput8.dll")
+            # (in the record at once, the earlier install's files with it: a run that breaks off still puts it back)
+            foreach ($f in $old.files) { $files.Add($f) }
+            foreach ($c in $old.chains) { $chains.Add($c) }
+            & $writeRecord
+            $files.Clear(); $chains.Clear()
+        }
+        Ui-Log ((L "overcoop") + "dinput8.dll")
     }
     $versionFile = $null
     $i = 0
@@ -481,9 +611,15 @@ function Do-Install($g) {
         $files.Add($rel)
     }
     Ui-Log (L "copied" $($all.Count))
-    # Files of an older version that this one no longer has (by the package's list: never a file it has).
+    # The player's ASI loader (kept in coop-backup) runs on as winmm.dll (Chain-Plan): the copies are in the record before they are made, so a run that breaks off
+    # leaves nothing the uninstaller does not know.
+    $plan = Chain-Plan $g $old $backups
+    foreach ($nm in @($plan.keep) + @($plan.make)) { $chains.Add($nm); if ($files -notcontains $nm) { $files.Add($nm) } }
+    if ($plan.make.Count) { & $writeRecord }
+    foreach ($nm in $plan.make) { Copy-Item -LiteralPath (Join-Path $g $script:CHAIN[$nm]) (Join-Path $g $nm) -Force; Ui-Log ((L "asicopy") + $nm) }
+    # Files of an older version that this one no longer has (by the package's list: never a file it has; a loader copy the player changed is his now).
     foreach ($rel in $old.files) {
-        if ($packageFiles -notcontains $rel -and $files -notcontains $rel) { Remove-Item -LiteralPath (Join-Path $g $rel) -Force -ErrorAction SilentlyContinue }
+        if ($packageFiles -notcontains $rel -and $files -notcontains $rel -and $old.chains -notcontains $rel) { Remove-Item -LiteralPath (Join-Path $g $rel) -Force -ErrorAction SilentlyContinue }
     }
     # The uninstaller: a .bat at the game folder's root that runs the installer kept in coop\.
     $un = "Uninstall Co-op.bat"
@@ -501,11 +637,14 @@ function Do-Install($g) {
     Remove-Item -LiteralPath $snap -Recurse -Force -ErrorAction SilentlyContinue
     Ui-Step "finish" "done"
     Ui-Progress 100 ""
-    @{ old = $old.version; links = $links.Count }
+    @{ old = $old.version; links = $links.Count; chain = $plan.state }
 }
 
 function Install-Message($g, $r) {
-    if ($r.links -gt 0) { L "done" } else { L "donenolink" }
+    $t = if ($r.links -gt 0) { L "done" } else { L "donenolink" }
+    # (another mod's dinput8.dll: what became of it)
+    if ($r.chain -eq "asi") { $t += "`n`n" + (L "asinote") } elseif ($r.chain -eq "off") { $t += "`n`n" + (L "offnote") }
+    $t
 }
 
 function Save-Log($g) {
@@ -525,8 +664,8 @@ if ($Quiet) {
         if ($g) { if (-not (Test-Game $g)) { throw (L "notgame" $g) }; $g = (Resolve-Path -LiteralPath $g).Path }
         else { $g = @(Find-Games)[0]; if (-not $g) { throw (L "nogame") } }
         if ($Uninstall) {
-            $null = Do-Uninstall $g
-            Write-Host (L "gone")
+            $u = Do-Uninstall $g
+            Write-Host ((L "gone") + $(if ($u.left) { "`n`n" + (L "leftnote") } else { "" }))
         } else {
             $r = Do-Install $g
             Save-Log $g
@@ -581,7 +720,7 @@ function New-Button($parent, $text, $x, $y, $w, $primary) {
     $b
 }
 
-# Test mode (stage 6c; never set for a player): RE1_COOP_UI_POS="x,y" puts the window at that screen position WITHOUT taking the focus (a form class that shows
+# Test mode (never set for a player): RE1_COOP_UI_POS="x,y" puts the window at that screen position WITHOUT taking the focus (a form class that shows
 # without activation, no Activate call), so a window test can run on the second monitor while the owner works on the first. RE1_COOP_UI_SHOTS=<folder> saves
 # window pictures (Control.DrawToBitmap: the window's own pixels, never the desktop), RE1_COOP_UI_AUTO=install|remove drives the button, only for the one folder in
 # RE1_COOP_UI_ONLY (a test copy), then the window closes.
@@ -599,7 +738,7 @@ $form.SuspendLayout()
 $form.AutoScaleDimensions = New-Object Drawing.SizeF(96, 96)
 $form.AutoScaleMode = "Dpi"
 $form.Text = "$($script:TITLE) $version"
-$form.ClientSize = New-Object Drawing.Size(660, 520)
+$form.ClientSize = New-Object Drawing.Size(660, 556)
 $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false
 if ($script:quietPos) { $form.StartPosition = "Manual"; $form.Location = $script:quietPos; $form.ShowInTaskbar = $false } else { $form.StartPosition = "CenterScreen" }
 $form.BackColor = $C.bg; $form.ForeColor = $C.text
@@ -631,7 +770,7 @@ $hdr.Controls.Add($cbLang)
 
 # --- page 1: the folder and what will be done
 $pSetup = New-Object Windows.Forms.Panel
-$pSetup.Location = New-Object Drawing.Point(0, 96); $pSetup.Size = New-Object Drawing.Size(660, 424)
+$pSetup.Location = New-Object Drawing.Point(0, 96); $pSetup.Size = New-Object Drawing.Size(660, 460)
 $form.Controls.Add($pSetup)
 $lbFolder = New-Label $pSetup "" 28 22 400 22 (Font 10 "Bold") $C.text
 $tbGame = New-Object Windows.Forms.TextBox
@@ -639,14 +778,14 @@ $tbGame.Location = New-Object Drawing.Point(28, 48); $tbGame.Size = New-Object D
 $tbGame.BackColor = $C.panel; $tbGame.ForeColor = $C.text; $tbGame.BorderStyle = "FixedSingle"; $tbGame.Font = Font 10.5
 $pSetup.Controls.Add($tbGame)
 $btBrowse = New-Button $pSetup (L "browse") 512 45 120 $false
-$lbInfo = New-Label $pSetup "" 28 96 604 250 (Font 10.5) $C.text
-$btRemove = New-Button $pSetup (L "remove") 28 360 190 $false
-$btCancel = New-Button $pSetup (L "cancel") 372 360 120 $false
-$btGo = New-Button $pSetup (L "install") 502 360 130 $true
+$lbInfo = New-Label $pSetup "" 28 96 604 286 (Font 10.5) $C.text
+$btRemove = New-Button $pSetup (L "remove") 28 396 190 $false
+$btCancel = New-Button $pSetup (L "cancel") 372 396 120 $false
+$btGo = New-Button $pSetup (L "install") 502 396 130 $true
 
 # --- page 2: the steps and the progress
 $pWork = New-Object Windows.Forms.Panel
-$pWork.Location = New-Object Drawing.Point(0, 96); $pWork.Size = New-Object Drawing.Size(660, 424); $pWork.Visible = $false
+$pWork.Location = New-Object Drawing.Point(0, 96); $pWork.Size = New-Object Drawing.Size(660, 460); $pWork.Visible = $false
 $form.Controls.Add($pWork)
 $lbWorkTitle = New-Label $pWork "" 28 18 470 30 (Font 14 "Bold") $C.text
 $lbTime = New-Label $pWork "0:00" 500 24 132 22 (Font 10) $C.dim
@@ -678,11 +817,11 @@ $tbLog.Location = New-Object Drawing.Point(28, 284); $tbLog.Size = New-Object Dr
 $tbLog.Multiline = $true; $tbLog.ReadOnly = $true; $tbLog.ScrollBars = "Vertical"; $tbLog.BorderStyle = "None"
 $tbLog.BackColor = $C.panel; $tbLog.ForeColor = $C.dim; $tbLog.Font = Font 8.5 "Regular" "Consolas"
 $pWork.Controls.Add($tbLog)
-$btLogCopy = New-Button $pWork (L "copylog") 28 366 200 $false
+$btLogCopy = New-Button $pWork (L "copylog") 28 402 200 $false
 $btLogCopy.Visible = $false
-$btFolder = New-Button $pWork (L "openfolder") 236 366 250 $false
+$btFolder = New-Button $pWork (L "openfolder") 236 402 250 $false
 $btFolder.Visible = $false
-$btClose = New-Button $pWork (L "close") 502 366 130 $true
+$btClose = New-Button $pWork (L "close") 502 402 130 $true
 $btClose.Visible = $false
 
 # --- page 3 (over page 2's steps): the result
@@ -763,6 +902,8 @@ function Update-Setup {
         $lines += (L "what")
         $lines += ""
         $lines += (L "need")
+        $lines += ""
+        $lines += (L "net")
     }
     $lbInfo.Text = $lines -join "`n"
     # (the uninstaller's page keeps asking its question when the language is switched; the install text was shown under the Remove button before, window test 2026-11-04)
@@ -870,9 +1011,9 @@ function Start-Uninstall($g) {
         @("restore", (L "s_restore")),
         @("clean", (L "s_clean")))
     try {
-        $null = Do-Uninstall $g
+        $u = Do-Uninstall $g
         $script:exitCode = 0
-        Show-Result $true (L "removed") (L "gone")
+        Show-Result $true (L "removed") ((L "gone") + $(if ($u.left) { "`n`n" + (L "leftnote") } else { "" }))
     } catch {
         Ui-Log ("ERROR: " + $_.Exception.Message)
         Save-Log ""

@@ -360,7 +360,7 @@ void testmode_xinput_stats(char *out, int size)
 /* Synthetic pads (console "pad"): the test harness drives the game's pad slots itself. Virtual ViGEm pads did not reach the
  * game: with Steam running the game's XInput answers "not connected" for them (Steam Input owns the device and feeds only the
  * game that has the focus), so the hook answers for a slot the test has set. */
-static struct { volatile LONG active; volatile LONG base_active; XINPUT_GAMEPAD pad; DWORD packet; volatile DWORD until; } synth[4];
+static struct { volatile LONG active; volatile LONG base_active; XINPUT_GAMEPAD pad; DWORD packet; volatile DWORD until; volatile DWORD wag; } synth[4];   /* wag: LAB padwag period (ms) */
 /* xinput_seen per slot: [0] real success, [1] real not connected, [2] other */
 
 void testmode_pad_set(int slot, int active, const void *gamepad)
@@ -383,6 +383,21 @@ void testmode_pad_hold(int slot, const void *gamepad, int ms)
         return;
     synth[slot].pad = *(const XINPUT_GAMEPAD *)gamepad;
     synth[slot].packet++;
+    synth[slot].wag = 0;
+    synth[slot].until = (GetTickCount() + (DWORD)ms) | 1;
+    InterlockedExchange(&synth[slot].active, 1);
+}
+
+/* LAB (ep1-probe, the Ooze bite QTE): like padhold, but the left stick's x swings between +lx and -lx every period ms (the break-free waggle), in-process, so
+ * the console's latency (5-10 s per command on the N100) does not matter */
+void testmode_pad_wag(int slot, int lx, int period, int ms)
+{
+    if (slot < 0 || slot > 3 || period <= 0)
+        return;
+    memset(&synth[slot].pad, 0, sizeof synth[slot].pad);
+    synth[slot].pad.sThumbLX = (SHORT)(lx < 0 ? -lx : lx);
+    synth[slot].packet++;
+    synth[slot].wag = (DWORD)period;
     synth[slot].until = (GetTickCount() + (DWORD)ms) | 1;
     InterlockedExchange(&synth[slot].active, 1);
 }
@@ -464,7 +479,20 @@ static int real_pad_read(XINPUT_STATE *st, DWORD *real_user)
 static struct { DWORD ret; DWORD user; volatile LONG n; volatile LONG ok; } xsite[48];
 static volatile LONG n_xsite;
 static volatile LONG xuser_calls[8];
-static struct { volatile WORD buttons; volatile SHORT ly; volatile DWORD packet; volatile LONG nonzero; } xlast[4];
+static struct { volatile WORD buttons; volatile SHORT ly; volatile DWORD packet; volatile LONG nonzero; volatile SHORT lx; volatile LONG calls, ok; } xlast[4];
+
+/* what the game's own XInputGetState polls of user k got (net pad status): calls, successful answers, the last state, polls with input */
+void testmode_xinput_user(int user, unsigned *calls, unsigned *ok, unsigned *buttons, int *lx, int *ly, unsigned *packet, unsigned *nonzero)
+{
+    if (user < 0 || user > 3) return;
+    if (calls) *calls = (unsigned)xlast[user].calls;
+    if (ok) *ok = (unsigned)xlast[user].ok;
+    if (buttons) *buttons = xlast[user].buttons;
+    if (lx) *lx = xlast[user].lx;
+    if (ly) *ly = xlast[user].ly;
+    if (packet) *packet = (unsigned)xlast[user].packet;
+    if (nonzero) *nonzero = (unsigned)xlast[user].nonzero;
+}
 
 static void xinput_note(DWORD user, DWORD ret, int ok)
 {
@@ -620,12 +648,18 @@ static DWORD route_state(DWORD i, XINPUT_STATE *st, int count)
         if (synth[i].until && (LONG)(GetTickCount() - synth[i].until) >= 0) {
             memset(&synth[i].pad, 0, sizeof synth[i].pad);
             synth[i].until = 0;
+            synth[i].wag = 0;
             synth[i].packet++;
             InterlockedExchange(&synth[i].active, synth[i].base_active);
         }
         if (synth[i].active) {
             st->dwPacketNumber = synth[i].packet;
             st->Gamepad = synth[i].pad;
+            if (synth[i].wag) {   /* LAB padwag: the stick swings left / right */
+                DWORD ph = GetTickCount() / synth[i].wag;
+                st->Gamepad.sThumbLX = (SHORT)((ph & 1) ? -synth[i].pad.sThumbLX : synth[i].pad.sThumbLX);
+                st->dwPacketNumber = synth[i].packet + ph;
+            }
             InterlockedIncrement(&xinput_ok);
             return ERROR_SUCCESS;
         }
@@ -670,6 +704,19 @@ static DWORD route_state(DWORD i, XINPUT_STATE *st, int count)
 
 static DWORD xinput_inner(DWORD i, XINPUT_STATE *st) { return route_state(i, st, 1); }
 
+/* buttons hidden from the game per user (testmode_pad_mask): the revive of the downed rule owns A while the own human stands next to a downed partner */
+static volatile LONG pad_mask[4], pad_mask_hidden[4];
+void testmode_pad_mask(int user, unsigned buttons)
+{
+    if (user >= 0 && user < 4) InterlockedExchange(&pad_mask[user], (LONG)(buttons & 0xFFFFu));
+}
+unsigned testmode_pad_masked(int user, unsigned *hidden)
+{
+    if (user < 0 || user > 3) return 0;
+    if (hidden) *hidden = (unsigned)pad_mask_hidden[user];
+    return (unsigned)pad_mask[user];
+}
+
 static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
 {
     DWORD ret_addr = (DWORD)__builtin_return_address(0);
@@ -682,9 +729,18 @@ static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
             r1_input_merge((r1_input_t *)&st->Gamepad, (const r1_input_t *)&o.Gamepad);
     }
     xinput_note(i, ret_addr, fr == ERROR_SUCCESS);
+    if (i < 4) {
+        InterlockedIncrement(&xlast[i].calls);
+        if (fr == ERROR_SUCCESS) InterlockedIncrement(&xlast[i].ok);
+    }
+    if (i < 4 && st && fr == ERROR_SUCCESS && pad_mask[i] && (st->Gamepad.wButtons & pad_mask[i])) {   /* a button another module owns right now (downed1: the revive's A): the game does not see it */
+        st->Gamepad.wButtons &= (WORD)~pad_mask[i];
+        InterlockedIncrement(&pad_mask_hidden[i]);
+    }
     if (i < 4 && st && fr == ERROR_SUCCESS) {   /* what the game really gets (console `pads`): last state per user and how often a button was down */
         xlast[i].buttons = st->Gamepad.wButtons;
         xlast[i].ly = st->Gamepad.sThumbLY;
+        xlast[i].lx = st->Gamepad.sThumbLX;
         xlast[i].packet = st->dwPacketNumber;
         if (st->Gamepad.wButtons || st->Gamepad.sThumbLX || st->Gamepad.sThumbLY)
             InterlockedIncrement(&xlast[i].nonzero);
@@ -1044,6 +1100,17 @@ void testmode_install(void)
         real_GetForegroundWindow = (GetForegroundWindow_t)r1_patch_iat("USER32.dll", "GetForegroundWindow", (void *)hook_GetForegroundWindow);
     r1_log("test mode: pos=%d,%d (%s) size=%dx%d (%s) background=%d adapter=%s", win_x, win_y, have_pos ? "on" : "off", win_w, win_h,
            have_size ? "on" : "off", background, adapter_mode[0] ? adapter_mode : "game's");
+}
+
+/* round 2 (keep0): is a REAL gamepad connected on user `user`, whatever synthetic pad sits there? Under the same rule as the peek (R1-5: a real pad counts only
+ * while the window is in front, or with REV1_PADS), so a background lab run never reacts to the owner's pad. 1 = connected. */
+int testmode_pad_real_present(int user)
+{
+    if (user < 0 || user > 3 || !real_XInputGetState || !r1_pad_peek_allowed(0, pads_allowed, really_in_front()))
+        return 0;
+    XINPUT_STATE st;
+    memset(&st, 0, sizeof st);
+    return poll_real((DWORD)user, &st) == ERROR_SUCCESS;
 }
 
 /* The state the game would get from XInputGetState(user): a synthetic pad (console pad/padhold) first, else the real one; 1 = connected.

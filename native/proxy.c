@@ -12,8 +12,9 @@
  *   REV1_LOG=<file>   the mod's log (default rev1_coop.log next to the exe, rotated at start: rev1_coop.1..4.log;
  *                     a set REV1_LOG is appended to and never rotated)
  *   REV1_ANYEXE=1     install the hooks on an exe that is not the supported build (lab only)
- * Chain rule: a file dinput8_real.dll next to this DLL (a foreign loader such as Ultimate ASI Loader that the
- * installer renamed) is loaded instead of the system dinput8.dll and gets the forwarded calls.
+ * Chain rule: a file dinput8_real.dll next to this DLL (a dinput8 wrapper the player renamed) is loaded instead of the system dinput8.dll
+ * and gets the forwarded calls; never an Ultimate ASI Loader (it closes the game under that name; the installer runs it as winmm.dll) and
+ * never a copy of this mod (chain_logic.h).
  */
 #include <windows.h>
 #include <stdarg.h>
@@ -22,6 +23,7 @@
 #include <string.h>
 
 #include "r1.h"
+#include "chain_logic.h"
 
 typedef HRESULT (WINAPI *DirectInput8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID *, LPUNKNOWN);
 static DirectInput8Create_t real_DirectInput8Create;
@@ -323,6 +325,24 @@ static void WINAPI hook_ExitProcess(UINT code)
     real_ExitProcess(code);
 }
 
+/* REV1_MULTI=1 (TEST copies only, never set for players): a second copy of the game on one PC. The game's own single-instance check
+ * (0x9BD370, called from WinMain) creates the named mutex "sSkeletonMain" and returns 0 (WinMain -> 1, ExitProcess(1)) when it already
+ * exists (ERROR_ALREADY_EXISTS), after restoring the first copy's window (FindWindowW L"BHRUE"). Only that one name is made unique per
+ * process; the save mutex and everything else stay shared. In the game's .text, not in the Steam DRM stub (notes/two-copies.md). */
+typedef HANDLE (WINAPI *CreateMutexA_t)(LPSECURITY_ATTRIBUTES, BOOL, LPCSTR);
+static CreateMutexA_t real_CreateMutexA;
+
+static HANDLE WINAPI hook_CreateMutexA(LPSECURITY_ATTRIBUTES sa, BOOL own, LPCSTR name)
+{
+    char u[64];
+    if (name && strcmp(name, "sSkeletonMain") == 0) {
+        snprintf(u, sizeof u, "sSkeletonMain-rev1-%lu", GetCurrentProcessId());
+        r1_log("multi: CreateMutexA(\"%s\") renamed to \"%s\" (REV1_MULTI=1)", name, u);
+        name = u;
+    }
+    return real_CreateMutexA(sa, own, name);
+}
+
 /* ---- log rotation (default log only): rev1_coop.log + .1 .. .4; a previous log under 4 KB is dropped ---- */
 #define LOG_KEEP 5
 static void log_rotate(const char *path)
@@ -352,6 +372,27 @@ static void log_rotate(const char *path)
     }
 }
 
+/* What a dinput8_real.dll beside us is (chain_logic.h), from its bytes: read with plain file calls (we are inside DllMain under the loader lock), nothing of it runs. */
+static int judge_chain_file(const char *path)
+{
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return CHAIN_LOAD;   /* (LoadLibrary says why) */
+    LARGE_INTEGER size;
+    int verdict = CHAIN_LOAD;
+    if (GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart < (64 << 20)) {
+        DWORD n = (DWORD)size.QuadPart, got = 0;
+        unsigned char *buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, n);
+        if (buf) {
+            if (ReadFile(f, buf, n, &got, NULL) && got == n)
+                verdict = chain_judge(buf, n, "RE Revelations co-op proxy");
+            HeapFree(GetProcessHeap(), 0, buf);
+        }
+    }
+    CloseHandle(f);
+    return verdict;
+}
+
 /* The DLL that gets the forwarded call: dinput8_real.dll beside us (chain rule), else the system one. */
 static void load_real_dinput8(HINSTANCE self)
 {
@@ -362,8 +403,16 @@ static void load_real_dinput8(HINSTANCE self)
     if (n && slash && slash - path + 18 < MAX_PATH) {
         strcpy(slash + 1, "dinput8_real.dll");
         if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
-            h = LoadLibraryA(path);
-            r1_log("chain: dinput8_real.dll %s", h ? "loaded" : "FAILED to load");
+            int verdict = judge_chain_file(path);
+            if (verdict == CHAIN_SKIP_UAL)
+                r1_log("chain: dinput8_real.dll is an Ultimate ASI Loader: not loaded (under that name it shows \"This library isn't supported.\" "
+                       "and closes the game); the co-op installer runs such a loader as winmm.dll. Forwarding to the system dinput8.dll");
+            else if (verdict == CHAIN_SKIP_COOP)
+                r1_log("chain: dinput8_real.dll is a copy of this mod: not loaded (it would forward to itself). Forwarding to the system dinput8.dll");
+            else {
+                h = LoadLibraryA(path);
+                r1_log("chain: dinput8_real.dll %s", h ? "loaded" : "FAILED to load");
+            }
         }
     }
     if (!h) {
@@ -400,6 +449,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         AddVectoredExceptionHandler(1, log_access_violation);
         real_ExitProcess = (ExitProcess_t)r1_patch_iat("KERNEL32.dll", "ExitProcess", (void *)hook_ExitProcess);
         char v[8];
+        if (r1_env("REV1_MULTI", v, sizeof v) && v[0] == '1') {
+            real_CreateMutexA = (CreateMutexA_t)r1_patch_iat("KERNEL32.dll", "CreateMutexA", (void *)hook_CreateMutexA);
+            r1_log("multi: REV1_MULTI=1, CreateMutexA hook %s", real_CreateMutexA ? "installed" : "NOT installed (import not found)");
+        }
         if (hash_exe(exe_sha))
             exe_ok = strcmp(exe_sha, R1_EXE_SHA256) == 0;
         if (!exe_ok && r1_env("REV1_ANYEXE", v, sizeof v) && v[0] == '1') {

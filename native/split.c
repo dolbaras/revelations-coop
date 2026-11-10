@@ -24,6 +24,8 @@
 #include "r1.h"
 #include "capture.h"
 #include "split.h"
+#include "solo1.h"
+#include "mapptn1.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -254,17 +256,110 @@ static void FC wrap_cp9(unsigned self)
     orig_cp9(self);
     own_scope_end();
 }
+/* (minimap1, 2026-11-08) uMapIcon_vf9 (0x7B95E0) and the HUD-hidden test FUN_0079BB80 reach "the minimap" through [sIDCockpit+0x2C] (FUN_00849780), the STOCK
+ * manager: without this the second view's icons were computed from the first human's uGUI_Map (his map position, his partner). During the second manager's
+ * update phases the cell points at the second manager and is put back right after (only if it still points at it: mapptn1.h mp1_swap_*). */
+static unsigned n_mm_swaps;
+static int mm_swap_on = 1;   /* LAB `split mmswap 0|1`: 0 = the old behaviour (the second view's icons from the stock minimap), for a before / after picture */
+static uint32_t mm_cell_begin(unsigned self)
+{
+    if (!mm_swap_on)
+        return 0;
+    unsigned ck = rd32(AD.cockpit_ptr);
+    uint32_t back = ck ? mp1_swap_begin(rd32(ck + 0x2C), hud.stock_mm, self == hud.mm ? self : 0) : 0;
+    if (back)
+        wr32(ck + 0x2C, self), n_mm_swaps++;
+    return back;
+}
+static void mm_cell_end(unsigned self, uint32_t back)
+{
+    unsigned ck = rd32(AD.cockpit_ptr);
+    if (ck && mp1_swap_restore_ok(back, rd32(ck + 0x2C), self))
+        wr32(ck + 0x2C, back);
+}
 static void FC wrap_mm8(unsigned self)
 {
     own_scope_begin();
+    uint32_t back = mm_cell_begin(self);
     orig_mm8(self);
+    mm_cell_end(self, back);
     own_scope_end();
 }
 static void FC wrap_mm9(unsigned self)
 {
     own_scope_begin();
+    uint32_t back = mm_cell_begin(self);
     orig_mm9(self);
+    mm_cell_end(self, back);
     own_scope_end();
+}
+
+/* (minimap1, 2026-11-09) the minimap in a half (mapptn1.h, mp1_screen_site): the 8 screen-size reads of uGUI_Map / uMapIcon take the cell mm_screen_cell
+ * (written into their instructions in place of the address 0x11E1B9C, once, when a split first draws): the real screen object, or while the split draws
+ * the mod's object whose width / height are the half's. LAB `split mmscreen 0|1` (0 = the old behaviour: the whole screen's size, for a before picture). */
+static uint32_t mm_screen_cell, mm_screen_obj[0x100 / 4];
+static int mm_screen_patched, mm_screen_on = 1, mm_screen_half_last = -1;
+static unsigned n_mm_screen_half, mm_screen_prev_count;
+static int code_write32(unsigned a, uint32_t v)
+{
+    DWORD old;
+    if (!VirtualProtect((void *)(size_t)a, 4, PAGE_EXECUTE_READWRITE, &old))
+        return 0;
+    *(volatile uint32_t *)(size_t)a = v;
+    VirtualProtect((void *)(size_t)a, 4, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void *)(size_t)a, 4);
+    return 1;
+}
+static void mm_screen(int half, int vertical)
+{
+    unsigned real = rd32(MP1_SCREEN_PTR);
+    if (!real)
+        return;
+    if (!mm_screen_patched) {
+        if (!half)
+            return;   /* (written only once a split draws: a single-player game keeps the stock bytes) */
+        uint8_t b[8];
+        int off[MP1_N_SCREEN_SITES];
+        for (int i = 0; i < MP1_N_SCREEN_SITES; i++) {
+            if (!r1_safe_read((void *)(size_t)mp1_screen_site[i], b, 6) || (off[i] = mp1_screen_imm_off(b)) < 0 ||
+                rd32(mp1_screen_site[i] + (unsigned)off[i]) != MP1_SCREEN_PTR) {
+                r1_log("split: minimap screen size: site %08x is not the expected mov reg,[0x11E1B9C]: not written (the split minimaps keep the whole screen's size)",
+                       mp1_screen_site[i]);
+                mm_screen_patched = -1;
+                return;
+            }
+        }
+        mm_screen_cell = real;
+        int ok = 0;
+        for (int i = 0; i < MP1_N_SCREEN_SITES; i++)
+            ok += code_write32(mp1_screen_site[i] + (unsigned)off[i], (uint32_t)(size_t)&mm_screen_cell);
+        mm_screen_patched = ok == MP1_N_SCREEN_SITES ? 1 : -1;
+        r1_log("split: minimap screen size: %d of %d reads of 0x11E1B9C now read the cell %p (the half's size while the split draws)", ok, MP1_N_SCREEN_SITES,
+               (void *)&mm_screen_cell);
+    }
+    if (mm_screen_patched != 1)
+        return;
+    if (!half) {   /* (every pass starts with the real object; the split's gameplay path then switches to the half's) */
+        mm_screen_cell = real;
+        if (mm_screen_half_last == 1 && n_mm_screen_half == mm_screen_prev_count) {
+            r1_log("split: minimap screen size: the whole screen's again");
+            mm_screen_half_last = 0;
+        }
+        mm_screen_prev_count = n_mm_screen_half;
+        return;
+    }
+    int on = mm_screen_on;
+    if (on) {
+        int w = (int)rd32(real + MP1_SCREEN_W), h = (int)rd32(real + MP1_SCREEN_H), hw, hh;
+        mp1_half_size(vertical, w, h, &hw, &hh);
+        mm_screen_obj[MP1_SCREEN_W / 4] = (uint32_t)hw;
+        mm_screen_obj[MP1_SCREEN_H / 4] = (uint32_t)hh;
+        mm_screen_cell = (uint32_t)(size_t)mm_screen_obj;
+        n_mm_screen_half++;
+        if (mm_screen_half_last != 1)
+            r1_log("split: minimap screen size: the half's %d x %d (screen %d x %d)", hw, hh, w, h);
+        mm_screen_half_last = 1;
+    }
 }
 
 static unsigned *vt_copy(unsigned obj, void *w8, void *w9, void (FC **o8)(unsigned), void (FC **o9)(unsigned), unsigned **store)
@@ -558,6 +653,7 @@ void split_frame(void)
     n_pass++;
     if (!inited)
         return;
+    mm_screen(0, 0);
     if (raid_active()) {
         if (active || have_saved || hud.cp || mx.on)
             teardown("Raid detected");
@@ -584,7 +680,10 @@ void split_frame(void)
     int cutscene = rd32(v0 + 4) != mgr0;
     /* solo part of the story (or the partner is gone): the second human has no character, his view would freeze on the last pose: whole view for the first human meanwhile */
     unsigned other_unit = unit_by_slot((unsigned)(1 - capture_own_effective()));
-    int solo = !other_unit;
+    static s1_unit other_s1;   /* ep1-solo: FsmSetEnablePartner(0) keeps the unit in the list and clears its update + draw bits (+0xC 0x400 | 0x800) */
+    if (s1_unit_step(&other_s1, other_unit, other_unit ? rd32(other_unit + 0xC) : 0, -1, GetTickCount()))
+        r1_log("split: the other human (unit %08x) is %s", other_unit, other_s1.off ? "switched off by the story (solo part)" : "back in play");
+    int solo = !other_unit || other_s1.off;
     if (!active) {
         r1_log("split: starting (%s, manager 0 %08x manager 1 %08x)", vertical ? "side by side" : "top/bottom", mgr0, mgr1);
         capture_state_t cs;
@@ -657,6 +756,7 @@ void split_frame(void)
         wrf(mgr0 + 0x3C, fov_req);
         wrf(mgr1 + 0x3C, fov_req);
     }
+    mm_screen(1, vertical);
     if (hud_req)
         hud_frame(mgr0, mgr1);
     else if (hud.cp || hud.mm)
@@ -693,6 +793,7 @@ void split_emergency_off(void)
 void split_set_layout(int layout) { layout_req = layout == SPLIT_TOP_BOTTOM ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE; }
 void split_set_hud(int on) { hud_req = on != 0; }
 int split_is_active(void) { return active && !suspended; }
+unsigned split_second_minimap(void) { return hud.mm; }   /* the second HUD set's uMiniMapManager (0 = none): mapptn1_game.c logs what it shows */
 
 void split_get_state(split_state_t *st)
 {
@@ -706,9 +807,9 @@ void split_status_text(char *out, int size)
 {
     split_state_t s;
     split_get_state(&s);
-    snprintf(out, (size_t)size, "split %s%s%s: layout %s, second HUD %s (cockpit %08x minimap %08x, %u builds, %u blocks zero-filled), menu exchange %s (%u so far); passes %u, re-asserted %u, whole-view episodes %u; vp2 camera %08x",
+    snprintf(out, (size_t)size, "split %s%s%s: layout %s, second HUD %s (cockpit %08x minimap %08x, %u builds, %u blocks zero-filled, minimap cell swaps %u), menu exchange %s (%u so far); passes %u, re-asserted %u, whole-view episodes %u; vp2 camera %08x",
              want_on ? "ON" : "off", blocked == SPLIT_BLOCK_RAID ? " (blocked: Raid)" : "", suspended ? (suspended == SPLIT_SUSP_GUI ? " (whole view: menu)" : suspended == SPLIT_SUSP_SOLO ? " (whole view: no second character)" : " (whole view: cutscene)") : "",
-             layout_req == SPLIT_SIDE_BY_SIDE ? "side by side" : "top/bottom", hud_req ? (hud.cp ? "up" : "waiting") : "off", hud.cp, hud.mm, n_builds, n_zeroed, mx.on ? "OPEN" : "idle", n_mx, n_pass, n_reasserted,
+             layout_req == SPLIT_SIDE_BY_SIDE ? "side by side" : "top/bottom", hud_req ? (hud.cp ? "up" : "waiting") : "off", hud.cp, hud.mm, n_builds, n_zeroed, n_mm_swaps, mx.on ? "OPEN" : "idle", n_mx, n_pass, n_reasserted,
              n_susp, last_cam2);
 }
 
@@ -793,6 +894,16 @@ void split_cmd(const char *arg, char *out, int size)
         split_status_text(out, size);
     } else if (!strcmp(sub, "probe")) {
         probe(out, size);
+    } else if (!strcmp(sub, "mmscreen")) {   /* LAB: split mmscreen 0|1 (minimap1): the split minimaps computed with the half's size (1, default) or the whole screen's (0, old) */
+        if (a1[0])
+            mm_screen_on = atoi(a1) != 0;
+        snprintf(out, (size_t)size, "minimap screen size: %s (reads %s, %u passes with the half's size, now %s)", mm_screen_on ? "the half's" : "the whole screen's (old behaviour)",
+                 mm_screen_patched == 1 ? "redirected" : mm_screen_patched < 0 ? "REFUSED" : "not written yet", n_mm_screen_half,
+                 mm_screen_cell == (uint32_t)(size_t)mm_screen_obj ? "half" : "whole");
+    } else if (!strcmp(sub, "mmswap")) {   /* LAB: split mmswap 0|1 (minimap1): the second minimap's icons from its own uGUI_Map (1, default) or from the stock one (0, the old behaviour) */
+        if (a1[0])
+            mm_swap_on = atoi(a1) != 0;
+        snprintf(out, (size_t)size, "second minimap cell swap %s (%u swaps so far)", mm_swap_on ? "ON" : "OFF (old behaviour)", n_mm_swaps);
     } else if (!strcmp(sub, "fov")) {   /* split fov <degrees | 0>: experiment, see fov_req */
         fov_req = (float)atof(a1);
         snprintf(out, (size_t)size, fov_req > 1.0f ? "vertical FOV %.1f written into both camera managers every pass (stock: manager 0 %.1f, manager 1 %.1f)" : "FOV left to the engine (stock now: manager 0 %.1f, manager 1 %.1f)", fov_req > 1.0f ? fov_req : rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE4) + 0x3C));

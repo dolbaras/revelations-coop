@@ -1,7 +1,8 @@
 ﻿# Resident Evil Revelations Co-op launcher (shipped as <game>\coop\coop-launcher.ps1; the installer's desktop shortcut runs it). Before the game starts it asks
 # GitHub for the latest release of the mod; when that is newer than the installed one, it downloads the release's archive (checked against the SHA-256 GitHub gives
-# for it), runs that version's installer for this game folder (its window shows the steps and closes by itself) and then starts the game. Offline, on any error, or
-# when the check takes too long, the game simply starts as it is. The protocol every release keeps is in docs/releasing.md.
+# for it; a release that gives none is NOT installed), runs that version's installer for this game folder (its window shows the steps and closes by itself) and then
+# starts the game. Offline, on any error (rate limit, 404, cut download, wrong checksum), or when the check takes longer than 6 seconds, the game simply starts as it is.
+# The protocol every release keeps is in docs/releasing.md.
 # Usage: coop-launcher.ps1 [-NoUpdate] [-NoStart] [-Feed <url of a releases/latest JSON>] [-NoWindow]
 # -NoWindow (tests): no progress window, the installer runs with -Quiet.
 param([switch] $NoUpdate, [switch] $NoStart, [string] $Feed = "", [switch] $NoWindow)
@@ -54,14 +55,14 @@ function Show-Window($text) {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     $script:form = New-Object Windows.Forms.Form
     $form.Text = $script:TITLE; $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false; $form.MinimizeBox = $false
-    $form.StartPosition = "CenterScreen"; $form.ClientSize = New-Object Drawing.Size(460, 96)
+    $form.StartPosition = "CenterScreen"; $form.ClientSize = New-Object Drawing.Size(460, 120)
     $form.BackColor = [Drawing.Color]::FromArgb(24, 24, 28); $form.ForeColor = [Drawing.Color]::FromArgb(232, 232, 236)
     $form.Font = New-Object Drawing.Font("Segoe UI", 10)
     $script:lbl = New-Object Windows.Forms.Label
-    $lbl.Location = New-Object Drawing.Point(18, 16); $lbl.Size = New-Object Drawing.Size(424, 40); $lbl.Text = $text
+    $lbl.Location = New-Object Drawing.Point(18, 16); $lbl.Size = New-Object Drawing.Size(424, 62); $lbl.Text = $text
     $form.Controls.Add($lbl)
     $bar = New-Object Windows.Forms.Panel
-    $bar.Location = New-Object Drawing.Point(18, 64); $bar.Size = New-Object Drawing.Size(424, 10)
+    $bar.Location = New-Object Drawing.Point(18, 90); $bar.Size = New-Object Drawing.Size(424, 10)
     $bar.BackColor = [Drawing.Color]::FromArgb(34, 34, 40)
     $script:fill = New-Object Windows.Forms.Panel
     $fill.Size = New-Object Drawing.Size(0, 10); $fill.BackColor = [Drawing.Color]::FromArgb(196, 40, 48)
@@ -85,54 +86,101 @@ function Set-Progress($pct, $text) {
     [Windows.Forms.Application]::DoEvents()
 }
 
+# What a failed update check was, in one line for the log (and the message after a failed download): GitHub's rate limit (60 requests an hour without a login:
+# 403 or 429 with X-RateLimit-Remaining 0), no full release yet (404), another HTTP status, no network, or anything else. The game starts in every case.
+function Explain-Error($ex) {
+    $e = $ex
+    while ($e.InnerException -and -not ($e -is [Net.WebException])) { $e = $e.InnerException }
+    if ($e -is [Net.WebException] -and $e.Response) {
+        $code = [int]$e.Response.StatusCode
+        $left = $e.Response.Headers["X-RateLimit-Remaining"]; $reset = $e.Response.Headers["X-RateLimit-Reset"]
+        if (($code -eq 403 -or $code -eq 429) -and ($left -eq "0" -or $code -eq 429)) {
+            $when = ""
+            if ($reset -match '^\d+$') { $when = " (resets " + [DateTimeOffset]::FromUnixTimeSeconds([long]$reset).LocalDateTime.ToString("HH:mm") + ")" }
+            return "GitHub's rate limit is used up${when} [HTTP $code]: no update check this time"
+        }
+        if ($code -eq 404) { return "not found [HTTP 404] (no full release yet, or a missing file)" }
+        return "GitHub answered [HTTP $code]"
+    }
+    if ($e -is [Net.WebException]) { return "no network ($($e.Status)): " + $e.Message }
+    $ex.Message
+}
+
+# The feed (a small JSON): 6 seconds to answer, 10 seconds and 1 MB in all. (Async + Wait: the request's own Timeout does not cover an asynchronous call, and its
+# synchronous form leaves the name lookup out (Microsoft's documentation of HttpWebRequest.Timeout); measured 2026-11-06 under Windows PowerShell 5.1:
+# GetResponseAsync returns at once, a failed lookup or a dead address stays inside the task, and Wait(6000) ends it.)
+function Read-Feed($url, $cur) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $req = [Net.HttpWebRequest]::Create($url)
+    $req.UserAgent = "re1-coop-launcher/$cur"; $req.Accept = "application/vnd.github+json"; $req.Timeout = 6000; $req.ReadWriteTimeout = 6000
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $task = $req.GetResponseAsync()
+    try {
+        if (-not $task.Wait(6000)) { $req.Abort(); throw "the feed did not answer in 6 seconds" }
+    } catch [AggregateException] { throw $_.Exception.GetBaseException() }
+    $resp = $task.Result
+    try {
+        $in = $resp.GetResponseStream(); $ms = New-Object IO.MemoryStream; $buf = New-Object byte[] 8192
+        while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+            $ms.Write($buf, 0, $n)
+            if ($sw.ElapsedMilliseconds -gt 10000 -or $ms.Length -gt 1048576) { $req.Abort(); throw "the feed is too slow or too big" }
+        }
+        # (a reader that drops a byte-order mark: ConvertFrom-Json of Windows PowerShell refuses one, "Invalid JSON primitive")
+        $ms.Position = 0
+        return (New-Object IO.StreamReader($ms, [Text.Encoding]::UTF8, $true)).ReadToEnd()
+    } finally { $resp.Close() }
+}
+
 function Try-Update {
     $cur = Version-Of (Get-Content -LiteralPath (Join-Path $coop "version.txt") -TotalCount 1 -ErrorAction SilentlyContinue)
     if (-not $cur) { Log "no installed version"; return }
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $req = [Net.HttpWebRequest]::Create($feedUrl)
-    $req.UserAgent = "re1-coop-launcher/$cur"; $req.Accept = "application/vnd.github+json"; $req.Timeout = 6000; $req.ReadWriteTimeout = 6000
-    $resp = $req.GetResponse()
-    $json = (New-Object IO.StreamReader($resp.GetResponseStream())).ReadToEnd()
-    $resp.Close()
-    $rel = $json | ConvertFrom-Json
+    $rel = (Read-Feed $feedUrl $cur) | ConvertFrom-Json
     $new = Version-Of $rel.tag_name
     Log "installed $cur, latest $($rel.tag_name)"
     if (-not $new -or $new -le $cur) { return }
+    # (releases/latest never answers with these; a feed that does is wrong)
+    if ($rel.prerelease -or $rel.draft) { Log "refused: the release is a pre-release or a draft"; return }
     $asset = @($rel.assets | Where-Object { $_.name -like "revelations-coop-*.zip" })[0]
     if (-not $asset) { Log "no archive in the release"; return }
     # (only the mod's own release archive; another feed is for tests)
     if (-not $Feed -and -not $env:RE1_COOP_FEED -and "$($asset.browser_download_url)" -notlike "https://github.com/dolbaras/revelations-coop/releases/download/*") {
         Log "unexpected download url $($asset.browser_download_url)"; return
     }
-    Show-Window ((Lt "found") -f $new, $cur)
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("re1-coop-update-" + $new + "-" + $PID)
+    # GitHub gives each asset's SHA-256 ("digest": "sha256:<64 hex>"). Without it nothing proves the download is the published file: not installed (decided 2026-11-06).
+    $dm = [regex]::Match("$($asset.digest)", '^sha256:([0-9a-fA-F]{64})$')
+    if (-not $dm.Success) { Log "refused: the release gives no usable checksum ($($asset.digest))"; return }
+    $want = $dm.Groups[1].Value.ToUpper()
+    # (the update window also carries the one network-play line: the port and the firewall)
+    Show-Window (((Lt "found") -f $new, $cur) + "`n" + (Lt "net"))
+    $script:tmp = Join-Path ([IO.Path]::GetTempPath()) ("re1-coop-update-" + $new + "-" + $PID)
+    $tmp = $script:tmp
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $tmp | Out-Null
     $zip = Join-Path $tmp $asset.name
-    # The download, chunk by chunk (the bar shows it).
+    # The download, chunk by chunk (the bar shows it). github.com answers with a redirect to its asset host (TLS 1.2, followed by HttpWebRequest).
     $dreq = [Net.HttpWebRequest]::Create($asset.browser_download_url)
     $dreq.UserAgent = "re1-coop-launcher/$cur"; $dreq.Timeout = 30000; $dreq.ReadWriteTimeout = 30000
     $dresp = $dreq.GetResponse()
+    $from = "$($dresp.ResponseUri.Scheme)://$($dresp.ResponseUri.Host)"   # (after the redirect: the host that sent the file)
     $total = [double]$dresp.ContentLength
     $in = $dresp.GetResponseStream()
     $out = [IO.File]::Create($zip)
+    $got = 0.0
     try {
-        $buf = New-Object byte[] 65536; $got = 0.0
+        $buf = New-Object byte[] 65536
         while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
             $out.Write($buf, 0, $n); $got += $n
             if ($total -gt 0) { Set-Progress (100 * $got / $total) $null }
         }
     } finally { $out.Close(); $in.Close(); $dresp.Close() }
+    if ($total -gt 0 -and $got -ne $total) { throw "the download broke off ($got of $total bytes)" }
+    Log "downloaded $got bytes from $from"
     Set-Progress 100 (Lt "verify")
-    # GitHub gives each asset's SHA-256 ("digest": "sha256:...").
-    if ($asset.digest -and "$($asset.digest)" -like "sha256:*") {
-        $want = ("$($asset.digest)".Substring(7)).ToUpper()
-        # (.NET, not Get-FileHash: a script cmdlet that fails to load when this runs under PowerShell 7's module path)
-        $fs = [IO.File]::OpenRead($zip)
-        try { $have = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)) -replace "-", "" } finally { $fs.Close() }
-        if ($have -ne $want) { throw (Lt "bad") }
-        Log "checksum ok $have"
-    } else { Log "the release gives no checksum" }
+    # (.NET, not Get-FileHash: a script cmdlet that fails to load when this runs under PowerShell 7's module path)
+    $fs = [IO.File]::OpenRead($zip)
+    try { $have = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)) -replace "-", "" } finally { $fs.Close() }
+    if ($have -ne $want) { throw (Lt "bad") }
+    Log "checksum ok $have"
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, (Join-Path $tmp "x"))
     $inst = Join-Path $tmp "x\coop-installer.ps1"
@@ -156,8 +204,10 @@ if (Get-Process -Name rerev -ErrorAction SilentlyContinue |
         Where-Object { -not $_.Path -or $_.Path.StartsWith($game + "\", [StringComparison]::OrdinalIgnoreCase) }) { Log "the game runs already"; exit 0 }
 if (-not $NoUpdate) {
     try { Try-Update } catch {
-        $why = $_.Exception.Message
+        # (a rate limit or a missing release shows as the HTTP status; the downloaded part is removed)
+        $why = Explain-Error $_.Exception
         Log "update: $why"
+        if ($script:tmp) { Remove-Item -LiteralPath $script:tmp -Recurse -Force -ErrorAction SilentlyContinue }
         # (offline or GitHub slow: no message, the game just starts; a failed install is said)
         if ($form) {
             $form.Hide()

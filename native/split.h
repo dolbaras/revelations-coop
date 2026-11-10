@@ -61,6 +61,7 @@ void split_set_layout(int layout);     /* SPLIT_SIDE_BY_SIDE (default) or SPLIT_
 void split_set_hud(int on);            /* second HUD set on / off (default on); off = both views show the stock HUD of the first human */
 void split_get_state(split_state_t *st);
 int split_is_active(void);
+unsigned split_second_minimap(void);  /* the second HUD set's uMiniMapManager, 0 = none */
 
 /* console: "split <sub> ..." on the game thread */
 void split_cmd(const char *arg, char *out, int size);

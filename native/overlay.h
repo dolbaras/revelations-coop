@@ -12,12 +12,13 @@
 
 #include "lobby1.h"
 
-enum { OV_NONE = 0, OV_LOBBY = 1, OV_HINT = 2 };
+enum { OV_NONE = 0, OV_LOBBY = 1, OV_HINT = 2, OV_STRIP = 3 };
 
 typedef struct {
     int kind;            /* OV_* */
     l1_view v;           /* OV_LOBBY */
-    char hint[300];      /* OV_HINT: one line at the bottom edge */
+    char hint[400];      /* OV_HINT: one line at the bottom edge; OV_STRIP (lobby-must): the in-game strip at the top edge (two lines at most, in levels and at the title) */
+    int strip_kind;      /* OV_STRIP: L1S_INFO / L1S_WARN (the colour) */
     int lang;            /* 0..12, picks the font face */
     unsigned tick_ms;    /* animation clock */
     int cursor_on, cursor_x, cursor_y;   /* mouse pointer in virtual 1920x1080 coordinates (drawn while the mouse is in use: the game hides its own cursor on some screens) */

@@ -13,6 +13,9 @@
 #include "../native/overlay.h"
 #include "../native/r1.h"
 #include "../native/split.h"
+#include "../native/coop_net.h"
+#include "../native/lobby_link.h"
+#include "../native/net1.h"
 
 static int fails, checks;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
@@ -66,10 +69,56 @@ static int g_swap_base;
 void testmode_pad_swap_base(int on) { g_swap_base = on != 0; }
 int testmode_pad_swap_base_get(void) { return g_swap_base; }
 void *steam_context(void) { return NULL; }
+const char *steam_persona_name(void) { return NULL; }   /* lobby-must: no Steam in the harness (the name falls back to "Player 1" / "Player 2") */
+unsigned rolebarrier_ep_block_ms(void) { return 0; }
+int coopsave_rec_role1(void) { return 0; }   /* rev1 live 16: no co-op save in the harness */
+/* ep1-flow E5: the end of Episode 1 as rolebarrier1_game.c reports it (the test sets it) */
+static unsigned g_t_ep1, g_t_ep1_closed;
+static int g_t_ep1_local;
+unsigned rolebarrier_ep1_end(int *local, unsigned *closed)
+{
+    if (local) *local = g_t_ep1 ? g_t_ep1_local : 0;
+    if (closed) *closed = g_t_ep1 ? g_t_ep1_closed : 0;
+    return g_t_ep1;
+}
+/* ep1-solo E3: the watch of the solo part as world1_game.c reports it (the test sets it) */
+static unsigned g_t_watch_unit, g_t_watch_enters;
+static int g_t_watch_on;
+int solo1_watch_now(unsigned *watched, unsigned *enters)
+{
+    if (watched) *watched = g_t_watch_unit;
+    if (enters) *enters = g_t_watch_enters;
+    return g_t_watch_on;
+}
+static unsigned g_fake_unit;   /* lobby-must: the one "player unit" of the fake level (its class name answers uPl<...>) */
 int classes_object_name(unsigned obj, char *out, int size)
 {
+    if (g_fake_unit && obj == g_fake_unit) {
+        snprintf(out, (size_t)size, "uPl< Jill >");
+        return 1;
+    }
     (void)obj, (void)out, (void)size;
     return 0;
+}
+/* a fake level at the game's own address: [0x1169394] = sPlayer, +0x30 / +0x34 = the list, node +8 next, node +0x10 unit (menu.c level_present). 0 = not mapped here */
+void menu_test_set_splayer(unsigned cell);
+void menu_test_force_apply_on_close(void);   /* the next close_lobby applies the settings (as a changed setting does) */
+static unsigned g_splayer_cell;   /* stands for [0x1169394] */
+static int fake_level_map(void)
+{
+    menu_test_set_splayer((unsigned)(size_t)&g_splayer_cell);
+    return 1;
+}
+static void fake_level(int on)
+{
+    static unsigned sp[16], node[8], unit[4];
+    unsigned *slot = &g_splayer_cell;
+    if (!on) { *slot = 0; g_fake_unit = 0; return; }
+    memset(sp, 0, sizeof sp), memset(node, 0, sizeof node);
+    g_fake_unit = (unsigned)(size_t)unit;
+    node[0x10 / 4] = g_fake_unit, node[8 / 4] = 0;   /* one node, next = 0 (the end) */
+    sp[0x30 / 4] = (unsigned)(size_t)node, sp[0x34 / 4] = 0;
+    *slot = (unsigned)(size_t)sp;
 }
 
 static struct { int unbinds, own, binds, layout, enable; int bind_unit[8], bind_pad[8]; } rec;
@@ -129,6 +178,7 @@ static void status(char *out, int size) { menu_cmd("status", out, size); }
 
 /* ---------------------------------------------------------------- the native row: fake singleton with the Title message table, fake AddItem, fake decide handler */
 extern void menu_test_set_native(unsigned sgui_ptr_va, void *additem);
+extern void menu_test_set_smain(unsigned smain_ptr_va);
 extern unsigned menu_test_act(void *page, unsigned cancel, unsigned mouse, void *orig);
 static unsigned g_sgui_ptr;
 static unsigned g_add_calls, g_add_args[9];
@@ -230,7 +280,7 @@ int main(void)
     CHECK(g_orig_calls == before && g_mgr_orig_calls == mbefore);   /* frozen while the lobby is open: page update AND page manager (cursor / back keys) */
     menu_present(NULL);
     CHECK(g_drawn.kind == OV_LOBBY && !strcmp(g_drawn.v.title, "Co-Op Play"));
-    CHECK(g_drawn.v.nrows == 7 && g_drawn.v.sel == 0);
+    CHECK(g_drawn.v.nrows == 2 && g_drawn.v.sel == 0);   /* the product screen (lobby-must): Co-Op < Off > and Done; Right gives the split rows */
     CHECK(rec.enable == 0 && rec.binds == 0);   /* nothing applied yet */
 
     /* keys: Right arms the co-op (left alone for the keyboard), Down + Right = player 1 plays the partner, Esc closes */
@@ -340,7 +390,7 @@ int main(void)
         frames(2);
         CHECK(g_add_calls == 1);                                 /* once per page object, before the stock update of that frame */
         CHECK(g_add_args[0] == 11 && g_add_args[1] == 6 && g_add_args[2] == 15 && g_add_args[3] == 6 && g_add_args[4] == 0 && g_add_args[5] == 1 && g_add_args[6] == 0 && g_add_args[7] == 0);
-        CHECK(!strcmp((const char *)(size_t)tab[11], "Co-Op Play") && !strcmp((const char *)(size_t)tab[15], "Two players, one PC (split screen)."));
+        CHECK(!strcmp((const char *)(size_t)tab[11], "Co-Op Play") && !strcmp((const char *)(size_t)tab[15], "Two players: split screen on one PC, or over the network."));
         CHECK(tab[10] == (unsigned)(size_t)invalid && tab[12] == (unsigned)(size_t)invalid);   /* nothing else of the table touched */
         unsigned cnt;
         memcpy(&cnt, main_page + 0x410, 4);
@@ -362,6 +412,32 @@ int main(void)
             unsigned c4;
             memcpy(&c4, main_page + 0x410, 4);
             CHECK(c4 == 4);
+        }
+        {   /* lang (owner 2026-11-08): without REV1_LANG the texts follow the game's own sMain.mLanguage (the Russian row in capitals like the game's rows of that language);
+               the languages the game has no texts of (Korean, Finnish ... "oth") read English there, so does the mod */
+            static unsigned char smain[0x2600];
+            static unsigned smain_ptr;
+            static const struct { unsigned m; const char *label; const char *help; } lc[] = {
+                {10, "СОВМЕСТНАЯ ИГРА", "Два игрока: разделённый экран на одном ПК или по сети."}, {8, "协力游玩", NULL}, {7, "協力遊玩", NULL}, {21, "JOGO COOPERATIVO", NULL},
+                {9, "JOGO COOPERATIVO", NULL}, {11, "GRA KOOPERACYJNA", NULL}, {12, "CO-OP SPELEN", NULL}, {0, "協力プレイ", NULL}, {4, "Koop-Spiel", NULL},
+                {6, "Co-Op Play", NULL}, {20, "Co-Op Play", NULL}, {1, "Co-Op Play", "Two players: split screen on one PC, or over the network."}};
+            unsigned three = 3, before = g_add_calls;
+            SetEnvironmentVariableA("REV1_LANG", NULL);
+            smain_ptr = (unsigned)(size_t)smain;
+            for (unsigned i = 0; i < sizeof lc / sizeof lc[0]; i++) {
+                memcpy(smain + 0x254C, &lc[i].m, 4);
+                menu_test_set_smain((unsigned)(size_t)&smain_ptr);
+                memcpy(main_page + 0x410, &three, 4);   /* the page is rebuilt: the row (and its texts) again */
+                frames(2);
+                CHECK(g_add_calls == before + i + 1);
+                CHECK(!strcmp((const char *)(size_t)tab[11], lc[i].label));
+                CHECK(!lc[i].help || !strcmp((const char *)(size_t)tab[15], lc[i].help));
+            }
+            SetEnvironmentVariableA("REV1_LANG", "eng");   /* back to the harness default */
+            menu_test_set_smain(0);
+            memcpy(main_page + 0x410, &three, 4);
+            frames(2);
+            CHECK(!strcmp((const char *)(size_t)tab[11], "Co-Op Play"));
         }
         /* decide handler: the new row opens the lobby, other rows / cancel go to the stock code */
         unsigned st4 = 4, cur;
@@ -389,8 +465,410 @@ int main(void)
         menu_cmd("ev back", st, sizeof st);
         status(st, sizeof st);
         CHECK(strstr(st, "lobby closed"));
+
+        /* ---- ready1 (2026-11-09): the ready gate. While a network link runs and the session has not started, the main page's Campaign row (the story start:
+         * Continue / New Game / Load Game) is held on both PCs and the strip says what is missing; the other rows and Back stay stock; un-ready and a partner who
+         * leaves keep the gate; after the START the host's Campaign is the stock one. The glue before ready1 passed the decide through: a host started the story
+         * alone with the partner in the room, and the partner's ready later started the session in the middle of the host's level. */
+        {
+            cn_sim_real_time();
+            net1_cfg gcfg;
+            memset(&gcfg, 0, sizeof gcfg);
+            gcfg.transport = "sim", gcfg.threaded = 0, gcfg.name = "Hosty";
+            net1_configure(&gcfg);
+            lk_config jc;
+            memset(&jc, 0, sizeof jc);
+            jc.name = "Joiny", jc.mod_version = R1_VERSION;
+            lk_t *jk = lk_new_cfg(NULL, "sim", 0, &jc);
+            char own2[48], err2[160];
+            cur = 0; memcpy(main_page + 0x408, &cur, 4);   /* the cursor on Campaign (row 0, Title message 8) */
+            int a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);   /* no link: the stock Campaign */
+            CHECK(net1_start(L1N_HOST, "", 28440, err2, sizeof err2) == 1);
+            for (int i = 0; i < 20; i++) net1_frame(), frames(1), Sleep(2);
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);   /* hosting, nobody joined yet: held */
+            frames(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Waiting for the other player to join...  F6 / Back button: Co-Op Play") && g_drawn.strip_kind == L1S_WARN);
+            if (g_drawn.kind != OV_STRIP) printf("  (gate, host alone: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
+            CHECK(menu_test_act(main_page, 1, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);   /* Back: stock */
+            cur = 1; memcpy(main_page + 0x408, &cur, 4);
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 2);   /* another row (Raid Mode): stock */
+            CHECK(menu_test_act(other, 0, 0, fake_act_orig) == 7);   /* another page: stock */
+            cur = 0; memcpy(main_page + 0x408, &cur, 4);
+            CHECK(lk_start(jk, L1N_JOIN, "sim:28440", 0, own2, sizeof own2, err2, sizeof err2) == 1);
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
+            CHECK(lk_state(net1_link_peek()) == L1NS_CONNECTED && !net1_session_active());
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);   /* the partner is in the room, nobody ready: held */
+            frames(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            lk_set_ready(jk, 1);   /* the partner marks ready: the strip follows while it shows */
+            for (int i = 0; i < 60; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Joiny is ready.  Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            if (!strstr(g_drawn.hint, "Joiny is ready")) printf("  (gate, partner ready: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
+            lk_set_ready(jk, 0);   /* ... and un-ready */
+            for (int i = 0; i < 60; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            net1_cmd("ready 1", st, sizeof st);   /* the host is ready, the partner not: still held */
+            for (int i = 0; i < 60; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
+            CHECK(!net1_session_active());
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);
+            frames(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "You are ready. Waiting for the other player..."));
+            lk_set_ready(jk, 1);   /* both ready: the host's link starts the session; the Campaign row is the stock one again (the host starts the story) */
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
+            CHECK(net1_session_active());
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);
+            frames(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Start Episode 1") != NULL);   /* the gate's line is gone: the host's "what now" */
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "strip 0 ") != NULL);   /* the gate's event strip is cleared (the running HOST_GO line is drawn above) */
+            if (!strstr(st, "strip 0 ")) printf("  (gate, after START: %s)\n", st);
+            /* rev1 live 16: the host's title Continue put the co-op save's roles back (lk_force_roles after the START, before the first level): both links follow,
+             * the line names this PC's character (the glue before it: no role change after the START, no line) */
+            lk_info hi, ji;
+            lk_get_info(net1_link_peek(), &hi);
+            int was = hi.role, want = 1 - hi.role;   /* (this harness's room left the host as the partner) */
+            CHECK(hi.started && (was == 0 || was == 1));
+            CHECK(lk_force_roles(net1_link_peek(), want) == 1);
+            for (int i = 0; i < 40; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
+            lk_get_info(jk, &ji);
+            lk_get_info(net1_link_peek(), &hi);
+            CHECK(hi.role == want && ji.role == was);   /* both links follow */
+            menu_present(NULL);
+            char wl[120];
+            snprintf(wl, sizeof wl, "Continue keeps the characters of the co-op save. Your character: %s.", want ? "Parker" : "Jill");
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, wl));
+            if (!strstr(g_drawn.hint, "co-op save")) printf("  (role lock strip: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
+            CHECK(lk_force_roles(jk, was) == -1 && lk_force_roles(net1_link_peek(), want) == 0);   /* the guest never; already so */
+            lk_stop(jk);
+            net1_stop();
+            lk_free(jk);
+            for (int i = 0; i < 20; i++) net1_frame(), frames(1), Sleep(2);
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);   /* no link any more: stock */
+            /* the guest: connected and not ready -> held too; a partner (host) who leaves ends the gate with the link */
+            gcfg.name = "Guesty";
+            net1_configure(&gcfg);
+            lk_config hc2;
+            memset(&hc2, 0, sizeof hc2);
+            hc2.name = "Hosty", hc2.mod_version = R1_VERSION;
+            lk_t *hk2 = lk_new_cfg(NULL, "sim", 0, &hc2);
+            CHECK(lk_start(hk2, L1N_HOST, "", 28441, own2, sizeof own2, err2, sizeof err2) == 1);
+            CHECK(net1_start(L1N_JOIN, "sim:28441", 0, err2, sizeof err2) == 1);
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk2), frames(1), Sleep(2);
+            CHECK(lk_state(net1_link_peek()) == L1NS_CONNECTED);
+            lk_set_ready(hk2, 1);
+            for (int i = 0; i < 60; i++) net1_frame(), lk_poll(hk2), frames(1), Sleep(2);
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);
+            frames(2);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Hosty is ready.  Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            if (!strstr(g_drawn.hint, "Hosty is ready")) printf("  (gate, guest: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
+            lk_stop(hk2);   /* the host closes the room: the link ends (ERROR), the gate with it */
+            for (int i = 0; i < 100; i++) net1_frame(), frames(1), Sleep(2);
+            a0 = g_act_orig_calls;
+            CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);
+            net1_stop();
+            lk_free(hk2);
+            for (int i = 0; i < 20; i++) net1_frame(), frames(1), Sleep(2);
+            menu_cmd("status", st, sizeof st);
+        }
+
+        /* ---- lobby-must: the guest after START (sim transport, the partner host in this process): the title menu takes no decide, the strip says what happens,
+         * the host's end of the session is shown with its reason */
+        cn_sim_real_time();
+        net1_cfg nc;
+        memset(&nc, 0, sizeof nc);
+        nc.transport = "sim", nc.threaded = 0, nc.name = "Guesty";
+        net1_configure(&nc);
+        lk_config hc;
+        memset(&hc, 0, sizeof hc);
+        hc.name = "Hosty", hc.mod_version = R1_VERSION;   /* the glue sends this mod's version (net1_set_identity in menu_install): the same on both */
+        lk_t *hk = lk_new_cfg(NULL, "sim", 0, &hc);
+        char own[48], err[160];
+        CHECK(lk_start(hk, L1N_HOST, "", 28420, own, sizeof own, err, sizeof err) == 1);
+        {   /* ep1-flow E12: this harness host is a bare link (no net1): its session flags byte is set by hand, as the game's net1 does (Downed / revive 120 s = 5) */
+            lk_settings hs;
+            memset(&hs, 0, sizeof hs);
+            hs.episode = 1, hs.difficulty = 1, hs.flags = 5;
+            CHECK(lk_set_settings(hk, &hs) == 1);
+        }
+        CHECK(net1_start(L1N_JOIN, "sim:28420", 0, err, sizeof err) == 1);
+        for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+        CHECK(lk_state(net1_link_peek()) == L1NS_CONNECTED);
+        net1_cmd("ready 1", st, sizeof st);
+        lk_set_ready(hk, 1);
+        for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+        CHECK(net1_session_active());
+        menu_cmd("net", st, sizeof st);
+        CHECK(strstr(st, "hold 1") && strstr(st, "played 0"));
+        menu_present(NULL);
+        CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Waiting for Hosty to start the story"));
+        cur = 1; memcpy(main_page + 0x408, &cur, 4);
+        int before_act = g_act_orig_calls;
+        CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == before_act);   /* the guest's own Continue / New Game: swallowed */
+        CHECK(menu_test_act(main_page, 1, 0, fake_act_orig) == 7 && g_act_orig_calls == before_act + 1);   /* Back still works */
+        cur = 3; memcpy(main_page + 0x408, &cur, 4);
+        CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1);   /* the native row still opens the lobby (to disconnect) */
+        frames(4);
+        status(st, sizeof st);
+        CHECK(strstr(st, "lobby OPEN"));
+        menu_cmd("view", st, sizeof st);
+        CHECK(strstr(st, "Network: join") && strstr(st, "You play | Parker (partner)"));
+        CHECK(strstr(st, "Downed / revive | 120 s") != NULL);   /* ep1-flow E12: the guest's row shows the host's choice from the session record */
+        if (!strstr(st, "Downed / revive | 120 s")) printf("  (view: %s)\n", st);
+        /* wp12 (2026-11-08 02:52:53, the guest): closing the lobby after the START ran menu_apply's "co-op OFF" path, whose capture_unbind(-1) + capture_set_own(-1)
+         * took back the role barrier's capture_set_own(1) (the guard's pickup own slot 1 -> 0: the guest's human could pick up nothing, open no door). In a started
+         * session the role barrier owns the own slot and the capture roles: the lobby's close must leave them (rec.own = 1 stands for the barrier's call at START) */
+        rec.own = 1;
+        int unbinds0 = rec.unbinds;
+        menu_test_force_apply_on_close();   /* live, the close saved changed settings (the guest's Mode / address rows), so close_lobby applied them: the same here */
+        menu_cmd("ev back", st, sizeof st);
+        frames(60);
+        CHECK(rec.own == 1 && rec.unbinds == unbinds0);   /* the barrier's own slot and roles stay */
+        if (rec.own != 1 || rec.unbinds != unbinds0) printf("  (lobby close in a session: own %d, unbinds %d -> %d)\n", rec.own, unbinds0, rec.unbinds);
+        status(st, sizeof st);
+        CHECK(strstr(st, "network session's roles stay") != NULL);   /* the close did apply (not skipped as unchanged) and said why the roles stay */
+        /* the host ends the session: the guest's strip names the reason; nothing to return from at the title */
+        lk_stop(hk);
+        for (int i = 0; i < 100; i++) net1_frame(), frames(1), Sleep(2);
+        menu_cmd("net", st, sizeof st);
+        CHECK(strstr(st, "hold 0") && strstr(st, "quit at +0"));
+        menu_present(NULL);
+        CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "The host has ended the session.") && g_drawn.strip_kind == L1S_WARN);
+        cur = 1; memcpy(main_page + 0x408, &cur, 4);
+        CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7);   /* the menu is the player's again */
+        net1_stop();
+        lk_free(hk);
+
+        /* ---- the end at the title: a played session (a level since START) ends 1.5 s after the title menu waits for input again; the partner is told */
+        if (fake_level_map()) {
+            hk = lk_new_cfg(NULL, "sim", 0, &hc);
+            CHECK(lk_start(hk, L1N_HOST, "", 28421, own, sizeof own, err, sizeof err) == 1);
+            CHECK(net1_start(L1N_JOIN, "sim:28421", 0, err, sizeof err) == 1);
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+            net1_cmd("ready 1", st, sizeof st);
+            lk_set_ready(hk, 1);
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+            CHECK(net1_session_active());
+            unsigned st0 = 6;
+            memcpy(main_page + 0x3FC, &st0, 4);   /* the title menu is not waiting (a level runs) */
+            fake_level(1);
+            for (int i = 0; i < 20; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "played 1") && strstr(st, "level 1") && strstr(st, "hold 0"));   /* the guest has its level: no hold */
+            fake_level(0);
+            st0 = 4;
+            memcpy(main_page + 0x3FC, &st0, 4);   /* back at the title, waiting for input */
+            /* lm2 live: the host's session ended 25 ms after its return to the title (since = now | 1 is now + 1 for an even tick: the unsigned now - since of a
+             * pass in the same tick was 0xFFFFFFFF > 1500). The 1.5 s hold: still running a few passes later */
+            for (int i = 0; i < 40; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(1);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "ended by the title 0") && net1_session_active());
+            /* (rev1 live 10: the section follow no longer goes through the title, so a played session at the title always ends) */
+            for (int i = 0; i < 220; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(10);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "ended by the title 1") && !net1_session_active());
+            for (int i = 0; i < 50; i++) lk_poll(hk), Sleep(2);
+            lk_info hi;
+            lk_get_info(hk, &hi);
+            CHECK(hi.peer_gone == 1 && hi.peer_gone_kind == L1RS_PARTNER_LEFT);   /* the host reads "<guest> has left" */
+            lk_stop(hk);
+            lk_free(hk);
+            /* the guest whose host is gone while it plays: the strip, and the return to the title is planned 5 s later */
+            hk = lk_new_cfg(NULL, "sim", 0, &hc);
+            CHECK(lk_start(hk, L1N_HOST, "", 28422, own, sizeof own, err, sizeof err) == 1);
+            CHECK(net1_start(L1N_JOIN, "sim:28422", 0, err, sizeof err) == 1);
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+            net1_cmd("ready 1", st, sizeof st);
+            lk_set_ready(hk, 1);
+            for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+            st0 = 6;
+            memcpy(main_page + 0x3FC, &st0, 4);
+            fake_level(1);
+            for (int i = 0; i < 20; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+            lk_stop(hk);
+            for (int i = 0; i < 60; i++) net1_frame(), frames(1), Sleep(2);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "strip 5") && !strstr(st, "quit at +0 ms"));   /* "The host has ended the session.  Returning to the title screen..." + the return planned */
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Returning to the title screen"));
+            /* lm5 live: back at the title the end at the title closes the ended link; its own "ended" event must not put a second strip ("connection lost")
+             * over the host's reason */
+            fake_level(0);
+            st0 = 4;
+            memcpy(main_page + 0x3FC, &st0, 4);
+            for (int i = 0; i < 220; i++) net1_frame(), frames(1), Sleep(10);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "ended by the title 2") && !strstr(st, "strip 6 ") && !strstr(st, "strip 7 "));   /* (the host's strip itself has run out by now) */
+            if (!strstr(st, "ended by the title 2") || strstr(st, "strip 6 ") || strstr(st, "strip 7 ")) printf("  (menu net: %s)\n", st);
+            lk_free(hk);
+            /* ep1-flow E5: the end of Episode 1 closes the session on purpose. Variant 0: this guest passed the end itself (its own end flow runs): the host's close is
+             * no loss: the Episode 1 strip, no return to the title. Variant 1: the guest was behind (the host's EPDONE only): the strip says so, back to the title */
+            for (int variant = 0; variant < 2; variant++) {
+                char tgt[24];
+                snprintf(tgt, sizeof tgt, "sim:%d", 28423 + variant);
+                hk = lk_new_cfg(NULL, "sim", 0, &hc);
+                CHECK(lk_start(hk, L1N_HOST, "", 28423 + variant, own, sizeof own, err, sizeof err) == 1);
+                CHECK(net1_start(L1N_JOIN, tgt, 0, err, sizeof err) == 1);
+                for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+                net1_cmd("ready 1", st, sizeof st);
+                lk_set_ready(hk, 1);
+                for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+                CHECK(net1_session_active());
+                st0 = 6;
+                memcpy(main_page + 0x3FC, &st0, 4);
+                fake_level(1);
+                for (int i = 0; i < 20; i++) net1_frame(), lk_poll(hk), frames(1), Sleep(2);
+                g_t_ep1 = GetTickCount() | 1, g_t_ep1_local = variant == 0, g_t_ep1_closed = 0;
+                lk_stop(hk);
+                for (int i = 0; i < 60; i++) net1_frame(), frames(1), Sleep(2);
+                menu_cmd("net", st, sizeof st);
+                if (variant == 0) CHECK(strstr(st, "strip 11 ") && strstr(st, "quit at +0 ms"));
+                else CHECK(strstr(st, "strip 12 ") && !strstr(st, "quit at +0 ms"));
+                if (!strstr(st, variant ? "strip 12 " : "strip 11 ")) printf("  (menu net, variant %d: %s)\n", variant, st);
+                menu_present(NULL);
+                if (variant == 0) CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Episode 1 complete! The co-op session has ended") && g_drawn.strip_kind == L1S_INFO);
+                else CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Episode 1: the host has reached the end.") && strstr(g_drawn.hint, "Returning to the title screen") && g_drawn.strip_kind == L1S_WARN);
+                fake_level(0);
+                st0 = 4;
+                memcpy(main_page + 0x3FC, &st0, 4);
+                for (int i = 0; i < 220; i++) net1_frame(), frames(1), Sleep(10);   /* back at the title: the ended link is closed quietly */
+                net1_stop();
+                lk_free(hk);
+            }
+            /* this PC closed the session itself after its own end flow: the strip comes at once */
+            g_t_ep1 = GetTickCount() | 1, g_t_ep1_local = 1, g_t_ep1_closed = GetTickCount() | 1;
+            frames(2);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "strip 11 ") != NULL);
+            /* ep1-solo E3: the story switched this PC's character off: once per watch the strip names the character this PC watches (the lead's name
+             * when the class cannot be read: "Jill"); the same watch does not show it again */
+            g_t_ep1 = 0, g_t_ep1_local = 0, g_t_ep1_closed = 0;
+            g_t_watch_on = 1, g_t_watch_unit = 0x4321u, g_t_watch_enters = 1;
+            frames(2);
+            menu_cmd("net", st, sizeof st);
+            CHECK(strstr(st, "strip 13 ") != NULL);
+            menu_present(NULL);
+            CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "For now Jill goes on without you: you are watching until you meet again."));
+            if (!strstr(g_drawn.hint, "goes on without you")) printf("  (menu net, watch: %s / drawn kind %d: %s)\n", st, g_drawn.kind, g_drawn.hint);
+            g_t_watch_on = 0, g_t_watch_unit = 0;
+            frames(2);
+            /* the HOST passed the end: the partner's close is the end of Episode 1, not "<name> has left"; E12: the game's host publishes its flags byte by itself
+             * (the lobby default on, 60 s = 1), a console `net set flags` wins for that link */
+            g_t_ep1 = 0, g_t_ep1_local = 0, g_t_ep1_closed = 0;
+            {
+                lk_config gc;
+                memset(&gc, 0, sizeof gc);
+                gc.name = "Guesty2", gc.mod_version = R1_VERSION;
+                lk_t *gk = lk_new_cfg(NULL, "sim", 0, &gc);
+                CHECK(net1_start(L1N_HOST, "", 28430, err, sizeof err) == 1);
+                CHECK(lk_start(gk, L1N_JOIN, "sim:28430", 0, own, sizeof own, err, sizeof err) == 1);
+                for (int i = 0; i < 100; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
+                lk_info gi;
+                lk_get_info(gk, &gi);
+                CHECK(lk_state(gk) == L1NS_CONNECTED && gi.set.flags == 1);
+                CHECK(net1_session_flags() == 1);
+                net1_cmd("set flags 7", st, sizeof st);
+                for (int i = 0; i < 60; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
+                lk_get_info(gk, &gi);
+                CHECK(gi.set.flags == 7 && net1_session_flags() == 7);
+                net1_cmd("ready 1", st, sizeof st);
+                lk_set_ready(gk, 1);
+                for (int i = 0; i < 100; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
+                CHECK(net1_session_active());
+                lk_get_info(gk, &gi);
+                CHECK(gi.started && gi.set.flags == 7);   /* final at the START: the guest's downed1 reads it there */
+                st0 = 6;
+                memcpy(main_page + 0x3FC, &st0, 4);
+                fake_level(1);
+                for (int i = 0; i < 20; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
+                g_t_ep1 = GetTickCount() | 1, g_t_ep1_local = 1;
+                lk_stop(gk);
+                for (int i = 0; i < 100; i++) net1_frame(), frames(1), Sleep(2);
+                menu_cmd("net", st, sizeof st);
+                CHECK(strstr(st, "strip 11 ") && !strstr(st, "strip 3 "));
+                if (!strstr(st, "strip 11 ")) printf("  (menu net, host: %s)\n", st);
+                fake_level(0);
+                st0 = 4;
+                memcpy(main_page + 0x3FC, &st0, 4);
+                net1_stop();
+                lk_free(gk);
+                g_t_ep1 = 0, g_t_ep1_local = 0;
+                CHECK(net1_session_flags() == 7);   /* the console byte lasts until the next start of a link */
+            }
+        } else
+            printf("(the fake level page at 0x01160000 could not be mapped: the end-at-the-title checks are skipped)\n");
+        net1_shutdown();
         g_obj = old_obj;
         frames(3);
+    }
+    /* round 2: without a Steam persona the name is "Player 1" / "Player 2" in this PC's language (all 13 have both texts) */
+    {
+        char nm[64], st[200];
+        net1_cfg nc0;
+        memset(&nc0, 0, sizeof nc0);
+        nc0.transport = "sim";   /* no configured name: the persona (none in the harness) or the fallback */
+        net1_configure(&nc0);
+        menu_cmd("lang eng", st, sizeof st);
+        net1_name_for(L1N_HOST, nm, sizeof nm);
+        CHECK(!strcmp(nm, "Player 1"));
+        menu_cmd("lang rus", st, sizeof st);
+        net1_name_for(L1N_JOIN, nm, sizeof nm);
+        CHECK(!strcmp(nm, "Игрок 2"));
+        menu_cmd("lang jpn", st, sizeof st);
+        net1_name_for(L1N_HOST, nm, sizeof nm);
+        CHECK(!strcmp(nm, "プレイヤー1"));
+        int all = 1;
+        for (int l = 0; l < L1_LANGS; l++) all &= l1_text(L1T_NAME_P1, l)[0] && l1_text(L1T_NAME_P2, l)[0] && strcmp(l1_text(L1T_NAME_P1, l), l1_text(L1T_NAME_P2, l));
+        CHECK(all);
+        menu_cmd("lang eng", st, sizeof st);
+        /* round 2, the Steam way: the transport of the next start; coop_steam's auto-join line goes through net1_run_line */
+        char o[300];
+        CHECK(net1_set_way("steam") == 1 && !strcmp(net1_way(), "steam"));
+        net1_cmd("way", o, sizeof o);
+        CHECK(strstr(o, "Steam way") != NULL);
+        net1_cmd("way ip", o, sizeof o);
+        CHECK(!strcmp(net1_way(), "ip") && strstr(o, "direct IP"));
+        CHECK(net1_set_way("carrier pigeon") == 0 && !strcmp(net1_way(), "ip"));
+        /* lm6 live: `net join lobby:<id>` was refused as an address; the Steam way's targets */
+        CHECK(net1_steam_target_ok("76561198000000042") && net1_steam_target_ok("lobby:109775243776000042") && net1_steam_target_ok("pending"));
+        CHECK(!net1_steam_target_ok("") && !net1_steam_target_ok("lobby:") && !net1_steam_target_ok("lobby:12x") && !net1_steam_target_ok("192.168.0.1:28410") &&
+              !net1_steam_target_ok("123456789012345678901"));
+        net1_set_way("steam");
+        net1_cmd("join lobby:109775243776000502x", o, sizeof o);
+        CHECK(strstr(o, "Steam way: a Steam ID") != NULL);
+        net1_set_way("ip");
+        CHECK(net1_run_line("leave now", o, sizeof o) == 0 && strstr(o, "not understood"));
+        CHECK(net1_run_line("join lobby:1 owl", o, sizeof o) == 0 && strstr(o, "unknown way"));
+        CHECK(net1_take_autojoin() == 0);   /* rel010: a refused auto-join line opens nothing */
+        lk_config hc;
+        memset(&hc, 0, sizeof hc);
+        hc.name = "Hosty", hc.mod_version = R1_VERSION;
+        char own[48], err[160];
+        lk_t *hk2 = lk_new_cfg(NULL, "sim", 0, &hc);
+        CHECK(lk_start(hk2, L1N_HOST, "", 28433, own, sizeof own, err, sizeof err) == 1);
+        CHECK(net1_run_line("join sim:28433 sim", o, sizeof o) == 1 && !strcmp(o, "joining"));   /* what the auto-join does, here over the sim transport */
+        CHECK(net1_take_autojoin() == 1 && net1_take_autojoin() == 0);   /* rel010: the menu learns it once (it opens the co-op screen at the title) */
+        for (int i = 0; i < 100; i++) net1_frame(), lk_poll(hk2), frames(1), Sleep(2);
+        lk_t *gk = net1_link_peek();
+        CHECK(gk && lk_mode(gk) == L1N_JOIN && !strcmp(lk_transport(gk), "sim") && lk_state(gk) == L1NS_CONNECTED);
+        net1_stop();
+        lk_stop(hk2);
+        lk_free(hk2);
+        net1_set_way("ip");
+        net1_shutdown();
     }
     printf("%d checks, %d failed\n", checks, fails);
     remove(ini);

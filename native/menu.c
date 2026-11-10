@@ -21,9 +21,14 @@
 #include "capture.h"
 #include "gmdtext.h"
 #include "lobby1.h"
+#include "lobby_link.h"
+#include "net1.h"
 #include "overlay.h"
 #include "r1.h"
+#include "rolebarrier1.h"
 #include "split.h"
+#include "world1_game.h"   /* ep1-solo: solo1_watch_now */
+#include "coop_steam.h"   /* rel010: the friend row */
 
 /* ---------------------------------------------------------------- addresses (build 13298487) */
 #define GM_VTABLE 0x108BA68u        /* uGUI_GeneralMenu vtable */
@@ -63,8 +68,9 @@ static volatile int g_open;                /* lobby open: the stock update is sk
 static volatile int g_closing;             /* the lobby was just closed: the stock update stays frozen until every key / button is up (the closing key must not reach the stock menu: Esc went back to the title screen) */
 static unsigned g_close_ms, g_quiet;
 static l1_t *g_lobby;
+static unsigned g_autoopen_wait;   /* rel010: an auto-join is waiting for the title to open the co-op screen (tick | 1, 0 none) */
 static l1_settings g_set = {0, L1_LEAD, L1_LAYOUT_SIDE, 0};
-static int g_lang = -1, g_lang_override = -1, g_lang_src;   /* g_lang_src: 0 default, 1 env, 2 ini, 3 steam */
+static int g_lang = -1, g_lang_override = -1, g_lang_src;   /* g_lang_src: 0 default, 1 env REV1_LANG, 2 ini / console, 3 system language, 4 the game's own (detect_lang) */
 static int g_stock_loaded = -1;
 static l1_input g_in;
 static unsigned g_opened_ms;
@@ -74,8 +80,36 @@ static int g_applied_armed = -1;
 static char g_last_apply[160];
 
 static CRITICAL_SECTION g_lock;
+/* network rows (the product default since lobby-must; REV1_NETROWS=0 = the old local screen): the Mode row offers Network: host / join, then address / Start / Disconnect / ready.
+ * The link is lobby_link (the coop session on the "enet" or "steam" transport), created at the first Start. */
+static int g_net_rows;                     /* env.net_rows: set in menu_install, 1 unless REV1_NETROWS=0 */
+static CRITICAL_SECTION g_chl;             /* g_typed: the window thread (WM_CHAR) and the game thread */
+static l1_typed g_typed;                   /* characters typed in the game window, taken by menu_frame */
+static WNDPROC g_chr_prev;                 /* the game window procedure that the WM_CHAR watch calls next */
+static HWND g_chr_hwnd;                    /* the window the WM_CHAR watch is installed on (once per window) */
 static ov_scene g_scene;
 static unsigned g_scene_tick;
+/* lobby-must: the network game around the lobby (menu_frame "session watch"): the guest's title menu is held after START until the host's story start
+ * arrives (decides are swallowed, F6 / the native row still open the lobby), the in-game strip, the end of the session back at the title, the guest's
+ * return to the title when the host is gone */
+static volatile int g_hold;                /* guest after START, no level yet: the stock title menu takes no decide */
+static unsigned g_hold_logged;
+static int g_played;                       /* this PC has been in a level since the session started */
+static int g_role_seen = -1;                /* rev1 live 16: this PC's role seen since the START (before its first level): a change = the co-op save's roles put back */
+static unsigned g_title_idle_since;        /* the title menu waits for input since (0 = not) */
+static int g_seen_ended = -1, g_seen_gone = -1;   /* the link's counters already shown */
+static unsigned g_ep_seen;
+static unsigned g_ep1_seen;                /* ep1-flow E5: the last close at the end of Episode 1 already shown */
+static int g_strip_kind;                   /* L1G_* shown now, until g_strip_until */
+static int g_strip_flags;                  /* L1GF_* of an L1G_READY_GATE strip (refreshed while it shows) */
+static unsigned g_gate_holds, g_gate_logged;   /* ready1: Campaign decides held by the ready gate */
+static char g_strip_name[40];
+static unsigned g_strip_until;
+static unsigned g_quit_at;                 /* the guest returns to the title at this time (the host is gone; 0 = not planned) */
+static int g_quit_auto = 1;                /* REV1_LOSTQUIT=0: the strip only, no automatic return to the title */
+static unsigned g_alone_since;             /* host: waiting for a partner since */
+static unsigned g_stop_by_title;           /* the session was ended by the return to the title (count) */
+static unsigned g_own_stop_until;          /* our own stop at the title: the link's "ended" / "gone" events until then are not shown (lm5: a second strip "lost") */
 
 typedef void(__attribute__((fastcall)) * vf8_t)(void *self);
 static vf8_t orig_vf8, orig_mgr_vf8;
@@ -83,11 +117,16 @@ static unsigned g_mgr_calls;
 
 /* The title menu MANAGER (page logic: cursor movement, activation, back) reads the keys / buttons itself: freezing only the page's own update let the cursor moves and the closing Esc through
  * (live: the cursor ran to the last row, Esc went back to the title screen). Its update is frozen too while the lobby is open or just closed. */
+static void *g_mgr_this;                   /* rev1 live 15: the title menu manager object (its [+0x68] = the uSaveFlowHD runner of the title's save reads) */
+static unsigned g_mgr_tick;
 static void __attribute__((fastcall)) hook_mgr_vf8(void *self)
 {
     g_mgr_calls++;
+    g_mgr_this = self, g_mgr_tick = GetTickCount();
     if (!g_open && !g_closing) orig_mgr_vf8(self);
 }
+/* rev1 live 15 (rolebarrier1_game.c, the guest's title save read): the title menu manager updated within the last 2 s, else 0 */
+unsigned menu_title_mgr(void) { return g_mgr_this && GetTickCount() - g_mgr_tick < 2000u ? (unsigned)(uintptr_t)g_mgr_this : 0; }
 
 /* ---------------------------------------------------------------- the native row (stage 6c)
  * The main page is built by the title menu manager with three calls of the page's AddItem (0x82A590: label message, bank, help message, bank, flags; the labels are the Title
@@ -117,6 +156,7 @@ static char g_row_label[128], g_row_help[192];
 void menu_test_set_native(unsigned sgui_ptr_va, void *additem) { g_sgui_ptr_va = sgui_ptr_va, g_additem = (additem_t)additem, g_row_enabled = 1, g_row_page = 0; }
 
 static void open_lobby(void);
+static void close_lobby(const char *why);
 static int detect_lang(void);
 
 static int wr32m(unsigned a, unsigned v)
@@ -184,6 +224,29 @@ static void native_row_try(unsigned s)
     r1_log("menu: native row added to the main page %08x (state %d, items now %d): label \"%s\", help \"%s\"", s, state, (int)rd32(s + GM_COUNT), g_row_label, g_row_help);
 }
 
+static void strip_show(int kind, const char *name, unsigned ms);
+
+/* ready1 (2026-11-09): the ready gate (the owner: "Ready" as in Jericho, where the host's Start needs every seat ready). Here the story start is the title menu's Campaign
+ * (Continue / New Game / Load Game). While a network link runs (the host waits or has a partner, the guest connects or is connected) and the session has not started (it
+ * starts when both players are ready), the decide on the main page's Campaign row is held on both PCs and the strip says what is missing. Before this, a host could start the
+ * story alone with the partner in the room, and the partner's ready later started the session in the middle of the host's level (the guest then waited for a story start
+ * that had already happened). Returns 1 while the gate holds; *flags = L1GF_*, peer = the partner's name ("" unknown). */
+static int ready_gate(int *flags, char *peer, size_t psize)
+{
+    lk_t *k = net1_link_peek();
+    if (flags) *flags = 0;
+    if (peer && psize) peer[0] = 0;
+    if (!g_net_rows || !k || lk_mode(k) == L1N_OFF || !lk_active(k)) return 0;
+    lk_info in;
+    lk_get_info(k, &in);
+    if (in.started) return 0;
+    int f = (in.host ? L1GF_HOST : 0) | (lk_state(k) == L1NS_CONNECTED ? L1GF_CONNECTED : 0) | (in.ready ? L1GF_READY : 0) | (in.peer_ready ? L1GF_PEER_READY : 0);
+    if (flags) *flags = f;
+    if (peer && psize) snprintf(peer, psize, "%s", in.peer_name);
+    return 1;
+}
+#define LABEL_CAMPAIGN 8            /* Title message "menu_campaign": the main page's first row */
+
 static unsigned __attribute__((fastcall)) hook_act(void *page, void *edx, unsigned cancel, unsigned mouse)
 {
     unsigned s = (unsigned)(size_t)page;
@@ -192,6 +255,26 @@ static unsigned __attribute__((fastcall)) hook_act(void *page, void *edx, unsign
         r1_log("menu: native row decided (%s): lobby opens", (mouse & 0xFF) ? "mouse" : "key / pad");
         open_lobby();
         return 1;   /* handled: the page stays in its waiting state, the stock manager sees nothing */
+    }
+    /* ready1: the ready gate on the Campaign row of the main page (its rows are the Title messages 8 / 9 / 10, with or without the native row) */
+    if (!g_hold && (cancel & 0xFF) == 0 && (int)rd32(s + GM_STATE) == g_idle_state && rd32(s + 0x41C) == LABEL_CAMPAIGN && rd32(s + 0x420) == 9 && rd32(s + 0x424) == 10) {
+        int cur = (int)rd32(s + GM_CURSOR), f = 0;
+        char peer[40];
+        if (cur >= 0 && cur < 8 && rd32(s + 0x41C + 4 * (unsigned)cur) == LABEL_CAMPAIGN && ready_gate(&f, peer, sizeof peer)) {
+            unsigned now = GetTickCount();
+            g_gate_holds++;
+            g_strip_flags = f;
+            strip_show(L1G_READY_GATE, peer, 7000);
+            if (now - g_gate_logged > 2000)
+                g_gate_logged = now, r1_log("menu: ready gate: Campaign is held until both players are ready (%s, %s, this PC %s, partner %s)", (f & L1GF_HOST) ? "host" : "guest",
+                                            (f & L1GF_CONNECTED) ? "connected" : "no partner yet", (f & L1GF_READY) ? "ready" : "not ready", (f & L1GF_PEER_READY) ? "ready" : "not ready");
+            return 1;
+        }
+    }
+    if (g_hold && (cancel & 0xFF) == 0) {   /* the guest after START: the host's story start loads this PC; its own Continue / New Game / Load must not */
+        unsigned now = GetTickCount();
+        if (now - g_hold_logged > 2000) g_hold_logged = now, r1_log("menu: guest hold: a decide of the title menu (cursor %d) is ignored until the host starts the story", (int)rd32(s + GM_CURSOR));
+        return 1;
     }
     return g_act_tramp ? g_act_tramp(page, edx, cancel, mouse) : 0;
 }
@@ -228,7 +311,7 @@ static int install_act_detour(void)
 static void __attribute__((fastcall)) hook_vf8(void *self)
 {
     native_row_try((unsigned)self);   /* before the stock update: the row must exist when the page lays its list out */
-    if (!g_open && !g_closing) orig_vf8(self);   /* lobby open (or just closed, keys still down): the stock menu is frozen */
+    if (!g_open && !g_closing && !(g_hold && !g_act_tramp)) orig_vf8(self);   /* lobby open (or just closed, keys still down): frozen; the guest hold without the decide detour freezes too */
     unsigned s = (unsigned)self;
     g_gm_this = s;
     g_gm_state = (int)rd32(s + GM_STATE);
@@ -240,20 +323,36 @@ static void __attribute__((fastcall)) hook_vf8(void *self)
     g_gm_tick = GetTickCount();
 }
 
-/* ---------------------------------------------------------------- language, stock words */
+/* ---------------------------------------------------------------- language, stock words
+ * The texts follow the language the game itself shows: its sMain.mLanguage ([[0x11E0314] + 0x254C], set at 0x9BC7B5 from GetUserDefaultLangID; lang owner report 2026-11-08: a
+ * Russian game with an English Co-Op Play row was a lab run with REV1_LANG=eng). Before the game has set it: the same rule on GetUserDefaultLangID, asked again later. */
+#define SMAIN_PTR_VA 0x11E0314u
+#define SMAIN_LANGUAGE 0x254C
+static unsigned g_smain_ptr_va = SMAIN_PTR_VA;   /* the offline harness replaces it */
+void menu_test_set_smain(unsigned smain_ptr_va) { g_smain_ptr_va = smain_ptr_va, g_lang = -1, g_lang_src = 0; }
 static int detect_lang(void)
 {
+    static unsigned last_try;
     char v[32];
-    if (g_lang >= 0) return g_lang;
-    int l = -1;
-    if (r1_env("REV1_LANG", v, sizeof v) && (l = l1_lang_from_code(v)) >= 0) g_lang_src = 1;
-    else if (g_lang_override >= 0) l = g_lang_override, g_lang_src = 2;
-    else if ((l = l1_lang_from_langid(GetUserDefaultLangID())) >= 0) g_lang_src = 3;   /* the game picks its language from this too (its import: GetUserDefaultLangID), not from Steam */
-    else l = 0, g_lang_src = 0;
-    g_lang = l;
-    r1_log("menu: language %s (%s)", l1_lang_codes[l], g_lang_src == 1 ? "REV1_LANG" : g_lang_src == 2 ? "rev1_coop.ini" : g_lang_src == 3 ? "system language (GetUserDefaultLangID)" : "default");
+    if (g_lang >= 0 && (g_lang_src == 1 || g_lang_src == 2 || g_lang_src == 4)) return g_lang;
+    if (g_lang >= 0 && GetTickCount() - last_try < 1000) return g_lang;   /* (not the game's own value yet: asked again once a second) */
+    last_try = GetTickCount();
+    int l = -1, src = 0;
+    unsigned sm = g_smain_ptr_va ? rd32(g_smain_ptr_va) : 0, m = sm ? rd32(sm + SMAIN_LANGUAGE) : 0xFFFFFFFFu;
+    if (r1_env("REV1_LANG", v, sizeof v) && (l = l1_lang_from_code(v)) >= 0) src = 1;   /* LAB: the mod's texts in that language, the game's stay as they are */
+    else if (g_lang_override >= 0) l = g_lang_override, src = 2;
+    else if (sm && (l = l1_lang_from_game(m)) >= 0) src = 4;
+    else if ((l = l1_lang_from_langid(GetUserDefaultLangID())) >= 0) src = 3;
+    else l = 0, src = 0;
+    if (l != g_lang || src != g_lang_src)
+        r1_log("menu: language %s (%s; the game's mLanguage %d)", l1_lang_codes[l], src == 1 ? "REV1_LANG, LAB: the game's own texts may differ" : src == 2 ? "rev1_coop.ini"
+               : src == 4 ? "the game's own" : src == 3 ? "system language (GetUserDefaultLangID), the game's not set yet" : "default", sm ? (int)m : -1);
+    g_lang = l, g_lang_src = src;
     return l;
 }
+
+/* the name this PC sends without a Steam persona, in its language (net1_name_for) */
+static const char *fallback_name(int side) { return l1_text(side ? L1T_NAME_P2 : L1T_NAME_P1, detect_lang()); }
 
 static void exe_dir(char *out, size_t size)
 {
@@ -297,7 +396,27 @@ static void load_stock(int lang)
     }
     l1_set_stock_names((const char(*)[48])names);
     l1_set_stock_words((const char(*)[64])words);
-    r1_log("menu: stock texts of the game (%s): %d names, %d menu words", l1_lang_codes[lang], got_names, got_words);
+    /* the Raid mode's online texts of the game (session full, connection terminated, <USER> has left / joined / is ready, removed, kick question): the network lobby and the strip quote them */
+    /* ep1-flow: also the options menu's "Off" (option bank) and "Episode 1" (campaign bank): each id names its bank, the banks come in runs */
+    int got_net = 0;
+    const char *bank = NULL;
+    g = NULL;
+    for (int i = 0; i < L1K_COUNT; i++) {
+        if (!bank || strcmp(bank, l1_stock_banks[i])) {
+            if (g) gmd_free(g);
+            bank = l1_stock_banks[i];
+            snprintf(path, sizeof path, "%s\\nativePC\\msg\\%s_%s.gmd", dir, bank, l1_lang_codes[lang]);
+            g = gmd_load(path);
+        }
+        const char *t = g ? gmd_by_label(g, l1_stock_labels[i]) : NULL;
+        char clean[256];
+        clean[0] = 0;
+        if (t && t[0] && strcmp(t, "HARDUMMY") && strcmp(t, "Invalid Message")) l1_stock_clean(t, lang, clean, sizeof clean);
+        l1_set_stock_text(i, clean);
+        if (clean[0] && !strcmp(l1_stock(i), clean)) got_net++;
+    }
+    if (g) gmd_free(g);
+    r1_log("menu: stock texts of the game (%s): %d names, %d menu words, %d of %d network texts", l1_lang_codes[lang], got_names, got_words, got_net, L1K_COUNT);
 }
 
 /* ---------------------------------------------------------------- settings file */
@@ -330,6 +449,26 @@ static void menu_apply(const char *why)
     l1_assign a;
     l1_assign_get(&g_set, &a);
     g_applies++;
+    if (g_set.armed && (net1_session_active() || (net1_link_peek() && lk_mode(net1_link_peek()) != L1N_OFF))) {
+        /* one mode: a network game never arms the local split (check 9 of net-role-barrier.md); the role barrier owns the capture roles then */
+        split_enable(0);
+        testmode_pad_swap_base(0);
+        g_applied_armed = 0;
+        snprintf(g_last_apply, sizeof g_last_apply, "split kept off (%s): a network link runs", why);
+        r1_log("menu: co-op split NOT armed (%s): a network link is running (one human per PC)", why);
+        return;
+    }
+    if (!g_set.armed && net1_session_active()) {
+        /* wp12 (2026-11-08 02:52:53, the guest): the lobby closed after the START came here and its capture_unbind(-1) + capture_set_own(-1) took back the role
+         * barrier's capture_set_own(1) (`guards: pickup own slot 1 -> 0`): the guest's human could pick up no item and open no door. In a started session the role
+         * barrier owns the own slot and the capture roles (as in the armed branch above): only the split is kept off */
+        split_enable(0);
+        testmode_pad_swap_base(0);
+        g_applied_armed = 0;
+        snprintf(g_last_apply, sizeof g_last_apply, "off (%s): the network session's roles stay", why);
+        r1_log("menu: co-op split off (%s): a network session runs, its own slot and capture roles stay as the role barrier set them", why);
+        return;
+    }
     if (!g_set.armed) {
         capture_unbind(-1);
         capture_set_own(-1);
@@ -409,6 +548,73 @@ static int mouse_events(l1_event *ev, int max, unsigned now)
     return n;
 }
 
+/* ---------------------------------------------------------------- typed characters and the network rows
+ * The join address is typed: the game window gets WM_CHAR, which this module reads with a window procedure in front of the game's (once per window, network rows only).
+ * The window procedure only queues the character (l1_typed_push: printable ASCII), the game thread takes it in menu_frame and hands it to the model as raw.typed. */
+static LRESULT CALLBACK chr_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_CHAR) {
+        EnterCriticalSection(&g_chl);
+        l1_typed_push(&g_typed, (unsigned)wp);
+        LeaveCriticalSection(&g_chl);
+    }
+    return CallWindowProc(g_chr_prev, w, msg, wp, lp);
+}
+
+static void chars_watch(void)
+{
+    HWND hw = testmode_window();
+    if (!g_net_rows || !hw || hw == g_chr_hwnd) return;
+    WNDPROC prev = IsWindowUnicode(hw) ? (WNDPROC)SetWindowLongW(hw, GWL_WNDPROC, (LONG)chr_proc) : (WNDPROC)SetWindowLongA(hw, GWL_WNDPROC, (LONG)chr_proc);
+    if (!prev) return;
+    g_chr_prev = prev, g_chr_hwnd = hw;
+    r1_log("menu: network rows: WM_CHAR of window %p is read for the join address", (void *)hw);
+}
+
+static int chars_take(unsigned char *out)
+{
+    EnterCriticalSection(&g_chl);
+    int n = l1_typed_take(&g_typed, out);
+    LeaveCriticalSection(&g_chl);
+    return n;
+}
+
+/* the network requests of the lobby (L1R_NET_START / L1R_NET_STOP): Start hosts or joins with the settings (mode, typed address),
+ * Disconnect closes the link. The link itself is the shared one of net1.c (the console `net` command drives the same link); the state the player
+ * sees is the model's, set by the link (lobby_link.c) through the session's notifications, which net1_frame polls once a frame (lobby open or not). */
+static void net_request(int req)
+{
+    if (!g_lobby) return;
+    net1_attach_lobby(g_lobby);   /* creates nothing; a link that exists shows itself in the model */
+    if (req == L1R_NET_START) {
+        l1_settings s;
+        l1_settings_get(g_lobby, &s);
+        char err[160];
+        if (s.way) net1_set_way("steam");   /* round 2: the Way row; a lab transport (sim) stays unless the Steam way is chosen */
+        else if (!strcmp(net1_way(), "steam")) net1_set_way("ip");
+        int ok = net1_start(s.net_mode, s.join_addr, LK_DEFAULT_PORT, err, sizeof err);
+        r1_log("menu: network %s %s%s", s.net_mode == L1N_HOST ? "host" : "join", ok ? "started" : "failed: ", ok ? "" : err);
+    } else if (req == L1R_NET_STOP) {
+        net1_stop();
+        r1_log("menu: network stopped");
+    } else if (req == L1R_NET_KICK) {
+        int ok = net1_kick();
+        r1_log("menu: Remove partner: %s", ok ? "the partner was removed" : "nobody to remove");
+    } else if (req == L1R_NET_INVITE) {   /* round 2: the Steam way's "Invite a friend" (coop_steam: the overlay's invite dialog for our lobby) */
+        char out[300];
+        net1_cmd("steaminvite", out, sizeof out);
+        r1_log("menu: Invite a friend: %s", out);
+    }
+}
+
+/* the lobby's request, once per call: close, or the network start / stop */
+static void lobby_request(const char *why)
+{
+    int req = l1_take_request(g_lobby);
+    if (req == L1R_CLOSE) close_lobby(why);
+    else if (req == L1R_NET_START || req == L1R_NET_STOP || req == L1R_NET_KICK || req == L1R_NET_INVITE) net_request(req);
+}
+
 /* ---------------------------------------------------------------- scene for the overlay */
 static void publish(const ov_scene *sc)
 {
@@ -440,11 +646,62 @@ void menu_before_reset(void)
 }
 
 /* ---------------------------------------------------------------- environment of the lobby */
+/* the area of this PC's save: the campaign checkpoint record of sCheckPoint ([0x116A334] + 0x60 + mode * 0x24, mode = [[[0x1169108]+0x24]+0x20]), +0x14 = the area Continue
+ * loads (notes\net-story-re.md section 2, FUN_006D0FF0); 0 when the objects are not there */
+static unsigned save_area(void)
+{
+    unsigned cp = rd32(0x116A334u), g = rd32(0x1169108u), o = g ? rd32(g + 0x24) : 0;
+    if (!cp || !o) return 0;
+    unsigned mode = rd32(o + 0x20);
+    if (mode > 1) return 0;
+    unsigned a = rd32(cp + 0x60 + mode * 0x24 + 0x14), ep = (a >> 16) & 0xFFu;
+    /* lm1 live (main PC, a save the title showed as "Episode 1"): the record held 0x91FF0000 at the title = not filled yet (the save is read at Continue):
+     * an episode byte 0 / 0xFF is "unknown", never a warning */
+    return (a >> 24) == 0x91u && ep && ep != 0xFFu ? a : 0;
+}
+
+/* rel010: the friend row's list (Join + Steam friends): asked from Steam at most once a second, on the game thread */
+static unsigned g_fr_at;
+static int g_fr_n;
+static char g_fr_name[L1_FRIENDS][40], g_fr_id[L1_FRIENDS][24];
+static void friends_refresh(const l1_settings *s)
+{
+    unsigned now = GetTickCount();
+    if (!s || s->net_mode != L1N_JOIN || !s->way) { g_fr_n = 0; return; }
+    if (g_fr_at && now - g_fr_at < 1000) return;
+    g_fr_at = now | 1;
+    uint64_t ids[L1_FRIENDS];
+    int n = cst_friends_in_game(ids, g_fr_name, L1_FRIENDS);
+    for (int i = 0; i < n; i++) snprintf(g_fr_id[i], sizeof g_fr_id[i], "%llu", (unsigned long long)ids[i]);
+    if (n != g_fr_n) r1_log("menu: friend row: %d friend(s) in the game with a lobby%s%s", n, n ? ", first " : "", n ? g_fr_name[0] : "");
+    g_fr_n = n;
+}
+
 static void fill_env(l1_env *env, int pads)
 {
     memset(env, 0, sizeof *env);
     env->lang = detect_lang();
     env->pads_connected = pads;
+    env->net_rows = g_net_rows;
+    net1_own_addr(env->own_addr, sizeof env->own_addr);
+    lk_t *k = net1_link_peek();
+    unsigned now = GetTickCount();
+    if (k && lk_mode(k) == L1N_HOST && lk_state(k) == L1NS_WAIT) {
+        if (!g_alone_since) g_alone_since = now | 1;
+        int d = (int)(now - g_alone_since);   /* signed: since = now | 1 can be now + 1 */
+        env->alone_s = d > 0 ? d / 1000 : 0;
+    } else
+        g_alone_since = 0;
+    env->save_area = save_area();
+    env->coop_role1 = coopsave_rec_role1();   /* rev1 live 16: the host's room says that Continue plays the co-op save's characters */
+    l1_settings ls;
+    if (g_lobby) l1_settings_get(g_lobby, &ls);
+    friends_refresh(g_lobby ? &ls : NULL);
+    env->n_friends = g_fr_n;
+    for (int i = 0; i < g_fr_n && i < L1_FRIENDS; i++) {
+        snprintf(env->friend_name[i], sizeof env->friend_name[i], "%s", g_fr_name[i]);
+        snprintf(env->friend_id[i], sizeof env->friend_id[i], "%s", g_fr_id[i]);
+    }
     capture_state_t cs;
     capture_get_state(&cs);
     char cn[2][80];
@@ -473,6 +730,7 @@ static void open_lobby(void)
     load_stock(env.lang);
     if (!g_lobby) g_lobby = l1_new();
     l1_open(g_lobby, &g_set, &env);
+    if (g_net_rows) net1_attach_lobby(g_lobby);   /* a link that runs already (started from the console, or before the lobby was closed) shows its state, mode and roles */
     l1_input_reset(&g_in);   /* the first poll inside the lobby only learns what is held (the decide of the native row, A / Enter / F6, is usually still down): live, the A that opened it toggled the first row */
     g_opened_ms = GetTickCount();
     g_open = 1;
@@ -499,6 +757,202 @@ static void close_lobby(const char *why)
     r1_log("menu: lobby closed (%s)%s", why, changed ? ", settings changed and saved" : "");
 }
 
+/* ---------------------------------------------------------------- the network game around the lobby (lobby-must) */
+static int is_player_unit(unsigned unit)
+{
+    char cn[96];
+    return unit > 0x10000 && classes_object_name(unit, cn, sizeof cn) && !strncmp(cn, "uPl<", 4);
+}
+/* a level is loaded on this PC: the sPlayer list holds a player unit (the title screen has none) */
+static unsigned g_splayer_ptr = R1_SPLAYER_PTR;   /* the offline harness points it at its own fake list */
+void menu_test_set_splayer(unsigned cell) { g_splayer_ptr = cell; }
+void menu_test_force_apply_on_close(void) { g_applied_armed = -1; }   /* test: the next close_lobby applies (as a changed setting does) */
+static int level_present(void)
+{
+    unsigned sp = rd32(g_splayer_ptr);
+    if (!sp) return 0;
+    unsigned head = rd32(sp + 0x30), endp = rd32(sp + 0x34);
+    for (int guard = 0; head && head != endp && guard < 40; guard++, head = rd32(head + 8))
+        if (is_player_unit(rd32(head + 0x10))) return 1;
+    return 0;
+}
+
+unsigned menu_title_age_ms(void) { return g_gm_this ? GetTickCount() - g_gm_tick : 0xFFFFFFFFu; }
+int menu_split_armed(void) { return g_applied_armed == 1; }   /* rev1 live 16: the local split screen is applied (coopsave1_game.c: a split game uses the co-op save) */
+
+/* the class of the running area: sGameArea [0x11E01E8], current = [+0x3828 + 4 * [+0x3824]] (FUN_0043C590). lm3 live: after the return to the title the game shows
+ * the press-start screen (Start / Exit) and the title MENU object does not run until a key: the area class aRevelationsTitle tells "at the title" there too */
+static int area_name(char *out, int size)
+{
+    unsigned ga = rd32(0x11E01E8u), idx = ga ? rd32(ga + 0x3824) : 0, area = idx ? rd32(ga + 0x3828 + 4 * idx) : 0;
+    out[0] = 0;
+    return area && classes_object_name(area, out, size);
+}
+static int title_area(void)
+{
+    char cn[64];
+    return area_name(cn, sizeof cn) && strstr(cn, "aRevelationsTitle") != NULL;
+}
+
+/* back to the title screen from a level. lm1 live (2026-11-07): the area change [0x11E01E8] vf+0x28 (0x43C740) with the DTI "aTitle" 0x1168E00 is NOT the title: it
+ * is a sample area of the engine ("nativePC/sample/title/title.arc" missing -> fatal box -> ExitProcess). The release title is aRevelationsTitle 0x116B2FC; the
+ * stock way there from a running game is FUN_008B1660 of the save module (no arguments, plain ret; its only caller 0x8B3A5A runs it after a save error message
+ * was closed): fade object ([0x1169110] FUN_0078EE80)->vf+0x18(4), area change to aRevelationsTitle, cGameSystemData_setMode(0), save state 2.
+ * Logic thread only; the first bytes are checked. UNVERIFIED live until `menu quit yes` passed on the bench (lobby-must notes section 7). 1 = asked. */
+#define QUIT_FN 0x8B1660u
+static int quit_to_title(const char *why)
+{
+    static const unsigned char expect[9] = {0xA1, 0x04, 0x91, 0x16, 0x01, 0x85, 0xC0, 0x75, 0x14};   /* mov eax,[0x1169104]; test eax,eax; jne +0x14 */
+    unsigned char cur[9];
+    unsigned save = rd32(0x1169104u), fade = rd32(0x1169110u), area = rd32(0x11E01E8u), gs = rd32(0x1169108u);
+    if (!r1_safe_read((const void *)(uintptr_t)QUIT_FN, cur, sizeof cur) || memcmp(cur, expect, sizeof cur) || !save || !fade || !area || !gs) {
+        r1_log("menu: return to the title (%s) NOT done: bytes at %08x %02x %02x %02x, save %08x fade %08x area %08x system %08x", why, QUIT_FN, cur[0], cur[1], cur[2], save, fade, area, gs);
+        return 0;
+    }
+    r1_log("menu: return to the title (%s): FUN_008B1660 (the save module's return to aRevelationsTitle)", why);
+    ((void (*)(void))(uintptr_t)QUIT_FN)();
+    return 1;
+}
+
+static void strip_show(int kind, const char *name, unsigned ms)
+{
+    g_strip_kind = kind;
+    snprintf(g_strip_name, sizeof g_strip_name, "%s", name ? name : "");
+    g_strip_until = (GetTickCount() + ms) | 1;
+}
+
+/* once per pass: what the network session means for the title menu and the levels: the guest hold, the strip, the automatic end at the title, the guest's
+ * return to the title after the host is gone. Returns the strip to draw (L1G_NONE = none) in *st. */
+static void session_watch(int idle, l1_strip_in *st)
+{
+    unsigned now = GetTickCount();
+    memset(st, 0, sizeof *st);
+    lk_t *k = net1_link_peek();
+    lk_info in;
+    memset(&in, 0, sizeof in);
+    int running = k && lk_mode(k) != L1N_OFF;
+    if (k) lk_get_info(k, &in);
+    int started = running && in.started && lk_state(k) == L1NS_CONNECTED;
+    int insession = running && in.started;   /* also a host whose partner has left (the link waits again): back at the title the session ends all the same */
+    int level = level_present();
+    if (insession && level) g_played = 1;
+    if (!insession) g_played = 0, g_title_idle_since = 0, g_role_seen = -1;
+    /* rev1 live 16: the host's title Continue of a co-op save put the save's roles back (lk_force_roles): the line on both PCs, this PC's character named */
+    if (started && !g_played && (in.role == 0 || in.role == 1)) {
+        if (g_role_seen >= 0 && in.role != g_role_seen) {
+            const char *who = l1_person_name(in.role == 1 ? 2 : 0, detect_lang());   /* Episode 1: Jill / Parker (the game's own names) */
+            strip_show(L1G_CONT_ROLES, who, 12000);
+            r1_log("menu: strip: Continue keeps the characters of the co-op save: this PC plays the %s (%s) now (it was the %s)", in.role ? "partner" : "lead", who,
+                   g_role_seen ? "partner" : "lead");
+        }
+        g_role_seen = in.role;
+    }
+    /* the guest's hold: after START and before its first level the host's story start loads this PC (rolebarrier1_game.c follows it) */
+    int hold = started && !in.host && !g_played;   /* (a guest whose host is gone is no longer started: the link went to ERROR) */
+    if (hold != g_hold) r1_log("menu: guest hold %s", hold ? "ON (the title menu takes no decide; the host's story start loads this PC)" : "off");
+    g_hold = hold;
+    /* back at the title with a played session: the session ends by itself (the partner is told) */
+    if (insession && g_played && !level && (idle || title_area())) {   /* the title menu waits, or the press-start screen of the title area */
+        if (!g_title_idle_since) g_title_idle_since = now | 1;
+        if ((int)(now - g_title_idle_since) > 1500) {   /* signed: since = now | 1 can be now + 1 (lm2 live: ended 25 ms after the return) */
+            int over = !in.host && lk_state(k) != L1NS_CONNECTED;   /* the guest's session had ended already (host ended / removed / lost): only the link is closed */
+            r1_log("menu: back at the title menu after a network game: %s", over ? "the ended session's link is closed" : in.host ? "the session ends (the partner is told the host ended it)"
+                                                                                                                               : "the session ends (the host is told the partner left)");
+            g_stop_by_title++;
+            g_own_stop_until = (now + 2000) | 1;
+            net1_stop();
+            g_played = 0, g_title_idle_since = 0, g_hold = 0;
+            return;
+        }
+    } else
+        g_title_idle_since = 0;
+    /* events of the link: a guest whose session ended, a host whose partner left */
+    if (k && g_seen_ended < 0) g_seen_ended = in.ended, g_seen_gone = in.peer_gone;
+    int own_stop = g_own_stop_until && (int)(now - g_own_stop_until) < 0;
+    if (!own_stop) g_own_stop_until = 0;
+    if (k && own_stop && (in.ended != g_seen_ended || in.peer_gone != g_seen_gone)) {   /* the events of our own stop at the title: nothing to tell */
+        g_seen_ended = in.ended, g_seen_gone = in.peer_gone;
+        r1_log("menu: the link closed at the title (no strip)");
+    }
+    /* ep1-flow E5: the end of Episode 1 closes the session on purpose: the partner's close is no loss (no loss strip, no return to the title for a PC whose own end
+     * flow runs); a guest that was behind (the host completed it) goes back to the title like a guest whose host ended the session */
+    int ep1_local = 0;
+    unsigned ep1_closed = 0, ep1 = rolebarrier_ep1_end(&ep1_local, &ep1_closed);
+    if (k && in.ended != g_seen_ended) {
+        g_seen_ended = in.ended;
+        if (ep1) {
+            strip_show(ep1_local ? L1G_EP1_DONE : L1G_EP1_BEHIND, in.last_peer, 12000);
+            if (!ep1_local && level_present() && g_quit_auto) g_quit_at = (now + 6000) | 1;
+            r1_log("menu: the session ended on this guest at the END OF EPISODE 1 (%s)%s", ep1_local ? "this PC passed it too: its own end flow goes on alone" : "this PC was behind the host",
+                   g_quit_at ? ": back to the title in 6 s" : "");
+        } else {
+            int kind = in.ended_reason == L1RS_HOST_ENDED ? L1G_HOST_ENDED : in.ended_reason == L1RS_REMOVED ? L1G_REMOVED : L1G_HOST_LOST;
+            strip_show(kind, in.last_peer, 7000);
+            if (level_present() && g_quit_auto) g_quit_at = (now + 5000) | 1;   /* the guest's world was the host's: back to the title after the strip was read */
+            r1_log("menu: the session ended on this guest (%s)%s", kind == L1G_HOST_ENDED ? "the host ended it" : kind == L1G_REMOVED ? "removed by the host" : "connection lost",
+                   g_quit_at ? ": back to the title in 5 s" : "");
+        }
+    }
+    if (k && in.peer_gone != g_seen_gone) {
+        g_seen_gone = in.peer_gone;
+        if (ep1 && ep1_local) {   /* the host passed the end too: its own end flow goes on alone */
+            strip_show(L1G_EP1_DONE, in.last_peer, 12000);
+            r1_log("menu: the partner closed the session at the END OF EPISODE 1 (this PC passed it too)");
+        } else
+            strip_show(in.peer_gone_kind == L1RS_PARTNER_LOST ? L1G_PARTNER_LOST : L1G_PARTNER_LEFT, in.last_peer, 8000);
+    }
+    if (ep1_closed && ep1_closed != g_ep1_seen) {   /* this PC closed the session itself after its stock end flow */
+        g_ep1_seen = ep1_closed;
+        strip_show(L1G_EP1_DONE, in.last_peer, 12000);
+        r1_log("menu: strip: Episode 1 complete (this PC closed the session after its end flow)");
+    }
+    {   /* ep1-solo E3: the story switched this PC's character off (1-3 solo part): once per watch, the strip names the character this PC watches now */
+        static unsigned seen_enters;
+        unsigned wu = 0, en = 0;
+        if (solo1_watch_now(&wu, &en) && en != seen_enters) {
+            seen_enters = en;
+            char cn[96] = "";
+            int person = wu && classes_object_name(wu, cn, sizeof cn) ? l1_person_from_class(cn) : -1;
+            const char *who = l1_person_name(person < 0 ? 0 : person, detect_lang());
+            strip_show(L1G_SOLO_WATCH, who, 12000);
+            r1_log("menu: strip: this PC watches %s (%s) while the story goes on without its own character", who, cn[0] ? cn : "?");
+        }
+    }
+    unsigned eb = rolebarrier_ep_block_ms();
+    if (eb && eb != g_ep_seen) g_ep_seen = eb, strip_show(L1G_EP_ENDED, "", 10000);
+    if (g_quit_at && (int)(now - g_quit_at) >= 0) {
+        g_quit_at = 0;
+        if (level_present()) quit_to_title("the host is gone");
+    }
+    /* what to show: a fresh event first, then the running states */
+    if (g_strip_kind == L1G_READY_GATE && g_strip_until) {   /* ready1: the gate's line follows the ready flags while it shows, and goes when the gate is gone */
+        char pn[40];
+        if (ready_gate(&g_strip_flags, pn, sizeof pn)) {
+            if (pn[0]) snprintf(g_strip_name, sizeof g_strip_name, "%s", pn);
+        } else
+            g_strip_until = 0;
+    }
+    if (g_strip_kind && g_strip_until && (int)(now - g_strip_until) < 0) {
+        st->kind = g_strip_kind;
+        st->flags = g_strip_flags;
+        snprintf(st->name, sizeof st->name, "%s", g_strip_name);
+        return;
+    }
+    g_strip_kind = 0;
+    if (!started) return;
+    const char *peer = in.last_peer[0] ? in.last_peer : in.peer_name;
+    if (in.silent_s > 0 && in.silent_age_ms < 15000) {
+        st->kind = L1G_SILENT, st->seconds = in.silent_s + (int)(in.silent_age_ms / 1000u);
+        snprintf(st->name, sizeof st->name, "%s", peer);
+    } else if (in.wait_s > 0 && in.wait_age_ms < 35000 && in.phase == CP_PHASE_LOADING) {
+        st->kind = L1G_WAIT_LOAD;
+        snprintf(st->name, sizeof st->name, "%s", in.wait_name[0] ? in.wait_name : peer);
+    } else if (!level && !g_played) {
+        st->kind = in.host ? L1G_HOST_GO : L1G_GUEST_HOLD;
+        snprintf(st->name, sizeof st->name, "%s", peer);
+    }
+}
+
 /* ---------------------------------------------------------------- per pass (game thread) */
 static void menu_frame(void)
 {
@@ -509,9 +963,32 @@ static void menu_frame(void)
     l1_raw raw;
     int pads = 0;
     read_raw(&raw, &pads, idle || g_open);
+    if (g_net_rows) {   /* the characters typed since the last pass (dropped by the model while the lobby is closed) */
+        chars_watch();
+        chars_take(raw.typed);
+    }
     l1_event ev[8];
     int want_open = 0;
     int n = l1_input_poll(&g_in, &raw, now, g_open, ev, 8, &want_open);
+    /* rel010: "Join game" in the Steam friends list or an invite joined in the background (coop_steam's auto-join): at the title the co-op screen opens by itself,
+     * the room with the host and the Ready row (Revelations 2 does the same). A test console run (REV1_CONSOLE) keeps it closed unless REV1_MENU_AUTOOPEN=1. */
+    if (net1_take_autojoin()) {
+        static int autoopen = -1;
+        if (autoopen < 0) {
+            char v[8];
+            autoopen = r1_env("REV1_MENU_AUTOOPEN", v, sizeof v) ? v[0] == '1' : !r1_env("REV1_CONSOLE", v, sizeof v);
+        }
+        if (autoopen && !g_open && g_net_rows) {
+            g_autoopen_wait = now | 1;
+            r1_log("menu: a Steam join (Join game / invite) started: the co-op screen opens at the title");
+            if (!strcmp(net1_way(), "steam")) g_set.way = 1;   /* the room shows the way the link really runs (b11b: it said Direct IP) */
+        }
+    }
+    if (g_autoopen_wait && !g_open) {
+        if (idle) want_open = 1, g_autoopen_wait = 0;
+        else if (now - g_autoopen_wait > 30000) g_autoopen_wait = 0;   /* not at the title within 30 s (in a level, a menu of its own): the link runs on, the screen stays shut */
+    } else if (g_open)
+        g_autoopen_wait = 0;
     if (g_closing) {   /* wait until nothing is held (3 quiet polls) or 1.5 s, then give the menu back */
         int any = raw.up | raw.down | raw.left | raw.right | raw.enter | raw.space | raw.esc | raw.f6 | raw.pad_buttons[0] | raw.pad_buttons[1];
         any |= raw.ly[0] > 22000 || raw.ly[0] < -22000 || raw.lx[0] > 22000 || raw.lx[0] < -22000 || raw.ly[1] > 22000 || raw.ly[1] < -22000 || raw.lx[1] > 22000 || raw.lx[1] < -22000;
@@ -537,11 +1014,34 @@ static void menu_frame(void)
         l1_env env;
         fill_env(&env, pads);
         l1_set_env(g_lobby, &env);
-        if (l1_take_request(g_lobby) == L1R_CLOSE) close_lobby("closed by the player");
+        lobby_request("closed by the player");
     } else if (want_open && idle) {
         open_lobby();
     }
+    /* ep1-flow E12: the Downed / revive rule. The host publishes its choice in the session record (net1 writes it before the START; the default is on, 60 s); a guest's
+     * row shows the host's choice */
+    {
+        l1_settings cur = g_set;
+        if (g_open && g_lobby) l1_settings_get(g_lobby, &cur);
+        net1_set_session_flags((int)l1_downed_flags(cur.downed));
+        if (g_lobby) {
+            lk_t *k = net1_link_peek();
+            int hf = -1;
+            if (k && lk_mode(k) == L1N_JOIN && lk_state(k) == L1NS_CONNECTED) {
+                lk_info in;
+                lk_get_info(k, &in);
+                hf = in.set.flags & 0xFF;
+            }
+            l1_net_set_host_flags(g_lobby, hf);
+        }
+    }
     /* what to draw */
+    l1_strip_in strip;
+    session_watch(idle, &strip);
+    if (net1_session_active() && g_applied_armed == 1) {   /* a network game never runs the local split as well (an old armed=1, a console start) */
+        r1_log("menu: a network session runs while the split screen was armed: the split is switched off");
+        menu_apply("network session");
+    }
     if (g_open) {
         static ov_scene sc;
         memset(&sc, 0, sizeof sc);
@@ -550,6 +1050,14 @@ static void menu_frame(void)
         l1_view_get(g_lobby, &sc.v);
         sc.cursor_on = now - m_last_move < 3000 && in_foreground();
         sc.cursor_x = m_vx, sc.cursor_y = m_vy;
+        publish(&sc);
+    } else if (strip.kind != L1G_NONE) {   /* the in-game strip (levels and the title): the partner, the session */
+        static ov_scene sc;
+        memset(&sc, 0, sizeof sc);
+        sc.kind = OV_STRIP;
+        sc.lang = detect_lang();
+        load_stock(sc.lang);
+        l1_strip_text(&strip, sc.lang, sc.hint, sizeof sc.hint, &sc.strip_kind);
         publish(&sc);
     } else if (idle) {
         static ov_scene sc;
@@ -579,7 +1087,18 @@ void menu_install(void)
     if (g_installed) return;
     g_disabled = 0;
     static int lock_init;
-    if (!lock_init) InitializeCriticalSection(&g_lock), lock_init = 1;
+    if (!lock_init) InitializeCriticalSection(&g_lock), InitializeCriticalSection(&g_chl), lock_init = 1;
+    g_net_rows = !(r1_env("REV1_NETROWS", v, sizeof v) && v[0] == '0');   /* the product: the Mode row offers the network; REV1_NETROWS=0 = the old local screen */
+    r1_log("menu: network rows %s (the Mode row: Off / Split screen / Network: host / Network: join; the link is the coop session, enet port %d)", g_net_rows ? "ON" : "OFF (REV1_NETROWS=0)",
+           LK_DEFAULT_PORT);
+    {   /* the identity in the network: the Steam persona name (never the computer or Windows user name), this mod's version, no rejoin after the start (REV1_REJOIN=1: the lab's rejoin) */
+        int rejoin = r1_env("REV1_REJOIN", v, sizeof v) && v[0] == '1';
+        net1_set_identity(steam_persona_name, R1_VERSION, !rejoin);
+        net1_set_fallback(fallback_name);
+        g_quit_auto = !(r1_env("REV1_LOSTQUIT", v, sizeof v) && v[0] == '0');   /* (the way back to the title: quit_to_title, see there) */
+        r1_log("menu: network identity: mod %s, rejoin after the start %s, the guest returns to the title when the host is gone: %s", R1_VERSION, rejoin ? "allowed (REV1_REJOIN=1)" : "refused",
+               g_quit_auto ? "yes" : "no (REV1_LOSTQUIT=0)");
+    }
     if (r1_env("REV1_MENU", v, sizeof v) && v[0] == '0') {
         r1_log("menu: disabled by REV1_MENU=0");
         g_disabled = 1;
@@ -690,7 +1209,7 @@ void menu_cmd(const char *arg, char *out, int size)
         }
         l1_event e = {k, row};
         l1_event_in(g_lobby, &e);
-        if (l1_take_request(g_lobby) == L1R_CLOSE) close_lobby("closed by event");
+        lobby_request("closed by event");
         view_text(out, size);
     } else if (!strcmp(sub, "set")) {
         char *tok = strtok(rest, " ");
@@ -713,6 +1232,36 @@ void menu_cmd(const char *arg, char *out, int size)
     } else if (!strcmp(sub, "apply")) {
         menu_apply("console");
         snprintf(out, (size_t)size, "%s", g_last_apply);
+    } else if (!strcmp(sub, "quit")) {   /* lab: menu quit yes = the return to the title the guest makes when the host is gone (changes the game for real) */
+        if (strcmp(rest, "yes")) snprintf(out, (size_t)size, "menu quit yes: back to the title screen now (FUN_008B1660, the save module's return to aRevelationsTitle; REAL)");
+        else snprintf(out, (size_t)size, "return to the title %s", quit_to_title("console") ? "asked" : "NOT possible (see the log)");
+    } else if (!strcmp(sub, "strip")) {   /* lab: menu strip <kind 1..10> [name] [seconds]: show an in-game strip (screenshots of every kind and language) */
+        int kind = 0, secs = 15;
+        char nm[40] = "";
+        sscanf(rest, "%d %39s %d", &kind, nm, &secs);
+        if (kind <= L1G_NONE || kind >= L1G_COUNT) {
+            snprintf(out, (size_t)size, "menu strip <1..%d> [name] [seconds]: 1 wait load, 2 silent, 3 partner left, 4 partner lost, 5 host ended, 6 host lost, 7 removed, 8 guest hold, 9 host go, 10 Episode 1 gate, 11 Episode 1 done, 12 Episode 1 behind, 13 solo watch",
+                     L1G_COUNT - 1);
+            return;
+        }
+        strip_show(kind, nm, (unsigned)secs * 1000u);
+        l1_strip_in in = {kind, "", secs};
+        snprintf(in.name, sizeof in.name, "%s", nm);
+        char t[400];
+        l1_strip_text(&in, detect_lang(), t, sizeof t, NULL);
+        snprintf(out, (size_t)size, "strip %d for %d s: %s", kind, secs, t);
+    } else if (!strcmp(sub, "net")) {   /* the session watch: hold, strip, played, counters */
+        lk_t *k = net1_link_peek();
+        lk_info in;
+        memset(&in, 0, sizeof in);
+        if (k) lk_get_info(k, &in);
+        char an[64];
+        area_name(an, sizeof an);
+        snprintf(out, (size_t)size, "menu net: area %s, rows %d, hold %d, played %d, level %d, title age %u ms, strip %d (%s) until %+d ms, quit at %+d ms (auto %d), save area %08x, link: started %d host %d "
+                 "reason %d ended %d (%d) gone %d (%d) silent %d s (%u ms ago) wait %d s, ended by the title %u",
+                 an[0] ? an : "-", g_net_rows, g_hold, g_played, level_present(), menu_title_age_ms(), g_strip_kind, g_strip_name, g_strip_until ? (int)(g_strip_until - GetTickCount()) : 0,
+                 g_quit_at ? (int)(g_quit_at - GetTickCount()) : 0, g_quit_auto, save_area(), in.started, in.host, in.reason, in.ended, in.ended_reason, in.peer_gone, in.peer_gone_kind, in.silent_s,
+                 in.silent_age_ms, in.wait_s, g_stop_by_title);
     } else if (!strcmp(sub, "lang")) {
         int l = l1_lang_from_code(rest);
         if (l < 0) {
@@ -767,5 +1316,5 @@ void menu_cmd(const char *arg, char *out, int size)
             o += snprintf(out + o, (size_t)(size - o), "%02x ", b);
         }
     } else
-        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | idle <state> | hint x y w h | gm | items");
+        snprintf(out, (size_t)size, "menu status | open | close | view | ev <up|down|left|right|ok|back|click n> | set armed=1 role=lead|partner layout=side|top pads=normal|swapped | apply | lang <code> | type <n> | idle <state> | hint x y w h | gm | items | net | strip <kind> [name] [s] | quit yes");
 }

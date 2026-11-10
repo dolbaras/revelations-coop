@@ -87,6 +87,13 @@ void capture_set_source(int pad_slot, int kind);  /* CAP_NATIVE: the game polls 
  * ts_ms: sender clock, kept for the caller's jitter / delay statistics. Returns 1 when accepted. The record becomes the state of the synthetic XInput user <pad_slot>. */
 int capture_push_remote(int pad_slot, const r1_input_t *rec, unsigned seq, unsigned ts_ms);
 void capture_set_latch(int ms);                   /* a newly pressed remote button / trigger stays pressed at least ms (default 40): a tap shorter than one game poll is not lost */
+/* kbskip (default off): in keyboard mode the engine (FUN_0088CB10) wipes the raw data of BOTH pads and refills the current slot from the keyboard; with kbskip on the raw data of the kept
+ * pads (default pad slot 1 = the partner's) is put back after the call, so the partner's pad survives and the keyboard keeps working on the current slot (kbskip1.h) */
+void capture_set_kbskip(int on);
+int capture_kbskip_state(void);                   /* 0 off, 1 requested (not installed), 2 on, 3 removing */
+void capture_set_kbskip_pads(unsigned mask);      /* bit k = pad slot k is kept; 2 = pad slot 1 (default), 3 = both (= no keyboard on pad 0, lab only); 0 = back to the default */
+unsigned capture_kbskip_pads(void);
+void capture_kbskip_text(char *out, int size);    /* "keeps pad slot N ...; calls, keyboard-mode frames, kept, current slot was a kept pad, keyboard mode now" (the caller prints the state first) */
 void capture_set_remote_timeout(int ms);          /* 0 = off. A remote slot that got no record for ms is set neutral (no stuck buttons when the link stalls) */
 
 void capture_get_state(capture_state_t *st);
@@ -103,6 +110,8 @@ void capture_ext_request(int on);
 int capture_hooks_ready(void);
 void capture_own_scope(int slot);
 int capture_own_effective(void);
+/* 1 = this unit is a captured human driven by its pad slot right now (taken over and its control type / kind still 1); 0 = not captured, passive, or the game took him back */
+int capture_unit_human(unsigned unit);
 
 /* 1 while any hook of the module is installed or requested (plug-ins skip their own capture hooks then) */
 int capture_busy(void);

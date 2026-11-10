@@ -9,6 +9,27 @@
 #include <windows.h>
 
 #include "../native/overlay.h"
+#include "../native/gmdtext.h"
+
+/* ready1: with a 7th argument (the game's nativePC\msg folder) the stock texts of each language come from its own GMD banks, as menu.c load_stock does */
+static void load_stock_texts(const char *msgdir, int lang)
+{
+    for (int i = 0; i < L1K_COUNT; i++) l1_set_stock_text(i, NULL);
+    if (!msgdir) return;
+    for (int i = 0; i < L1K_COUNT; i++) {
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s_%s.gmd", msgdir, l1_stock_banks[i], l1_lang_codes[lang]);
+        gmd_t *g = gmd_load(path);
+        if (!g) continue;
+        const char *t = gmd_by_label(g, l1_stock_labels[i]);
+        if (t && t[0]) {
+            char clean[256];
+            l1_stock_clean(t, lang, clean, sizeof clean);
+            l1_set_stock_text(i, clean);
+        }
+        gmd_free(g);
+    }
+}
 
 void r1_log(const char *fmt, ...) { (void)fmt; }
 
@@ -62,9 +83,11 @@ int main(int argc, char **argv)
     }
     const char *only = argc > 5 && strcmp(argv[5], "all") ? argv[5] : NULL;
     if (argc > 6) overlay_set_game_archive(argv[6]);
+    const char *msgdir = argc > 7 ? argv[7] : NULL;
     static ov_scene sc;
     for (int lang = 0; lang < L1_LANGS; lang++) {
         if (only && strcmp(only, l1_lang_codes[lang])) continue;
+        load_stock_texts(msgdir, lang);
         for (int armed = 0; armed < 2; armed++) {
             l1_t *l = l1_new();
             l1_settings s = {armed, lang & 1, lang & 2 ? L1_LAYOUT_TOPBOTTOM : L1_LAYOUT_SIDE, 0};
@@ -88,6 +111,47 @@ int main(int argc, char **argv)
             l1_hint_text(&s, &env, sc.hint, sizeof sc.hint);
             if (overlay_render_to_bitmap(&sc, w, h, &px)) {
                 snprintf(path, sizeof path, "%s/hint_%s_%s.bmp", dir, l1_lang_codes[lang], armed ? "on" : "off");
+                write_bmp(path, px, w, h);
+            }
+            l1_free(l);
+        }
+        /* network rows (env.net_rows = 1): Host, waiting for the other player, with this PC's address; the status line and the packed rows */
+        {
+            l1_t *l = l1_new();
+            l1_settings ns = {1, L1_LEAD, L1_LAYOUT_SIDE, 0, L1N_HOST, ""};
+            l1_env nenv;
+            memset(&nenv, 0, sizeof nenv);
+            nenv.lang = lang, nenv.pads_connected = 2, nenv.net_rows = 1;
+            snprintf(nenv.own_addr, sizeof nenv.own_addr, "%s", "192.168.0.5:28410");
+            l1_open(l, &ns, &nenv);
+            l1_net_set_state(l, L1NS_WAIT);
+            memset(&sc, 0, sizeof sc);
+            sc.kind = OV_LOBBY, sc.lang = lang;
+            l1_view_get(l, &sc.v);
+            unsigned *px = NULL;
+            char path[512];
+            if (overlay_render_to_bitmap(&sc, w, h, &px)) {
+                snprintf(path, sizeof path, "%s/lobby_net_%s.bmp", dir, l1_lang_codes[lang]);
+                write_bmp(path, px, w, h);
+            }
+            /* ready1: the partner joined and is ready, this player not yet: each card shows its player's state (the game's "Ready" / "Waiting") */
+            l1_net_set_state(l, L1NS_CONNECTED);
+            l1_net_set_peer(l, "Bob");
+            l1_net_set_peer_ready(l, 1);
+            memset(&sc, 0, sizeof sc);
+            sc.kind = OV_LOBBY, sc.lang = lang;
+            l1_view_get(l, &sc.v);
+            if (overlay_render_to_bitmap(&sc, w, h, &px)) {
+                snprintf(path, sizeof path, "%s/lobby_ready_%s.bmp", dir, l1_lang_codes[lang]);
+                write_bmp(path, px, w, h);
+            }
+            /* ready1: the title menu's Campaign while the partner is ready and this player is not: the gate's strip */
+            memset(&sc, 0, sizeof sc);
+            sc.kind = OV_STRIP, sc.lang = lang;
+            l1_strip_in gi = {L1G_READY_GATE, "Bob", 0, L1GF_HOST | L1GF_CONNECTED | L1GF_PEER_READY};
+            l1_strip_text(&gi, lang, sc.hint, sizeof sc.hint, &sc.strip_kind);
+            if (overlay_render_to_bitmap(&sc, w, h, &px)) {
+                snprintf(path, sizeof path, "%s/strip_gate_%s.bmp", dir, l1_lang_codes[lang]);
                 write_bmp(path, px, w, h);
             }
             l1_free(l);

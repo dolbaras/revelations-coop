@@ -7,6 +7,7 @@
  *   readmem <hexaddr> [len<=256]   readstr <hexaddr> [max<=200]   dword <hexaddr>   dump <a> <len> <file>   classname <hexaddr>   dtiname <hexaddr>   objscan
  *   pad / padtap / padhold <xinput user> ...   key / keydown / keyup / wmkey   mouse / mbtn / cursor   dinput   pads   steam   post   log <text>
  *   game thread: L <cmd>, players [v], unit, mode, gamepad, camera, cap on|off|set|status, ctl, call, w32, w8, wf, rf, probelog, ltinfo
+ *   co-op link (net1.c, game thread): net host [port] | join <ip[:port]> | status | stop | ready [0|1] | role lead|partner | set <k> <v> | start [force] | auto on|off | load [area] | done
  * Client: tools/r1console.py
  */
 #include <winsock2.h>
@@ -134,7 +135,7 @@ static void run(const char *cmd, char *out, int size)
         snprintf(out, size,
                  "ping version base stub frames window shot quit iat threads stacks mainstack readmem <a> [n] readstr <a> [n] dword <a> dump <a> <len> <file> classname <a> dtiname <a> "
                  "objscan <filter|-> <lo> <hi> <file> | pad/padtap/padhold <user> key/keydown/keyup/wmkey mouse mbtn cursor dinput pads steam post log <t> | game thread: L <cmd> "
-                 "players [v] units [filter] unit <jill|parker|hex> mode gamepad camera ctl call w32 w8 wf rf probelog ltinfo");
+                 "players [v] units [filter] unit <jill|parker|hex> mode gamepad camera ctl call w32 w8 wf rf probelog ltinfo net <host|join|status|stop|...>");
     } else if (!strcmp(name, "base")) {
         BYTE *b = (BYTE *)GetModuleHandleA(NULL);
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(b + ((IMAGE_DOS_HEADER *)b)->e_lfanew);
@@ -203,6 +204,14 @@ static void run(const char *cmd, char *out, int size)
             g.bLeftTrigger = (BYTE)v[4], g.bRightTrigger = (BYTE)v[5];
             testmode_pad_hold(slot, &g, ms);
             snprintf(out, size, "pad %d: buttons %04x for %d ms", slot, g.wButtons, ms);
+        }
+    } else if (!strcmp(name, "padwag")) {   /* LAB padwag <user> <ms> [period ms=120] [amplitude=30000]: the left stick swings left / right in-process (a QTE waggle) */
+        int slot = -1, ms = 2000, per = 120, amp = 30000;
+        if (sscanf(arg, "%d %d %d %d", &slot, &ms, &per, &amp) < 2 || slot < 0 || slot > 3 || ms <= 0 || per <= 0) {
+            snprintf(out, size, "usage: padwag <user 0-3> <ms> [period ms] [amplitude]");
+        } else {
+            testmode_pad_wag(slot, amp, per, ms);
+            snprintf(out, size, "pad %d: stick waggle +-%d every %d ms for %d ms", slot, amp, per, ms);
         }
     } else if (!strcmp(name, "key") || !strcmp(name, "keydown") || !strcmp(name, "keyup")) {
         /* key <name|0xDIK> [ms=150]: press and release by itself; keydown <name>: hold; keyup <name>: release */

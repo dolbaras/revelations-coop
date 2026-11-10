@@ -975,6 +975,8 @@ static void draw_legend(const l1_view *v, float cy)
 
 static void draw_card(const l1_card *c, float x, float y, float w, float h, unsigned accent)
 {
+    float h0 = h;
+    if (c->ready_on) h += 44;   /* ready1: one more line, the player's ready state (a network room with the link up) */
     rect_px(x, y, w, h, 0xB4040E12);
     if (RT.sprites_ok) spr_frame(x, y, w, h, accent, 235);
     else frame_px(x, y, w, h, 1.6f, 0xFF000000 | ((accent >> 1) & 0x7F7F7F) | 0x101818);
@@ -982,7 +984,12 @@ static void draw_card(const l1_card *c, float x, float y, float w, float h, unsi
     disc(x + w * 0.5f, y, 5, 0xE0F4F8, 230);
     text(c->who, x + 22, y + 14, w - 44, 30, 20, 0, C_INFO | 0xFF000000, TA_LEFT_, 0.16f, TF_UP);
     text(c->chr, x + 22, y + 48, w - 44, 56, 40, 0, 0xFF000000 | accent, TA_LEFT_, 0.02f, 0);
-    text(c->pad, x + 22, y + h - 56, w - 44, 36, 24, 1, C_VAL | 0xFF000000, TA_LEFT_, 0.04f, 0);
+    text(c->pad, x + 22, y + h0 - 56, w - 44, 36, 24, 1, C_VAL | 0xFF000000, TA_LEFT_, 0.04f, 0);
+    if (c->ready_on) {   /* "Ready" in the OK colour with a dot, "Waiting" in the info colour */
+        unsigned col = c->ready_on == 2 ? status_rgb(L1S_OK) : C_INFO;
+        if (c->ready_on == 2) disc(x + 30, y + h0 + 6, 6, col, 235);
+        text(c->ready, x + (c->ready_on == 2 ? 44 : 22), y + h0 - 12, w - 66, 36, 26, 0, col | 0xFF000000, TA_LEFT_, 0.06f, TF_UP);
+    }
 }
 
 static void draw_lobby(const ov_scene *sc)
@@ -994,7 +1001,9 @@ static void draw_lobby(const ov_scene *sc)
     ornament_line(176, 160, 1760, 960);
     g_glow_strength = 0.5f;
     text(v->subtitle, 380, 198, 1160, 76, 27, 1, C_INFO | 0xFF000000, TA_CENTER_, 0.02f, TF_WRAP);
-    float ly = 292, step = v->nrows > 7 ? 54.0f : 60.0f, rh = 52, axis = 960;
+    /* more than 7 rows are packed tighter; the network status line is drawn only when it is not the status itself (lobby-must: the network modes put it into the status) */
+    int net = v->nrows > 7 || (v->net_status[0] && strcmp(v->net_status, v->status));
+    float ly = 292, step = net ? 40.0f : 60.0f, rh = net ? 36.0f : 52.0f, axis = 960;
     float lx = 400, lw = 1120;
     g_hit_n = 0;
     for (int i = 0; i < v->nrows; i++) {
@@ -1023,8 +1032,11 @@ static void draw_lobby(const ov_scene *sc)
     }
     ornament_line(738, 160, 1760, 960);
     text(v->status, 360, 752, 1200, 62, 30, 1, 0xFF000000 | status_rgb(v->status_kind), TA_CENTER_, 0.02f, TF_WRAP);
-    text(v->note, 210, 812, 1500, 62, 24, 1, 0xFF000000 | 0xC2B07C, TA_CENTER_, 0.02f, TF_WRAP);
-    text(v->note2, 210, 874, 1500, 62, 24, 1, 0xFF000000 | C_INFO, TA_CENTER_, 0.02f, TF_WRAP);
+    /* net: the notes are smaller so that both fit above the hint (the two-line notes overlapped at 24 px) */
+    if (net && v->net_status[0] && strcmp(v->net_status, v->status))   /* network status line: what the link is doing and what to do next (ready1: not a second copy of the status; a network room has 9 rows, so `net` alone drew the same line twice) */
+        text(v->net_status, 160, 790, 1600, 34, 24, 1, 0xFF000000 | status_rgb(v->net_status_kind), TA_CENTER_, 0.02f, TF_WRAP);
+    text(v->note, 210, net ? 822.0f : 812.0f, 1500, 62, net ? 22 : 24, 1, 0xFF000000 | 0xC2B07C, TA_CENTER_, 0.02f, TF_WRAP);
+    text(v->note2, 210, net ? 878.0f : 874.0f, 1500, 62, net ? 22 : 24, 1, 0xFF000000 | C_INFO, TA_CENTER_, 0.02f, TF_WRAP);
     text(v->hint, 110, 950, 1700, 32, 23, 1, 0xFF000000 | C_GREY, TA_CENTER_, 0.02f, 0);
     draw_legend(v, 1022);
     if (sc->cursor_on) {   /* a small pointer while the mouse is in use */
@@ -1055,6 +1067,26 @@ static void draw_hint(const ov_scene *sc)
     text(sc->hint, x + 24, y, w - 48, h, 28, 1, 0xFF000000 | C_TEXT, TA_CENTER_, 0.03f, 0);
 }
 
+/* the in-game strip (lobby-must): opaque like the hint, at the top edge (clear of the stock HUD at the bottom), up to two lines; amber for a warning */
+static const float k_sx = 260, k_sy = 26, k_sw = 1400, k_sh = 86;
+static void strip_rect(RECT *r)
+{
+    r->left = (LONG)(g_ox + k_sx * g_scale), r->top = (LONG)(g_oy + k_sy * g_scale), r->right = (LONG)(g_ox + (k_sx + k_sw) * g_scale + 0.5f), r->bottom = (LONG)(g_oy + (k_sy + k_sh) * g_scale + 0.5f);
+    if (r->left < 0) r->left = 0;
+    if (r->top < 0) r->top = 0;
+    if (r->right > G.w) r->right = G.w;
+    if (r->bottom > G.h) r->bottom = G.h;
+}
+static void draw_strip(const ov_scene *sc)
+{
+    int warn = sc->strip_kind == L1S_WARN;
+    rect_px(k_sx, k_sy, k_sw, k_sh, 0xFF071317);
+    frame_px(k_sx, k_sy, k_sw, k_sh, 1.6f, warn ? 0xFF8A6A2A : 0xFF2E6A72);
+    rect_px(k_sx, k_sy, 5, k_sh, 0xFF000000 | (warn ? 0xF0C46E : C_HI));
+    glow_ellipse(k_sx + k_sw * 0.5f, k_sy + k_sh * 0.5f, k_sw * 0.45f, k_sh * 0.9f, warn ? 0x5A4416 : 0x1E6872, 60);
+    text(sc->hint, k_sx + 28, k_sy + 6, k_sw - 56, k_sh - 12, 26, 1, 0xFF000000 | (warn ? 0xF0C46E : C_TEXT), TA_CENTER_, 0.02f, TF_WRAP);
+}
+
 static void compose(const ov_scene *sc)
 {
     g_cls = face_class(sc->lang);
@@ -1065,6 +1097,8 @@ static void compose(const ov_scene *sc)
         draw_lobby(sc);
     } else if (sc->kind == OV_HINT)
         draw_hint(sc);
+    else if (sc->kind == OV_STRIP)
+        draw_strip(sc);
 }
 
 static void set_metrics(int w, int h)
@@ -1178,11 +1212,13 @@ static void gdi_frame(IDirect3DDevice9 *dev, const ov_scene *sc, UINT W, UINT H,
         for (size_t i = 0; i < sizeof sc->v; i++) sig = (sig ^ b[i]) * 16777619u;
         sig = (sig ^ (unsigned)sc->cursor_on ^ ((unsigned)sc->cursor_x << 3) ^ ((unsigned)sc->cursor_y << 17)) * 16777619u;
         sig = (sig ^ (unsigned)G.bg_shots) * 16777619u;
-    } else if (sc->kind == OV_HINT)
+    } else if (sc->kind == OV_HINT || sc->kind == OV_STRIP)
         for (const char *p = sc->hint; *p; p++) sig = (sig ^ (unsigned char)*p) * 16777619u;
     sig = (sig ^ (unsigned)sc->kind) * 16777619u, sig = (sig ^ (unsigned)sc->lang) * 16777619u, sig = (sig ^ (unsigned)W) * 16777619u, sig = (sig ^ (unsigned)H) * 16777619u;
+    sig = (sig ^ (unsigned)sc->strip_kind) * 16777619u;
     RECT strip = {0, 0, G.w, G.h};
     if (sc->kind == OV_HINT) hint_strip_rect(&strip);
+    else if (sc->kind == OV_STRIP) strip_rect(&strip);
     if (!G.have_sig || sig != G.sig) {
         compose(sc);
         D3DLOCKED_RECT lr;

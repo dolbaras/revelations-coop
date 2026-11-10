@@ -1,0 +1,6 @@
+LIBRARY XINPUT1_3.dll
+EXPORTS
+    XInputGetState=fx_GetState@8 @2 NONAME
+    XInputSetState=fx_SetState@8 @3 NONAME
+    XInputGetCapabilities=fx_GetCapabilities@12 @4 NONAME
+    XInputEnable=fx_Enable@4 @5 NONAME

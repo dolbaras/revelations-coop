@@ -30,7 +30,9 @@ static unsigned rd32(unsigned a)
 static volatile LONG lt_ready;
 static volatile DWORD lt_tid;
 static volatile unsigned lt_pass;
-static lt_frame_cb cbs[8];
+/* (world-downed, wp4 live 09:15: with downed1 the 9th module, world_frame was the 10th and silently dropped by the old limit of 8 - the world hooks never came on) */
+#define LT_MAX_CBS 24
+static lt_frame_cb cbs[LT_MAX_CBS];
 static int n_cbs;
 
 static struct {
@@ -45,8 +47,10 @@ static HANDLE task_done;
 unsigned lt_frames(void) { return lt_pass; }
 void lt_add_frame_cb(lt_frame_cb cb)
 {
-    if (n_cbs < 8)
+    if (n_cbs < LT_MAX_CBS)
         cbs[n_cbs++] = cb;
+    else
+        r1_log("lt: FRAME CALLBACK TABLE FULL (%d): a module's per-pass work is NOT registered", LT_MAX_CBS);
 }
 
 static void lt_hook(void)

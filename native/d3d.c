@@ -84,6 +84,14 @@ static void save_frame(IDirect3DDevice9 *dev)
         goto done;
     }
     char path[MAX_PATH + 40];
+    /* (the folders are made by the first screenshot, not at load: a player who never takes one gets no rev1_coop\ in the game folder;
+     * the uninstaller removes them only while empty) */
+    snprintf(path, sizeof path, "%s", shot_dir);
+    char *up = strrchr(path, '\\');
+    if (up && up > path) {
+        *up = 0;
+        CreateDirectoryA(path, NULL);
+    }
     CreateDirectoryA(shot_dir, NULL);
     snprintf(path, sizeof path, "%s\\shot%04d_%03lu.bmp", shot_dir, ++shot_serial, (GetTickCount() - t0) / 1000);
     FILE *f = fopen(path, "wb");
@@ -262,7 +270,6 @@ void d3d_install(void)
         char *slash = strrchr(exe, '\\');
         if (n && slash && slash - exe + 24 < MAX_PATH) {
             strcpy(slash + 1, "rev1_coop");
-            CreateDirectoryA(exe, NULL);
             snprintf(shot_dir, sizeof shot_dir, "%s\\shots", exe);
         }
     }

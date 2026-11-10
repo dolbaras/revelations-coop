@@ -21,6 +21,8 @@
 
 #include "r1.h"
 #include "capture.h"
+#include "capkeep1.h"
+#include "kbskip1.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -112,6 +114,7 @@ typedef struct {
     int pad, role;
     int flip;   /* 1 = the character was taken over (fields changed, given back on release); 0 = passive: only wrapped with its pad slot (the other character is bound) */
     unsigned swaps;
+    int lost;   /* the game took him back (setKind != 1 allowed with `cap keep 0`, or the fields changed and were not written back): his blows are an AI's */
 } capu_t;
 static capu_t caps[MAXCAP];
 
@@ -129,6 +132,26 @@ static volatile int remote_timeout_ms;
 static unsigned captures_total;
 
 static hk_t hk_pd, hk_v8, hk_v9, hk_v10, hk_think, hk_own;
+/* uPlayer::setKind = vtable slot 0xF0 of the player classes, 0x6A7B40 (`56 57 8b 7c 24 0c`): 0x6CD4E0 writes the control type [[unit+0xE80]+0x38]+0x34 and the kind unit+0xE30,
+ * then 0x49BE80(unit+0xF6C) the upper-body mode [unit+0xFA4]+0x34 - exactly the three fields cap_take sets to 1. No direct caller (virtual only); the only other writer of
+ * unit+0xE30 is the constructor (0x6CC18C `mov [esi+0xe30], 2`). wp5 (2026-11-07): the host's puppet of the client read kind 2 ctl 2 five minutes after `capture: took`,
+ * the same unit: so the game called setKind(2) on it. The hook logs every such call with its caller and, while `keep_capture` (default), turns it into setKind(1). */
+static hk_t hk_kind;
+static void (__attribute__((thiscall)) *orig_setkind)(void *self, int v);
+static volatile int keep_capture = 1;
+static volatile LONG kind_calls, kind_kept, kind_allowed, field_fixes;
+static volatile unsigned kind_last_caller, kind_last_unit, kind_last_tick;
+static volatile int kind_last_v = -1;
+/* FUN_0088CB10 (sGamePad vf6, after the pads were polled): while sGamePad+0x874 ("keyboard mode") is non-zero it MEMSETS the raw pad data of BOTH pads (sGamePad+0x198 and +0x464, 0x2C bytes each:
+ * held, edges, sticks) and refills the CURRENT slot from the keyboard. Keyboard mode is set by any keyboard / mouse activity and left only when the current pad has held bits, so with it on the
+ * second pad never reaches PadData (live: Pad[1] raw 0 with the remote record accepted). Optional hook (kbskip_req, default off; see kbskip1.h): the function runs as stock, the raw block of the
+ * kept pads (kbskip_mask, default pad slot 1 = the partner's) is saved before it and put back after it = only that pad's wipe is undone; the keyboard still fills the current slot (menus, pause).
+ * The first version skipped the whole function: no keyboard input at all (duo7: title never left; duo6-9: Esc opened the pause menu, nothing closed it). */
+static hk_t hk_kb;
+static volatile int kbskip_req;
+static volatile unsigned kbskip_mask = KB1_DEFAULT_MASK;
+static kb1_stats kb_st;   /* written by the game's pad update only */
+static int raid_active(void);
 static void (TC *orig_padData)(void *self, unsigned slot);
 static void (FC *orig_v8)(unsigned), (FC *orig_v9)(unsigned), (FC *orig_v10)(unsigned), (FC *orig_think)(unsigned);
 static unsigned (FC *orig_own)(unsigned self);
@@ -360,6 +383,18 @@ static void TC hook_padData(void *self, unsigned slot)
     orig_padData(self, slot);
 }
 
+/* the keyboard-mode function with the kept pads (kbskip1.h). Under the swap lock like the builder, so the current slot (+0x870) the keyboard goes to is the one of the pass (0), not a slot a
+ * swapped section of another thread has set for a moment */
+static void FC __attribute__((force_align_arg_pointer)) hook_kb(unsigned self)
+{
+    unsigned mask = kbskip_req ? kbskip_mask : 0;
+    int locked = mask ? lock_take() : 0;
+    /* the trampoline itself: hook_install writes it before the jump goes live (a pointer set after hook_install returned could still be NULL in the first call) */
+    kb1_call((kb1_fn)hk_kb.tramp, (uintptr_t)self, mask, &kb_st);
+    if (locked)
+        LeaveCriticalSection(&swap_cs);
+}
+
 /* own slot: the offline branch of FUN_00882D60 (~190 callers: doors, enemies, items, cutscenes, HUD, the engine's spawn of the human) answers our slot; no sCoopManager
  * field is written, so the Raid state of the game stays as it was */
 static unsigned FC hook_own(unsigned self)
@@ -373,6 +408,26 @@ static unsigned FC hook_own(unsigned self)
     if (own_on && !blocked)
         return own_slot;
     return orig_own(self);
+}
+
+static void __attribute__((thiscall)) hook_setkind(void *self, int v)
+{
+    unsigned unit = (unsigned)(uintptr_t)self, caller = (unsigned)(uintptr_t)__builtin_return_address(0);
+    capu_t *c = cap_find(unit);
+    int pass_v = v, d = ck_setkind(c && c->flip, keep_capture, v, &pass_v);
+    if (d != CK_PASS) {
+        kind_last_caller = caller, kind_last_unit = unit, kind_last_v = v, kind_last_tick = GetTickCount();
+        LONG n = InterlockedIncrement(d == CK_KEEP ? &kind_kept : &kind_allowed);
+        if (d == CK_LOST) c->lost = 1;
+        if (n <= 40)
+            r1_log("capture: the game sets kind %d on captured unit %08x (slot field %u), caller %08x: %s (#%ld)", v, unit, rd32(unit + 0xE2C), caller,
+                   d == CK_KEEP ? "KEPT 1, the capture stays" : "ALLOWED (cap keep 0), the capture is LOST", (long)n);
+        orig_setkind(self, pass_v);
+        return;
+    }
+    if (rd32(unit + 0xE2C) <= 1 && InterlockedIncrement(&kind_calls) <= 40)
+        r1_log("capture: setKind(%d) on unit %08x (slot field %u, kind %u, %s), caller %08x", v, unit, rd32(unit + 0xE2C), rd32(unit + 0xE30), c ? "captured" : "not captured", caller);
+    orig_setkind(self, v);
 }
 
 static int hooks_install(void)
@@ -395,12 +450,20 @@ static int hooks_install(void)
     orig_v10 = (void (FC *)(unsigned))hk_v10.tramp;
     orig_think = (void (FC *)(unsigned))hk_think.tramp;
     orig_own = (unsigned (FC *)(unsigned))hk_own.tramp;
+    {   /* optional: without it the capture works as before (only the game's setKind is not seen) */
+        static const unsigned char b_kind[] = {0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C};
+        if (hook_install(&hk_kind, 0x6A7B40u, b_kind, 6, (void *)hook_setkind))
+            orig_setkind = (void (__attribute__((thiscall)) *)(void *, int))hk_kind.tramp;
+        else
+            r1_log("capture: setKind hook NOT installed (bytes differ): a reset of a captured human is still caught by the per-pass field check");
+    }
     hooks_on = 1;
     return ok;
 }
 
 static void hooks_remove(void)
 {
+    hook_remove(&hk_kind);
     hook_remove(&hk_own);
     hook_remove(&hk_think);
     hook_remove(&hk_v10);
@@ -663,8 +726,39 @@ static void apply(void)
     }
 }
 
+void capture_set_kbskip(int on) { kbskip_req = on != 0; }
+int capture_kbskip_state(void) { return kbskip_req ? (hk_kb.on ? 2 : 1) : (hk_kb.on ? 3 : 0); }
+void capture_set_kbskip_pads(unsigned mask)
+{
+    mask &= 3u;
+    kbskip_mask = mask ? mask : KB1_DEFAULT_MASK;
+}
+unsigned capture_kbskip_pads(void) { return kbskip_mask; }
+
+void capture_kbskip_text(char *out, int size)
+{
+    snprintf(out, size, "keeps pad slot %s through the keyboard-mode wipe (the keyboard still fills the current slot); calls %u, in keyboard mode %u, kept %u, current slot was a kept pad %u "
+             "(last current %u), keyboard mode now %u",
+             kb1_mask_name(kbskip_mask), kb_st.calls, kb_st.kbcalls, kb_st.kept, kb_st.cur_hit, kb_st.last_cur, gp() ? rd32(gp() + KB1_MODE_OFF) : 0);
+}
+
+static void kbskip_apply(void)
+{
+    static const unsigned char b_kb[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8};
+    if (kbskip_req && !hk_kb.on && !raid_active()) {
+        if (hook_install(&hk_kb, KB1_FN, b_kb, 6, (void *)hook_kb)) {
+            r1_log("capture: kbskip hook on 0x88CB10: in keyboard mode the raw data of pad slot %s is kept, the keyboard still fills the current slot", kb1_mask_name(kbskip_mask));
+        } else
+            kbskip_req = 0;
+    } else if ((!kbskip_req || raid_active()) && hk_kb.on) {
+        hook_remove(&hk_kb);
+        r1_log("capture: keyboard-mode wipe hook removed");
+    }
+}
+
 void capture_frame(void)
 {
+    kbskip_apply();
     trk_frame();
     DWORD now = GetTickCount();
     int tmo = remote_timeout_ms;
@@ -717,6 +811,38 @@ void capture_frame(void)
             r1_log("capture: unit %08x is gone (freed by a load / area change); the role stays bound", caps[i].unit);
             caps[i].active = 0;
         }
+    /* a captured human whose control type / kind / upper mode is not 1 any more (a path that is not setKind, or setKind allowed): logged; written back while keep_capture */
+    for (int i = 0; i < MAXCAP; i++) {
+        capu_t *c = &caps[i];
+        if (!c->active || !c->flip) continue;
+        unsigned th = rd32(c->unit + 0xFA4), ct = rd32(c->ctl_obj + 0x34), kd = rd32(c->unit + 0xE30), tm = th ? rd32(th + 0x34) : 1;
+        int d = ck_fields(ct, kd, tm, th, c->think_obj, keep_capture);
+        if (d == CK_PASS) {
+            if (c->lost && keep_capture) c->lost = 0;
+            continue;
+        }
+        if (d == CK_LOST && c->lost) continue;   /* known (keep 0): logged once */
+        LONG n = InterlockedIncrement(&field_fixes);
+        if (d == CK_KEEP) {
+            wr32(c->ctl_obj + 0x34, 1), wr32(c->unit + 0xE30, 1);
+            if (th) wr32(th + 0x34, 1);
+            c->think_obj = th, c->lost = 0;
+        } else {
+            c->lost = 1;
+        }
+        if (n <= 20)
+            r1_log("capture: captured unit %08x (slot field %u) found with control type %u, kind %u, upper mode %u (think %08x, was %08x)%s", c->unit, rd32(c->unit + 0xE2C), ct, kd, tm, th,
+                   c->think_obj, keep_capture ? ": written back to 1" : ": left (cap keep 0), the capture is LOST");
+    }
+}
+
+/* the captured unit is driven by its pad slot right now (taken over, fields 1); 0 = not captured, passive, or the game took him back (lost) */
+int capture_unit_human(unsigned unit)
+{
+    for (int i = 0; i < MAXCAP; i++)
+        if (caps[i].active && caps[i].unit == unit)
+            return caps[i].flip && !caps[i].lost && rd32(caps[i].ctl_obj + 0x34) == 1 && rd32(unit + 0xE30) == 1;
+    return 0;
 }
 
 int capture_init(void)
@@ -847,6 +973,10 @@ void capture_status_text(char *out, int size)
                       st.src[s].ts, st.src[s].accepted, st.src[s].stale, st.src[s].timeouts, st.src[s].age_ms, st.src[s].script_playing ? ", script playing" : "", s, pd ? rd32(pd + 4) >> 24 & 0xFF : 0,
                       pd ? rd32(pd + 0x15C) : 0);
     }
+    if (o > 0 && o < size)
+        o += snprintf(out + o, size - o, "kbskip %d (state %d: 0 off, 1 wanted, 2 hooked, 3 unhooking): ", kbskip_req, capture_kbskip_state());
+    if (o > 0 && o < size)
+        capture_kbskip_text(out + o, size - o);
 }
 
 /* ---- console: cap <sub> ... ---- */
@@ -922,6 +1052,27 @@ void capture_cmd(const char *arg, char *out, int size)
     } else if (!strcmp(sub, "timeout")) {
         capture_set_remote_timeout(atoi(a));
         snprintf(out, size, "remote dead-man timeout %d ms (0 = off)", remote_timeout_ms);
+    } else if (!strcmp(sub, "kbskip")) {
+        /* kbskip 1|0 [1|0|both]: keep the raw data of a pad (default pad slot 1, the partner's) through the engine's keyboard-mode wipe (0x88CB10) without the puppet (lab: console keys turn
+         * keyboard mode on); the keyboard still fills the current slot. `both` also keeps pad 0 = no keyboard input on pad 0 (the old whole skip; lab only). No argument: status */
+        if (b[0]) {
+            unsigned m = !strcmp(b, "both") ? 3u : !strcmp(b, "0") ? 1u : !strcmp(b, "1") ? 2u : 0u;
+            if (!m) {
+                snprintf(out, size, "usage: cap kbskip 1|0 [kept pad slot 1 (default) | 0 | both]");
+                return;
+            }
+            capture_set_kbskip_pads(m);
+        }
+        if (a[0])
+            capture_set_kbskip(atoi(a));
+        int o = snprintf(out, size, "kbskip %d requested (state %d: 0 off, 1 wanted, 2 hooked, 3 unhooking); ", kbskip_req, capture_kbskip_state());
+        if (o > 0 && o < size)
+            capture_kbskip_text(out + o, size - o);
+    } else if (!strcmp(sub, "keep")) {   /* keep 0|1: a setKind(!= 1) on a captured human is turned into 1 (default) / allowed (lab A/B) */
+        if (a[0]) keep_capture = atoi(a) != 0;
+        snprintf(out, size, "keep capture %d (setKind hook %s): setKind calls on slots 0/1 seen %ld, kept %ld, allowed %ld, field fixes %ld; last reset: unit %08x kind %d caller %08x at %lu (now %lu)",
+                 keep_capture, hk_kind.on ? "in" : "not in", (long)kind_calls, (long)kind_kept, (long)kind_allowed, (long)field_fixes, kind_last_unit, kind_last_v, kind_last_caller,
+                 (unsigned long)kind_last_tick, (unsigned long)GetTickCount());
     } else if (!strcmp(sub, "raid")) {   /* raid 1|0: pretend a Raid scene (lab proof of the guard: it only REMOVES our hooks) */
         force_raid = atoi(a);
         apply();
