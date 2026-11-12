@@ -175,13 +175,19 @@ GitHub never reports a pre-release as "latest", so a pre-release is never instal
 | Pre-release 1 | `0.0.1`, tag `v0.0.1`, GitHub "pre-release" | published 2026-11-05 |
 | Pre-release 2 | `0.0.2`, tag `v0.0.2`, GitHub "pre-release" | published 2026-11-06 (`R1_VERSION` was `0.0.2-pre2`) |
 | First full release | `0.1.0` (tag `v0.1.0`, NOT a pre-release) | higher than any `0.0.N`, so every tester who installed a pre-release is updated by the shortcut at the next start |
-| Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release; prepared on branch allep1, NOT published) | network co-op over all episodes (no setting); `R1_VERSION` in `native/r1.h` is `0.2.0` |
+| Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release, Latest) | published 2026-11-12 from public commit `58a0d02`: network co-op over all episodes (no setting), give to partner, the Genesis for the second player, HUNK in 2-2, the split aim fix; `R1_VERSION` in `native/r1.h` is `0.2.0` |
 
 Rules: never publish a full release with a version below `0.1.0`; never mark `v0.1.0` or higher as a pre-release while it should reach players; no "RC" wording anywhere (title,
 notes, tag message, README). Both players need the same package: the network hello carries the mod version (`R1_VERSION`) and refuses another one with a reason; a release that
 changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
 
-## 0.2.0 (all episodes; prepared, not published)
+## 0.2.0 (all episodes; published 2026-11-12)
+
+- **Published:** tag `v0.2.0` (full release, Latest) on public commit `58a0d02`, 2026-11-12. Assets: `revelations-coop-0.2.0.zip` sha256 `4f11e223...`, `revelations-coop-setup-0.2.0.exe` sha256 `a29132ba...`, `dinput8.dll` in the zip `95653832...` (the DLL of the final regression).
+- **Checks after the publication (2026-11-12):**
+  - The release is neither a draft nor a pre-release, and each asset's `digest` equals the local SHA-256. `releases/latest` = `v0.2.0`.
+  - `tests\test_installer.ps1 -OldZip work\dist-010-r17\revelations-coop-0.1.0.zip -Online`: 294 of 294.
+  - The real update through the real feed (no `-Feed`) on a stand-in folder: the published 0.1.0 launcher logged `installed 0.1.0, latest v0.2.0`, `downloaded 728322 bytes`, `checksum ok 4F11E223...`, `installer exit 0`, and `version.txt` read 0.2.0. A second start installed nothing. The uninstall put the stand-in back byte for byte.
 
 - **Number:** `0.2.0` (the first release that changes what the network game does between the sections; 0.1.x would hide that). `R1_VERSION` = `0.2.0`; the package, tag and `coop\version.txt` all say `0.2.0`.
 - **How it is built in:** `native/r1.h` `#define R1_VERSION "0.2.0"`; `package.ps1 -Version 0.2.0` refuses a DLL that does not hold the string `0.2.0` (the DLL holds it as a string of its own between two zero bytes), `README-COOP.txt` and `coop\version.txt` get it from `-Version`.
