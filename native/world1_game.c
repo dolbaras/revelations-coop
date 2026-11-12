@@ -44,6 +44,7 @@
 #include "downed1.h"
 #include "sf1.h"
 #include "rolebarrier1.h"   /* continue1: rolebarrier_shielded */
+#include "hunk1.h"          /* allep1: Hunk (class, start gun) */
 #include "ach1_game.h"   /* rel010 B10: the client's own kill also counts for its achievements */
 
 #define TC __attribute__((thiscall))
@@ -1442,6 +1443,7 @@ static void world_frame(void)
         }
     }
     if (last_want || bound || solo_w.state != S1_W_IDLE || solo_w.back_pending) solo_pass();   /* ep1-solo: the story's switched-off humans and the watch */
+    hunk_local_pass(GetTickCount());   /* hunk1.h: the start gun and the fall-out rescue of a Hunk human, session or not */
     LeaveCriticalSection(&mcs);
 }
 
@@ -1522,6 +1524,202 @@ static void world_list(char *out, int size)
     }
 }
 
+/* LAB (allep step 4, the Hunk study): `world plist` = the placed PLAYER units (sArrange+0x6C, class 0x8001xxxx): how the campaign makes the humans and what the Hunk class looks like. Read only. */
+static void world_plist(char *out, int size)
+{
+    uint32_t sa = sarrange();
+    int o = 0;
+    if (!sa) {
+        snprintf(out, (size_t)size, "world plist: sArrange is not there (no level)");
+        return;
+    }
+    unsigned n = wh_list_count(&MEM, sa, 0x6Cu);
+    o += snprintf(out + o, (size_t)(size - o), "world plist: %u placed player entries (sArrange+0x6C); class ids (DTI+0x1C): Hunk %08x Jill %08x Parker %08x ParkerLight %08x Chris %08x", n, rd32(0x117B630u), rd32(0x117B5F0u),
+                  rd32(0x117B6D0u), rd32(0x117B710u), rd32(0x117B830u));
+    for (unsigned i = 0; i < n && o < size - 200; i++) {
+        wh_entry e;
+        unsigned b = 0, idx = 0;
+        uint32_t rc = 0;
+        if (!wh_list_at(&MEM, sa, 0x6Cu, i, &e)) continue;
+        int has = wh_entry_key(&MEM, sa, &e, &b, &idx);
+        if (has) wh_char_class(&MEM, sa, b, idx, &rc);
+        o += snprintf(out + o, (size_t)(size - o), "\n  entry %08x %s%u/%u unit %08x unit class %08x record class %08x E2C %u kind %u hp %.0f spent %u keys %08x %08x %08x %08x", (unsigned)e.entry, has ? "" : "?", b, idx, (unsigned)e.unit,
+                      (unsigned)wh_unit_class(&MEM, e.unit), (unsigned)rc, e.unit ? rd32(e.unit + WH_U_SERIAL) : 0, e.unit ? rd32(e.unit + WH_U_KIND) : 0, e.unit ? rdf(e.unit + WH_U_HP) : 0.0f, rd8(e.entry + WH_ENTRY_SPENT),
+                      (unsigned)e.k[0], (unsigned)e.k[1], (unsigned)e.k[2], (unsigned)e.k[3]);
+    }
+}
+
+/* LAB (allep step 4, the Hunk study): `world pparam [id]` = the arrangement parameter object of a player slot (FUN_0044F410(sArrange, id): looked up by the +0xC id in the six lists, the one
+ * uNpc_vf58 / uPlayer read for its class and tempParam): class name + the first 0xC0 bytes as dwords. Read only (the lookup is a pure list walk; it is called through its own address). */
+typedef void *(TC *pparam_fn)(void *self, int id);
+static void world_pparam(const char *a2, char *out, int size)
+{
+    uint32_t sa = sarrange();
+    int o = 0;
+    if (!sa) {
+        snprintf(out, (size_t)size, "world pparam: sArrange is not there (no level)");
+        return;
+    }
+    for (int id = a2[0] ? atoi(a2) : 0; id <= (a2[0] ? atoi(a2) : 1); id++) {
+        uint32_t p = (uint32_t)(uintptr_t)((pparam_fn)(uintptr_t)0x44F410u)((void *)(uintptr_t)sa, id);
+        char nm[96] = "";
+        if (p) classes_object_name(p, nm, sizeof nm);
+        o += snprintf(out + o, (size_t)(size - o), "%sid %d -> %08x %s", id ? "\n" : "", id, (unsigned)p, nm);
+        for (unsigned i = 0; p && i < 0x30 && o < size - 120; i++)
+            o += snprintf(out + o, (size_t)(size - o), "%s%s%08x", (i % 8) ? " " : "\n  +", (i % 8) ? "" : "", (unsigned)rd32(p + i * 4));
+    }
+}
+
+/* LAB (allep step 4, the Hunk study): `world pcls [slot hex]` = the two player class ids the NEXT level start builds its humans from: [[0x116A340] + 0x24 + 4*slot] (cSystem_20, defaults Jill 0x80011010 / Parker 0x80011020;
+ * FUN_0042B720 preloads their resources, FUN_0042A730 creates the units, a slot-1 id 0x80000000 = a one-character section). With arguments it WRITES the id (0x8001xxxx or 0x80000000 only):
+ * `world pcls 1 800110b0` then an in-level restart makes slot 1 a Hunk (class 0x800110B0, resource pl10b0). Nothing happens until the next level start. Never used by the product. */
+static DWORD WINAPI pcls_thread(LPVOID unused)
+{
+    (void)unused;
+    for (;;) {   /* LAB: every 3 ms, independent of any pass (a van run without a session has no world pass): the persisted ids are written back */
+        uint32_t obj = rd32(0x116A340u);
+        for (unsigned s = 0; s < 2; s++) {
+            uint32_t v = pcls_persist[s];
+            if (v && obj && rd32(obj + 0x24 + 4 * s) != v) {
+                wr(obj + 0x24 + 4 * s, &v, 4);
+                wlog("pcls persist: the player class of slot %u was set to %08x again (the engine had written something else)", s, (unsigned)v);
+            }
+        }
+        Sleep(3);
+    }
+    return 0;
+}
+
+static volatile LONG pcls_started;
+
+/* the persisted class id of a player slot (hunk1.h; the lab command `world pcls persist` too): id 0 = stop writing, slot 1 = Hunk for the solo part. Any thread. The writer thread starts
+ * with the first non-zero id; it only writes when the engine's value differs, so a clear is just "id 0". */
+void world_player_class(unsigned slot, uint32_t id)
+{
+    if (slot > 1) return;
+    pcls_persist[slot] = id;
+    if (id && !InterlockedExchange(&pcls_started, 1)) CreateThread(NULL, 0, pcls_thread, NULL, 0, NULL);
+    wlog("pcls: the persisted player class of slot %u is %08x now (0 = off)", slot, (unsigned)id);
+}
+
+static void world_pcls(const char *arg, const char *a2, const char *a3, char *out, int size)
+{
+    uint32_t obj = rd32(0x116A340u);
+    if (!obj) {
+        snprintf(out, (size_t)size, "world pcls: the player setup object [0x116A340] is not there");
+        return;
+    }
+    if (!strcmp(a2, "persist")) {   /* world pcls persist <slot> <hexid> | persist off */
+        char a4[24] = "";
+        unsigned slot = (unsigned)atoi(a3);
+        sscanf(arg, "%*s %*s %*s %23s", a4);   /* arg = "pcls persist <slot> <hexid>" */
+        if (!strcmp(a3, "off")) world_player_class(0, 0), world_player_class(1, 0);
+        else if (slot < 2 && a4[0]) world_player_class(slot, (uint32_t)strtoul(a4, NULL, 16));
+        snprintf(out, (size_t)size, "world pcls persist: slot 0 %08x, slot 1 %08x (0 = off); `world pcls` shows the object", (unsigned)pcls_persist[0], (unsigned)pcls_persist[1]);
+        return;
+    }
+    if (a2[0] && a3[0]) {
+        unsigned slot = (unsigned)atoi(a2);
+        uint32_t v = (uint32_t)strtoul(a3, NULL, 16);
+        if (slot > 1 || !(v == 0x80000000u || (v & 0xFFFF0000u) == 0x80010000u)) {
+            snprintf(out, (size_t)size, "world pcls: slot 0 or 1 and an id 0x8001xxxx / 0x80000000 please");
+            return;
+        }
+        wr(obj + 0x24 + 4 * slot, &v, 4);
+        wlog("LAB pcls: player class of slot %u set to %08x (read back %08x)", slot, (unsigned)v, (unsigned)rd32(obj + 0x24 + 4 * slot));
+    }
+    snprintf(out, (size_t)size, "world pcls: object %08x: slot 0 class %08x, slot 1 class %08x (Jill 80011010, Parker 80011020, ParkerLight 80011420, Hunk 800110b0; slot 1 = 80000000 means a one-character section)", (unsigned)obj,
+             (unsigned)rd32(obj + 0x24), (unsigned)rd32(obj + 0x28));
+}
+
+/* LAB ONLY (allep step 4, "hp 0 about 5 s after an unscripted placement"): `world hpbp [off]` = a hardware WRITE breakpoint (DR0 / DR1, 4 bytes) on the hp (unit+0xE38) of the humans of slot 0 / 1 on every thread; a vectored
+ * handler logs the code address that wrote it (EIP after the store) with the stack words that look like code addresses, the old and the new value. Finds the writer of a hp drain that is not Damage(). Re-arm after every level
+ * start (new units). Never used by the product. */
+static volatile uint32_t hpbp_addr[2];
+static volatile float hpbp_last[2];
+static volatile LONG hpbp_hits, hpbp_installed;
+static volatile int hpbp_keep;   /* `world hpbp keep`: a write that takes the hp to <= 0 is put back to the unit's max hp at once (lab god mode that also names the writer) */
+static LONG CALLBACK hpbp_veh(EXCEPTION_POINTERS *ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(ep->ContextRecord->Dr6 & 3u)) return EXCEPTION_CONTINUE_SEARCH;
+    for (int i = 0; i < 2; i++) {
+        if (!(ep->ContextRecord->Dr6 & (1u << i)) || !hpbp_addr[i]) continue;
+        float nv = rdf(hpbp_addr[i]);
+        if (nv != hpbp_last[i] && InterlockedIncrement(&hpbp_hits) <= 400) {   /* only the writes that CHANGE the value (SetHp runs every frame with the same number) */
+            uint32_t *sp = (uint32_t *)(uintptr_t)ep->ContextRecord->Esp;
+            char st[420] = "";
+            int o = 0, n = 0;
+            for (int k = 0; k < 120 && n < 16 && o < 380; k++) {
+                uint32_t w = 0;
+                if (!ReadProcessMemory(GetCurrentProcess(), sp + k, &w, 4, NULL)) break;
+                if (w >= 0x401000u && w < 0x1200000u) o += snprintf(st + o, sizeof st - (size_t)o, " %08x", (unsigned)w), n++;
+            }
+            wlog("hpbp: the hp of slot %d (unit hp at %08x) was written: %.1f -> %.1f by code at %08x, thread %lu, code words on the stack:%s", i, (unsigned)hpbp_addr[i], hpbp_last[i], nv, (unsigned)ep->ContextRecord->Eip,
+                 (unsigned long)GetCurrentThreadId(), st);
+        }
+        if (hpbp_keep && nv <= 0.0f) {
+            uint32_t unit = hpbp_addr[i] - WH_U_HP;
+            float mx = rdf(unit + 0xE40u);
+            if (!(mx > 0.0f)) mx = 1000.0f;
+            *(volatile float *)(uintptr_t)hpbp_addr[i] = mx;
+            wlog("hpbp keep: the hp of slot %d was set back to %.0f (the writer above took it to %.1f)", i, mx, nv);
+            nv = mx;
+        }
+        hpbp_last[i] = nv;
+    }
+    ep->ContextRecord->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+#include <tlhelp32.h>
+static int hpbp_arm(int on, char *out, int size)
+{
+    uint32_t unit[2] = {0, 0};
+    for (unsigned s = 0; s < 2; s++) wh_player_by_slot(&MEM, s, &unit[s]);
+    if (!hpbp_installed) hpbp_installed = AddVectoredExceptionHandler(1, hpbp_veh) != NULL;
+    for (int i = 0; i < 2; i++) {
+        hpbp_addr[i] = on && unit[i] ? unit[i] + WH_U_HP : 0;
+        hpbp_last[i] = hpbp_addr[i] ? rdf(hpbp_addr[i]) : 0.0f;
+    }
+    int threads = 0, failed = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te;
+        te.dwSize = sizeof te;
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+            HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+            if (!th) { failed++; continue; }
+            if (SuspendThread(th) != (DWORD)-1) {
+                CONTEXT c;
+                memset(&c, 0, sizeof c);
+                c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                if (GetThreadContext(th, &c)) {
+                    c.Dr0 = hpbp_addr[0], c.Dr1 = hpbp_addr[1], c.Dr6 = 0;
+                    c.Dr7 = (hpbp_addr[0] ? 0xD0001u : 0u) | (hpbp_addr[1] ? 0xD00004u : 0u);
+                    if (SetThreadContext(th, &c)) threads++; else failed++;
+                } else failed++;
+                ResumeThread(th);
+            } else failed++;
+            CloseHandle(th);
+        }
+        CloseHandle(snap);
+    }
+    /* this thread (the console / logic caller) too */
+    {
+        CONTEXT c;
+        memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(GetCurrentThread(), &c)) {
+            c.Dr0 = hpbp_addr[0], c.Dr1 = hpbp_addr[1], c.Dr6 = 0;
+            c.Dr7 = (hpbp_addr[0] ? 0xD0001u : 0u) | (hpbp_addr[1] ? 0xD00004u : 0u);
+            if (SetThreadContext(GetCurrentThread(), &c)) threads++;
+        }
+    }
+    snprintf(out, (size_t)size, "world hpbp: %s; slot 0 hp at %08x (%.1f), slot 1 hp at %08x (%.1f); %d threads set, %d failed; hits so far %ld (logged: `hpbp:` lines)", on ? "ARMED" : "off", (unsigned)hpbp_addr[0],
+             hpbp_last[0], (unsigned)hpbp_addr[1], hpbp_last[1], threads, failed, (long)hpbp_hits);
+    return 1;
+}
+
 static void world_status(char *out, int size)
 {
     size_t o = 0;
@@ -1571,7 +1769,7 @@ static int set_switch(const char *name, const char *v, char *out, int size)
         {"credit", &f_credit, 1}, {"spawnfh", &f_spawnfh, 1}, {"pchit", &f_pchit, 1}, {"interp", &f_interp, 1}, {"doorlog", &f_doorlog, 1}, {"doors", &f_doors, 1}, {"itemspent", &f_itemspent, 1},
         {"vital", &f_vital, 1},   {"death87", &f_death87, 1}, {"despawn", &f_despawn, 2}, {"yawidx", &f_yawidx, 2}, {"revive", &f_revive, 1}, {"puppethits", &f_puppethits, 1},
         {"story", &f_story, 1},   {"localrun", &f_localrun, 1}, {"rearr", &f_rearr, 1}, {"ewatch", &f_ewatch, 1}, {"watchzone", &f_watchzone, 1}, {"watchstage", &f_watchstage, 1},
-        {"watchrep", &f_watchrep, 1}, {"rloc", &f_rloc, 1}, {"watchmap", &f_watchmap, 1}, {"zkeep", &f_zkeep, 1},
+        {"watchrep", &f_watchrep, 1}, {"rloc", &f_rloc, 1}, {"watchmap", &f_watchmap, 1}, {"zkeep", &f_zkeep, 1}, {"fallguard", &f_fallguard, 1}, {"fallres", &f_fallres, 1},
         {"hitx", &f_hitx, 1}, {"rdeath", &f_rdeath, 1}, {"deadguard", &f_deadguard, 1}, {"watchcam", &f_watchcam, 1}, {"watchlight", &f_watchlight, 1}, {"motion", &f_motion, 1}, {"bagsync", &f_bagsync, 1},
         {"bagdlc", &f_bagdlc, 1}, {"bagroom", &f_bagroom, 1},
     };
@@ -1633,6 +1831,15 @@ void world_cmd(const char *arg, char *out, int size)
         world_status(out, size);
     } else if (!strcmp(sub, "list")) {
         world_list(out, size);
+    } else if (!strcmp(sub, "plist")) {   /* LAB (Hunk study) */
+        world_plist(out, size);
+    } else if (!strcmp(sub, "pparam")) {   /* LAB (Hunk study) */
+        world_pparam(a2, out, size);
+    } else if (!strcmp(sub, "hpbp")) {   /* LAB (hp 0 study) */
+        hpbp_keep = !strcmp(a2, "keep");
+        hpbp_arm(strcmp(a2, "off") != 0, out, size);
+    } else if (!strcmp(sub, "pcls")) {   /* LAB (Hunk study) */
+        world_pcls(arg, a2, a3, out, size);
     } else if (!strcmp(sub, "kill")) {   /* LAB: world kill <x> <z> <r> */
         world_kill(arg, out, size);
     } else if (!strcmp(sub, "items")) {

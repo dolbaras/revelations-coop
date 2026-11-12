@@ -32,24 +32,26 @@ enum l1_text {
     L1T_NET_ST_WAITREADY, L1T_NET_ST_PEERREADY, L1T_NET_ST_BOTH, L1T_NET_ST_ERROR,
     /* lobby-must (first release 0.1.0): one exclusive Mode row, the network game's texts, refusal reasons, in-game strips. Our wording, not read by native speakers. */
     L1T_MODE_SPLIT, L1T_MODE_HOST, L1T_MODE_JOIN, L1T_SUBTITLE_NET, L1T_YOU_PLAY, L1T_NET_PEER, L1T_JOINING_AS, L1T_NET_ST_CONNECTING_TO, L1T_NET_ST_MARK,
-    L1T_NET_ST_GO_HOST, L1T_NET_ST_GO_GUEST, L1T_NET_HOST_HINT, L1T_NET_EP_ONLY, L1T_NOTE_SAVE_NET,
+    L1T_NET_ST_GO_HOST, L1T_NET_ST_GO_GUEST, L1T_NET_HOST_HINT, L1T_NOTE_SAVE_NET,
     L1T_REF_PROTO, L1T_REF_MODVER, L1T_REF_MODVER_OLD, L1T_REF_BUILD, L1T_REF_STARTED, L1T_REF_NOANSWER,
-    L1T_WAIT_LOAD, L1T_PARTNER_SILENT, L1T_CONTINUES_ALONE, L1T_HOST_ENDED, L1T_TO_TITLE, L1T_KICK, L1T_EP_ENDED,
+    L1T_WAIT_LOAD, L1T_PARTNER_SILENT, L1T_CONTINUES_ALONE, L1T_HOST_ENDED, L1T_TO_TITLE, L1T_KICK,
     L1T_NAME_P1, L1T_NAME_P2,   /* the fallback names when Steam gives no persona */
     L1T_NET_WAY, L1T_WAY_IP, L1T_WAY_STEAM, L1T_STEAM_HINT, L1T_NET_INVITE, L1T_NET_STEAMID, L1T_NET_STEAMID_HINT,   /* round 2: the Steam way */
     /* ep1-flow: the Downed / revive row (E12) and the end of Episode 1 (E5) */
     L1T_DOWNED,       /* row label "Downed / revive" */
     L1T_SECS,         /* "%s s": a bleed-out time */
     L1T_NO_LIMIT,     /* "No time limit": a downed player waits for the partner as long as it takes */
-    L1T_EPISODE1,     /* "Episode 1" (the built-in when the game's own campaign text cannot be read) */
-    L1T_EP1_DONE,     /* "%s complete! The co-op session has ended; your game goes on alone." (%s = "Episode 1") */
-    L1T_EP1_BEHIND,   /* "%s: the host has reached the end. The co-op session has ended." (this PC did not reach the end) */
+    L1T_END_DONE,     /* "Campaign complete! The co-op session has ended; your game goes on alone." */
+    L1T_END_BEHIND,   /* "The host has reached the end of the campaign. The co-op session has ended." (this PC did not reach the end) */
     L1T_SOLO_WATCH,   /* ep1-solo E3: "For now %s goes on without you: you are watching until you meet again." (%s = the watched character) */
     L1T_NET_FRIEND,   /* rel010: the friend row of Join + Steam friends: "Friend hosting" */
     L1T_NET_NOFRIEND, /* rel010: its value while no Steam friend is in the game with a lobby */
     /* rev1 live 16 (the lead's decision: Continue keeps the roles of the co-op save; $1 = the game's Continue, $3 its New Game, the names the game's own) */
     L1T_CONT_ROLES,   /* the strip on both PCs when the host's Continue put the save's roles back: "$1 keeps the characters of the co-op save. Your character: %s." */
     L1T_NOTE_CONT_ROLES,   /* the host's room while its co-op save holds the roles: "$1 of the co-op save keeps its characters: you play %s, your partner %s. $3 ..." */
+    /* allep1 (2026-11-10): every paired section of every episode is shared; these are the parts that cannot be (our wording, not read by native speakers) */
+    L1T_SEC_BAD,       /* strip: this part is no section of the campaign (0-1, 0-2, 8-4 ...) and cannot be shared: the session has ended */
+    L1T_NET_SEC_NOTE,  /* the host's room: its save continues in a part that network co-op cannot share */
     L1T_COUNT
 };
 /* the game's own strings (Coop_<lang>.gmd, the Raid mode's online texts, in all 13 languages) that the network lobby quotes: menu.c loads them for the running language
@@ -209,13 +211,13 @@ enum {
     L1G_HOST_ENDED, L1G_HOST_LOST, L1G_REMOVED,   /* guest: the session is over, the game returns to the title */
     L1G_GUEST_HOLD,                  /* guest at the title after START: name = the host; the stock menu is held until the host's story start arrives */
     L1G_HOST_GO,                     /* host at the title after START: what to choose now */
-    L1G_EP_ENDED,                    /* this PC started a part outside Episode 1: the session was closed */
-    L1G_EP1_DONE,                    /* ep1-flow E5: Episode 1 is complete, the session has ended, this PC's game goes on alone (Episode 2) */
-    L1G_EP1_BEHIND,                  /* ep1-flow E5: the host completed Episode 1 while this PC was behind: the session has ended, back to the title */
     L1G_SOLO_WATCH,                  /* ep1-solo E3: the story switched this PC's character off (1-3): name = the watched character */
     L1G_READY_GATE,                  /* ready1: the title menu's Campaign was chosen while a network link runs and the session has not started: the story waits until both
                                       * players are ready (flags L1GF_*, name = the partner); says what is missing and where to mark ready */
     L1G_CONT_ROLES,                  /* rev1 live 16: the host's title Continue put the co-op save's roles back (both PCs): name = this PC's character now */
+    L1G_CAMP_DONE,                   /* allep1: the campaign is complete (the last section's end), the session has ended, this PC's game goes on alone */
+    L1G_CAMP_BEHIND,                 /* allep1: the host completed the campaign while this PC was behind: the session has ended, back to the title */
+    L1G_SEC_BAD,                     /* allep1: this PC started a part that is no section of the campaign (0-1, 0-2, 8-4 ...): the session was closed */
     L1G_COUNT
 };
 enum { L1GF_CONNECTED = 1, L1GF_READY = 2, L1GF_PEER_READY = 4, L1GF_HOST = 8 };   /* l1_strip_in.flags of L1G_READY_GATE */
@@ -275,7 +277,7 @@ void l1_hint_text(const l1_settings *s, const l1_env *env, char *out, size_t siz
 int l1_ini_load(const char *path, l1_settings *s, int *lang_override);
 int l1_ini_save(const char *path, const l1_settings *s, int lang_override);
 
-/* character names of the section: unit class name ("uPl< ParkerLight >") -> person name index; -1 unknown. Order: 0 Jill 1 Chris 2 Parker 3 Keith 4 Jessica 5 Quint 6 Raymond */
+/* character names of the section: unit class name ("uPl< ParkerLight >") -> person name index; -1 unknown. Order: 0 Jill 1 Chris 2 Parker 3 Keith 4 Jessica 5 Quint 6 Raymond 7 Hunk (hunk1.h, built-in name) */
 int l1_person_from_class(const char *cls);
 const char *l1_person_name(int person, int lang);                 /* name with the stock fallback (English) */
 void l1_set_stock_names(const char names[7][48]);                  /* names read from the game's own Coop_<lang>.gmd (menu.c); NULL entries / empty = use the built-in */

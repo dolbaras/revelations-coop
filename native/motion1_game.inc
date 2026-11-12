@@ -96,6 +96,16 @@ static void motion_rx(const uint8_t *b, unsigned len)
         if (++MOS.vf_refused <= 10) wlog("motion: replica %u/%u unit %08x: its slot 27 is %08x, not the verified 0x6CD200: left alone", m.key >> 8, m.key & 0xFF, (unsigned)unit, (unsigned)fn);
         return;
     }
+    /* allep1 (live allep1d, 5-1: the client crashed at exe+632726 in 0xA32480 = the motion start of this slot-27 function): it walks the layer record's per-bone array
+     * [unit + 0x2D0 + layer * 0x140 + 0x13C] for [unit + 0xD64] entries when [unit + 0x40C] is set; a replica whose model has no storage for that layer (not built yet / a layer this
+     * enemy does not own) has a NULL there and the write faults. The same reads the engine does: no storage, no call. */
+    {
+        uint32_t rec = unit + 0x2D0u + (uint32_t)m.layer * 0x140u;
+        if (rd32(unit + 0x40Cu) != 0 && rd32(unit + 0xD64u) > 0 && rd32(rec + 0x13Cu) == 0) {
+            if (++MOS.vf_refused <= 10) wlog("motion: replica %u/%u unit %08x layer %u: the layer's storage (%08x + 0x13C) is empty, the engine would write through NULL: left alone", m.key >> 8, m.key & 0xFF, (unsigned)unit, m.layer, (unsigned)rec);
+            return;
+        }
+    }
     uint32_t bb, sb;
     memcpy(&bb, &m.blend, 4), memcpy(&sb, &m.speed, 4);
     ops_enter();

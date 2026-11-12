@@ -42,8 +42,8 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 trap {
     $why = "Resident Evil Revelations Co-op installer: " + $_.Exception.Message
     try { Add-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) "re1-coop-install.log") -Value $why } catch { }
-    if ($Quiet) { Write-Host $why } else {
-        try { [System.Windows.Forms.MessageBox]::Show($why, $script:TITLE, "OK", "Error") | Out-Null } catch { }
+    if ($Quiet) { Write-Host $why } else {   # (i18n1, as Rev2 lang2: the box in the window's language, "Error: " + the message; the English line stays in the temp log)
+        try { [System.Windows.Forms.MessageBox]::Show((L "err") + $_.Exception.Message, $script:TITLE, "OK", "Error") | Out-Null } catch { }
     }
     exit 1
 }
@@ -779,9 +779,9 @@ $tbGame.BackColor = $C.panel; $tbGame.ForeColor = $C.text; $tbGame.BorderStyle =
 $pSetup.Controls.Add($tbGame)
 $btBrowse = New-Button $pSetup (L "browse") 512 45 120 $false
 $lbInfo = New-Label $pSetup "" 28 96 604 286 (Font 10.5) $C.text
-$btRemove = New-Button $pSetup (L "remove") 28 396 190 $false
-$btCancel = New-Button $pSetup (L "cancel") 372 396 120 $false
-$btGo = New-Button $pSetup (L "install") 502 396 130 $true
+$btRemove = New-Button $pSetup (L "remove") 28 396 220 $false   # (i18n: 220 / 160 px hold the longest labels: pt "Remover o mod cooperativo", pl "Zainstaluj ponownie")
+$btCancel = New-Button $pSetup (L "cancel") 342 396 120 $false
+$btGo = New-Button $pSetup (L "install") 472 396 160 $true
 
 # --- page 2: the steps and the progress
 $pWork = New-Object Windows.Forms.Panel

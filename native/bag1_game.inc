@@ -8,7 +8,7 @@
 #include "bag1.h"
 
 static volatile int f_bagsync = 1;
-/* rev1 live 15 (m15a3 LIVE, r48): the host loaded the three DLC gun archives (dlcrchive\...wp1070 / 10a0 / 10b0, ~2.1 MB, kept for the session) and took the
+/* rev1 live 15 (m15a3 LIVE, r48): the host loaded the three DLC gun archives (dlc\archive\...wp1070 / 10a0 / 10b0, ~2.1 MB, kept for the session) and took the
  * puppet's M92F away; 12 ms after its 1-1 -> 1-2 section change began it died: `MessageBoxA "Fatal error.": Failed open file. ...
 ativePC\model\chara\em * em1000\em1000.mod 3`, ExitProcess(1) (round 14 passed that change many times without either). Both stay LAB until a live run clears them (default 0):
  * `world set bagdlc 1` = load the DLC guns' archives for a puppet; `world set bagroom 1` = a full puppet bag gives up a gun (BG_REMOVE). With bagdlc 0 the
@@ -120,6 +120,129 @@ static void bg_fsm(uint32_t fn, uint32_t unit, uint32_t a)
     ops_enter();
     ((bg_fsm4_fn)(uintptr_t)fn)(NULL, param, NULL, (void *)(uintptr_t)unit);
     ops_leave();
+}
+
+/* hunk1.h (the product's weapons for a Hunk human): Hunk has no profile bag (his bag holds only uWpUnarmed). A Hunk unit that is THIS PC's human (kind 1) and carries no gun is given the start
+ * gun the stock way (the archive first, then the stock AddWeapon and ChangeEquipSlot FSM actions on the unit: the proven puppet route above, a weapon object of its own, nothing shared between
+ * bags, so a reload / level teardown frees it like any other gun; packcopy's shared objects are NOT used). The puppet of a Hunk on the other PC follows by the bag sync. At most 6 tries per unit. */
+static uint32_t hk_bag_unit, hk_bag_ms;
+static unsigned hk_bag_tries;
+static void hunk_bag_pass(uint32_t me, uint32_t now)
+{
+    if (!me || rd32(me + WH_U_KIND) != 1 || wh_unit_class(&MEM, me) != HK_CLASS_HUNK) return;
+    if (me != hk_bag_unit) hk_bag_unit = me, hk_bag_tries = 0, hk_bag_ms = 0;
+    uint32_t b[BG_SLOTS];
+    int c = -1;
+    if (!bg_read(me, b, &c) || bg_find(b, HK_START_GUN) >= 0 || b[0] || b[1] || b[2]) return;   /* has a gun (own or given) */
+    if (hk_bag_tries >= 6 || (int32_t)(now - hk_bag_ms) < 1500) return;
+    hk_bag_ms = now, hk_bag_tries++;
+    if (!bg_fsm_ok(BG_ADDWEAPON) || !bg_fsm_ok(BG_EQUIPSLOT)) {
+        wlog("hunk: the stock AddWeapon / ChangeEquipSlot bytes differ: Hunk gets no gun");
+        return;
+    }
+    if (!bg_load_archive(HK_START_GUN)) {
+        wlog("hunk: the archive of the start gun %08x did not load: no gun", (unsigned)HK_START_GUN);
+        return;
+    }
+    bg_fsm(BG_ADDWEAPON, me, HK_START_GUN);
+    uint32_t after[BG_SLOTS];
+    int ac = -1;
+    bg_read(me, after, &ac);
+    int idx = bg_find(after, HK_START_GUN);
+    if (idx >= 0) bg_fsm(BG_EQUIPSLOT, me, (uint32_t)idx);
+    wlog("hunk: start gun %08x for Hunk's human (unit %08x, try %u): %s (bag index %d)", (unsigned)HK_START_GUN, (unsigned)me, hk_bag_tries, idx >= 0 ? "added and equipped" : "NOT added", idx);
+}
+
+/* hunk1.h, every frame while the Hunk option is in force (the persisted class of slot 1 is Hunk's), in a network session AND in a local split game (no model needed): every Hunk human of THIS PC
+ * (kind 1: the own human of the guest, or the second pad's human of a split game) gets (1) the start gun if he has none, (2) the fall-out rescue of fallres1.h: the solo part 16-2 has no start record for
+ * slot 1, so he appears where there is no floor; without ground for 1.5 s he is put next to the partner before the engine's 5 s fall-out kills him. The puppet of a Hunk on the other PC does neither. */
+/* The shot of a Hunk human crashed the guest (allep hk1, 18:54:57, exe+2B6B27): the upper-body code asks the unit's motion parameter table (FUN_004A3430: byte table [unit+0x2B8] indexed by a parameter id,
+ * records of 0xA0 bytes from [unit+0x2B4]; 0xFF = no record -> NULL) for id [0x1136E44] and reads a float at +0x44 of the result. Hunk's table (a Raid-mode character: his motion list has not every campaign
+ * parameter) has 0xFF there. Every missing id of a Hunk unit is pointed at the unit's first valid record, once per unit: plausible values instead of a null read (the table is logged). */
+static uint32_t hk_mt_unit[2];
+static void hunk_motion_fix(unsigned s, uint32_t u)
+{
+    if (hk_mt_unit[s] == u) return;
+    hk_mt_unit[s] = u;
+    uint32_t tbl = rd32(u + 0x2B8), rec = rd32(u + 0x2B4);
+    if (tbl < 0x10000 || rec < 0x10000) {
+        wlog("hunk: unit %08x: the motion parameter table [+0x2B8] = %08x, records [+0x2B4] = %08x are not usable: not fixed", (unsigned)u, (unsigned)tbl, (unsigned)rec);
+        return;
+    }
+    int first = -1;
+    unsigned valid = 0, missing = 0;
+    char line[300];
+    int o = 0;
+    for (unsigned i = 0; i < 256; i++) {
+        unsigned b = rd8(tbl + i);
+        if (b != 0xFF) {
+            valid++;
+            if (first < 0) first = (int)b;
+            if (o < (int)sizeof line - 12) o += snprintf(line + o, sizeof line - (size_t)o, "%u:%u ", i, b);
+        } else missing++;
+    }
+    wlog("hunk: unit %08x: motion table %08x records %08x: %u ids valid (id:record) %s| %u missing (0xFF)", (unsigned)u, (unsigned)tbl, (unsigned)rec, valid, line, missing);
+    if (first < 0) return;
+    unsigned fixed = 0;
+    for (unsigned i = 0; i < 256; i++)
+        if (rd8(tbl + i) == 0xFF) wr8(tbl + i, (uint8_t)first), fixed++;
+    wlog("hunk: unit %08x: %u missing motion parameter ids now point at record %d (no null record for the upper-body code)", (unsigned)u, fixed, first);
+}
+
+static frs_t FRSH[2];
+/* lab T3 2026-11-12 + REA: 2-2's script (22_04_event_s103_ep, nodes LockParker / P_lock) runs FsmLockPlayer mIsLock=2 mIsLockPartner=1. Its exec FUN_0074FBD0 takes "the partner"
+ * FUN_0041BC10 (the human that is NOT this PC's own one) and calls FUN_006B3B80 on it: unit+0xE1C |= 4, unit+0xF44 |= 8, its lower state to 0 (Upper::FullMoveWaitState, no
+ * walk, no aim). In a network game the guest's Hunk is that PC's own human, the lock lands on the host's puppet there; in an offline split game the second human IS the partner
+ * and stood frozen. The split's second human (Hunk) gets the stock unlock of the same action, FUN_006AE390 (mIsLockPartner=0: clears the two bits and puts the lower state
+ * back), whenever the lock is on during play. */
+#define HK_UNLOCK_FN 0x6AE390u
+static void hunk_split_unlock(unsigned s, uint32_t u, uint32_t now)
+{
+    static const uint8_t pro[10] = {0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x9E, 0x1C, 0x0E, 0x00, 0x00};
+    static int ok = -1;
+    static uint32_t last;
+    static unsigned n;
+    if (net1_session_active() || (int)s == capture_own_effective() || !(rd32(u + 0xE1C) & 4u)) return;
+    if ((int32_t)(now - last) < 500) return;
+    last = now;
+    if (ok < 0) {
+        uint8_t cur[10];
+        ok = r1_safe_read((const void *)(uintptr_t)HK_UNLOCK_FN, cur, sizeof cur) && !memcmp(cur, pro, sizeof cur);
+        if (!ok) wlog("hunk: FUN_006AE390 differs from the supported build: the split's second human stays locked as the story's partner");
+    }
+    if (!ok) return;
+    uint32_t e0 = rd32(u + 0xE1C), f0 = rd32(u + 0xF44);
+    ((uint32_t (__attribute__((thiscall)) *)(void *))(uintptr_t)HK_UNLOCK_FN)((void *)(uintptr_t)u);
+    if (++n <= 8) wlog("hunk: the split's second human (Hunk, slot %u, unit %08x) was locked as the story's partner (E1C %08x F44 %08x): the stock unlock -> E1C %08x F44 %08x (#%u)", s, (unsigned)u,
+                       (unsigned)e0, (unsigned)f0, (unsigned)rd32(u + 0xE1C), (unsigned)rd32(u + 0xF44), n);
+}
+
+static void hunk_local_pass(uint32_t now)
+{
+    if (pcls_persist[HK_SLOT] != HK_CLASS_HUNK) return;
+    uint32_t root = rd32(SOLO_CAMROOT), vp0 = root ? rd32(root + 0x34) : 0, m0 = root ? rd32(root + 0xCE0) : 0, m1 = root ? rd32(root + 0xCE4) : 0;
+    if (!vp0 || (vp0 != m0 && vp0 != m1)) return;   /* a cutscene / loading: nothing now (as bag_pass) */
+    for (unsigned s = 0; s < 2; s++) {
+        uint32_t u = 0, pu = 0;
+        if (!wh_player_by_slot(&MEM, s, &u) || !u || wh_unit_class(&MEM, u) != HK_CLASS_HUNK) continue;
+        hunk_motion_fix(s, u);   /* both PCs, own human or puppet */
+        if (rd32(u + WH_U_KIND) != 1) continue;   /* the puppet of a Hunk on the other PC gets neither gun nor rescue */
+        hunk_split_unlock(s, u, now);
+        hunk_bag_pass(u, now);
+        wh_player_by_slot(&MEM, 1 - s, &pu);
+        uint32_t mo = rd32(u + 0xE88);
+        int ng = mo && rd8(mo + 0x2B5) == 1 && rd8(mo + 8) == 1;
+        if (frs_step(&FRSH[s], ng, rdf(u + WH_U_POS + 4), pu != 0, now ? now : 1)) {
+            float pp[3] = {rdf(pu + WH_U_POS), rdf(pu + WH_U_POS + 4), rdf(pu + WH_U_POS + 8)}, to[3];
+            uint32_t zero = 0;
+            frs_target(pp, to);
+            wr8(mo + 0x2B4, 1);   /* the move object's teleport byte (as op_update) */
+            wr(u + WH_U_POS, to, 12);
+            wr(u + 0x4C, &zero, 4);
+            wrf(mo + 0x2B8, 0.0f);
+            wlog("hunk: Hunk's human (slot %u, unit %08x) had no ground for %u ms: put next to the partner at (%.0f,%.0f,%.0f) before the engine's fall-out kills him (rescue #%u)", s, (unsigned)u, FRS_AFTER_MS, to[0], to[1], to[2], FRSH[s].rescues);
+        }
+    }
 }
 
 /* both PCs, logic thread, model lock, a level being played */

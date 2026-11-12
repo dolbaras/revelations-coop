@@ -1015,7 +1015,7 @@ int main(void)
             } else
                 printf("(no executable image: the hook bytes are not compared with the build)\n");
         }
-        CHECK(rb_ep1_area(0x91010100u) && rb_ep1_area(0x91010300u) && !rb_ep1_area(0x91020100u) && !rb_ep1_area(0x91090200u) && !rb_ep1_area(0x91010000u) && !rb_ep1_area(0x9101FF00u));
+        CHECK(rb_area_ok(0x91010100u) && rb_area_ok(0x91010300u) && rb_area_ok(0x91020100u) && rb_area_ok(0x91090200u) && !rb_area_ok(0x91010000u) && !rb_area_ok(0x9101FF00u));   /* (allep1: every paired section, any episode) */
         /* lm2 live: the start triple from the start table (the record held no start a frame after the title's New Game) */
         {
             tm_n = 0;
@@ -1198,18 +1198,12 @@ int main(void)
         rb_triple bad = {0x12345678u, 0, 0};
         CHECK(rb_start_seen(&P[0].b, 0x83E89Bu) == 1 && rb_start_triple(&P[0].b, &bad) == RB_ST_BAD && rb_start_triple(&P[0].b, NULL) == RB_ST_NONE);
         CHECK(rb_start_seen(&P[0].b, 0x83E89Bu) == 1 && rb_start_triple(&P[0].b, NULL) == RB_ST_BAD);
-        /* Episode 1 only (the product): a start / restart elsewhere is not sent; without the rule (the library default, the lab) it is */
+        /* allep1: a start / restart in any paired section (here 3-1) is sent; the solo part and the ids that are no section are refused (section 8a) */
         rb_triple ep3 = {0x91030100u, 4, 5};
-        CHECK(P[0].b.cfg.ep1_only == 0);
-        P[0].b.cfg.ep1_only = 1;
         sent = P[0].b.rs_sent;
-        unsigned ep = P[0].b.st_ep1;
-        CHECK(rb_start_seen(&P[0].b, 0x6D1188u) == 1 && rb_start_triple(&P[0].b, &ep3) == RB_ST_EP1 && P[0].b.rs_sent == sent && P[0].b.st_ep1 == ep + 1);
-        CHECK(rb_restart_host(&P[0].b, &ep3) == RB_ST_EP1 && P[0].b.rs_sent == sent);
+        CHECK(rb_start_seen(&P[0].b, 0x6D1188u) == 1 && rb_start_triple(&P[0].b, &ep3) == RB_ST_SENT && P[0].b.rs_sent == sent + 1);
         tick(3500);
-        CHECK(rb_start_seen(&P[0].b, 0x6D1188u) == 1 && rb_start_triple(&P[0].b, &rec) == RB_ST_SENT);   /* Episode 1 passes */
-        P[0].b.cfg.ep1_only = 0;
-        CHECK(rb_start_seen(&P[0].b, 0x6D1188u) == 1 && rb_start_triple(&P[0].b, &ep3) == RB_ST_SENT);
+        CHECK(rb_start_seen(&P[0].b, 0x6D1188u) == 1 && rb_start_triple(&P[0].b, &rec) == RB_ST_SENT);
         /* a reset forgets a pending start */
         CHECK(rb_start_seen(&P[0].b, 0x83E89Bu) == 1);
         rb_reset(&P[0].b);
@@ -1351,20 +1345,17 @@ int main(void)
         CHECK(rb_section_change(&P[0].b, 0x91010100u, 0x91010200u, NULL) == RB_SC_BAD && strstr(logbuf, "NO start triple for the client") && P[0].b.sec_sent == 0);
         rb_triple wrong = {0x91010300u, 256, 2};
         CHECK(rb_section_change(&P[0].b, 0x91010100u, 0x91010200u, &wrong) == RB_SC_BAD);   /* a triple of another area */
-        CHECK(rb_section_change(&P[0].b, 0x91090200u, 0x910A0100u, &s12) == RB_SC_NONE);   /* REV1_ANYEPISODE lab: as before ep1-flow */
-        CHECK(rb_section_change(&P[0].b, 0, 0x91010200u, &s12) == RB_SC_NONE);             /* an unknown section with ep1_only 0 (the library default) */
-        P[0].b.cfg.ep1_only = 1;
-        CHECK(rb_section_change(&P[0].b, 0, 0x91010200u, &s12) == RB_SC_SENT);             /* the product (Episode 1 only): an unknown section is one of Episode 1 */
-        P[0].b.cfg.ep1_only = 0;
+        CHECK(rb_section_change(&P[0].b, 0x910F0100u, 0x91010200u, &s12) == RB_SC_NONE);   /* a lab warp into a part that is no paired section (F1): each PC goes on by itself */
+        CHECK(rb_section_change(&P[0].b, 0, 0x91010200u, &s12) == RB_SC_SENT);             /* an unreadable section is taken as a paired one */
         S.started = 0;
         CHECK(rb_section_change(&P[0].b, 0x91010100u, 0x91010200u, &s12) == RB_SC_NONE);
         S.started = 1;
         nq = 0;
         rb_msg_section(m, sizeof m, 9, &s12, 0x91010100u, RB_SEC_PEER);
         CHECK(rb_on_event(&P[0].b, m, RB_SECTION_MSG_LEN) == 0 && strstr(logbuf, "SECTION from the client ignored"));
-        rb_triple other = {0x91020100u, 256, 1}, zero = {0x91010200u, 0, 0};
+        rb_triple other = {0x910F0100u, 256, 1}, zero = {0x91010200u, 0, 0};
         rb_msg_section(m, sizeof m, 10, &other, 0x91010300u, RB_SEC_PEER);
-        CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN) == 0 && strstr(logbuf, "not a section of Episode 1") && !P[1].b.sec_pending);
+        CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN) == 0 && strstr(logbuf, "not a section of the campaign") && !P[1].b.sec_pending);
         rb_msg_section(m, sizeof m, 11, &zero, 0x91010100u, RB_SEC_PEER);
         CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN) == 0 && !P[1].b.sec_pending && P[1].b.sec_bad == 2);
         CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN - 1) == 0);
@@ -1379,10 +1370,10 @@ int main(void)
         CHECK(rb_restart_follow_at(&P[1].b, &out, 0) == 1 && out.area == 0x91010200u && out.a == 512);
         char st[2600];
         rb_status(&P[1].b, st, sizeof st);
-        CHECK(strstr(st, "ep1-flow: own section changes") && strstr(st, "end of Episode 1: here 0, partner 0"));
+        CHECK(strstr(st, "ep1-flow: own section changes") && strstr(st, "end of co-op: here 0, partner 0"));
     }
 
-    /* ============================================ 8. ep1-flow E5: the end of Episode 1 (1-3 -> Episode 2): EPDONE, no follow after it, the close after the stock end flow */
+    /* ============================================ 8. ep1-flow E5 / allep1: the end of co-op (12-3 -> the end of the campaign): EPDONE, no follow after it, the close after the stock end flow */
     {
         rb_triple out;
         const rb_triple s13 = {0x91010300u, 256, 2};
@@ -1395,13 +1386,13 @@ int main(void)
         CHECK(rb_gate(&P[1].b, RB_SECTION, 0) == RB_PROCEED);
         tick(30);
         CHECK(rb_gate(&P[0].b, RB_SECTION, 0) == RB_PROCEED);
-        CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND && P[0].b.ep_local && P[0].b.ep_sent == 1 && P[0].b.sec_sent == 0);
-        CHECK(strstr(logbuf, "END OF EPISODE 1 on this PC (host, section end released by the other PC): 91010300 -> 91020100; the partner is told (EPDONE)"));
-        CHECK(rb_section_change(&P[1].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND && P[1].b.ep_local);
+        CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND && P[0].b.ep_local && P[0].b.ep_sent == 1 && P[0].b.sec_sent == 0);
+        CHECK(strstr(logbuf, "END OF CO-OP on this PC (host, section end released by the other PC): 910C0300 -> 91FF0000 (the campaign has ended); the partner is told (EPDONE)"));
+        CHECK(rb_section_change(&P[1].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND && P[1].b.ep_local);
         tick(30);
         int loc = -1;
         CHECK(rb_ep_known(&P[0].b, &loc) == 1 && loc == 1 && P[0].b.ep_peer && P[1].b.ep_peer && P[0].b.ep_got == 1 && P[1].b.ep_got == 1);
-        CHECK(strstr(logbuf, "EPDONE from the client: it passed the end of Episode 1 (left 91010300); this PC passed it too"));
+        CHECK(strstr(logbuf, "EPDONE from the client: it passed the end of co-op (left 910C0300); this PC passed it too"));
         /* the close: not while the old section or the unknown area runs, not during the end flow, once when the end flow is over */
         uint32_t t0 = T;
         CHECK(rb_ep_close_step(&P[1].b, 0, 0, T) == 0);    /* aEpisode13 still (the state change of vf7 comes) */
@@ -1417,23 +1408,23 @@ int main(void)
         rb_triple cont = {0x91010300u, 257, 1};
         CHECK(rb_restart_host(&P[0].b, &cont) == 1);   /* (the host's engine would not do this; the client ignores it anyway) */
         tick(30);
-        CHECK(!P[1].b.rs_have && P[1].b.rs_rejected >= 1 && strstr(logbuf, "ignored: Episode 1 has ended"));
+        CHECK(!P[1].b.rs_have && P[1].b.rs_rejected >= 1 && strstr(logbuf, "ignored: the co-op session has reached its end"));
         uint8_t m[RB_MSG_MAX];
         rb_msg_section(m, sizeof m, 5, &s13, 0x91010200u, RB_SEC_PEER);
         CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN) == 0 && !P[1].b.sec_pending);
         tick(5000);
         CHECK(rb_restart_follow_at(&P[1].b, &out, 0) == 0 && rb_restart_follow_at(&P[1].b, &out, 1) == 0);
-        /* (b) the latest point: the end flow was never recognised, a level outside Episode 1 is there (2-1 loaded) */
+        /* (b) the latest point: the end flow was never recognised, a level that is no paired section is there (2-1 loaded) */
         sim_start();
         S.phase = 3;
-        CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND);
+        CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND);
         CHECK(rb_ep_close_step(&P[0].b, 0, 1, T) == 0);   /* within 2 s of the end: not yet (the old level may still be listed) */
         tick(2100);
-        CHECK(rb_ep_close_step(&P[0].b, 0, 1, T) == 1 && strstr(P[0].b.why, "a level outside Episode 1"));
+        CHECK(rb_ep_close_step(&P[0].b, 0, 1, T) == 1 && strstr(P[0].b.why, "a level that is no paired section"));
         /* (c) the cap */
         sim_start();
         S.phase = 3;
-        CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND);
+        CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND);
         tick(1000);
         CHECK(rb_ep_close_step(&P[0].b, 0, 0, T) == 0);
         P[0].b.cfg.ep_close_cap_ms = 5000;
@@ -1446,22 +1437,174 @@ int main(void)
         CHECK(rb_section_change(&P[0].b, 0x91010200u, 0x91010300u, &s13) == RB_SC_SENT);
         tick(30);
         CHECK(P[1].b.sec_pending);
-        CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND);
+        CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND);
         tick(30);
         CHECK(P[1].b.ep_peer && !P[1].b.ep_local && !P[1].b.sec_pending && !P[1].b.rs_have);
-        CHECK(strstr(logbuf, "EPDONE from the host: it passed the end of Episode 1 (left 91010300): this PC has not"));
+        CHECK(strstr(logbuf, "EPDONE from the host: it passed the end of co-op (left 910C0300): this PC has not"));
         loc = -1;
         CHECK(rb_ep_known(&P[1].b, &loc) == 1 && loc == 0);
         tick(5000);
         CHECK(rb_restart_follow_at(&P[1].b, &out, 0) == 0 && rb_ep_close_step(&P[1].b, 0, 1, T) == 0);
-        /* (e) a lab session in another episode never ends Episode 1; a reset forgets everything */
+        /* (e) a lab warp into a part that is no paired section never ends co-op; a reset forgets everything */
         sim_start();
         S.phase = 3;
-        CHECK(rb_section_change(&P[0].b, 0x91090200u, 0x910A0100u, NULL) == RB_SC_NONE && !P[0].b.ep_local);
-        CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND);
+        CHECK(rb_section_change(&P[0].b, 0x910F0100u, 0x91010200u, NULL) == RB_SC_NONE && !P[0].b.ep_local);
+        CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND);
         rb_reset(&P[0].b);
         CHECK(!P[0].b.ep_local && !P[0].b.ep_peer && !P[0].b.ep_closed && !P[0].b.own_sec_have && rb_ep_known(&P[0].b, NULL) == 0);
         CHECK(rb_ep_close_step(&P[0].b, 0, 1, T + 100000) == 0);
+    }
+
+    /* ============================================ 8a. allep1: every paired section of every episode is shared (no setting) */
+    {
+        /* (a) the id table: the 29 story sections (28 paired + the solo 16-2), the ids that are no section, the end */
+        static const uint32_t pairs[28] = {0x91010100u, 0x91010200u, 0x91010300u, 0x91020100u, 0x91020200u, 0x91030100u, 0x91030200u, 0x91040100u, 0x91050100u, 0x91050200u,
+                                           0x91050300u, 0x91060100u, 0x91060200u, 0x91070100u, 0x91070200u, 0x91080100u, 0x91080200u, 0x91080300u, 0x91090100u, 0x91090200u,
+                                           0x910A0100u, 0x910A0200u, 0x910B0100u, 0x910B0200u, 0x910C0100u, 0x910C0200u, 0x910C0300u, 0x91100100u};
+        for (int i = 0; i < 28; i++) CHECK(rb_section_kind(pairs[i]) == RB_SK_PAIR);
+        CHECK(rb_section_kind(0x91100200u) == RB_SK_SOLO);
+        CHECK(rb_section_kind(0x91000100u) == RB_SK_NOTSEC && rb_section_kind(0x91000200u) == RB_SK_NOTSEC && rb_section_kind(0x91080400u) == RB_SK_NOTSEC && rb_section_kind(0x910F0100u) == RB_SK_NOTSEC);
+        CHECK(rb_section_kind(0x91010400u) == RB_SK_NOTSEC && rb_section_kind(0x91130100u) == RB_SK_NOTSEC && rb_section_kind(0x91010101u) == RB_SK_NOTSEC);   /* any other 0x91 id */
+        CHECK(rb_section_kind(0x91FF0000u) == RB_SK_END && rb_section_kind(0x92010100u) == RB_SK_END && rb_section_kind(0) == RB_SK_END);
+        int npair = 0, nsolo = 0;
+        for (uint32_t ep = 0; ep < 0x20; ep++)
+            for (uint32_t sec = 0; sec < 0x10; sec++) {
+                int k = rb_section_kind(0x91000000u | (ep << 16) | (sec << 8));
+                npair += k == RB_SK_PAIR, nsolo += k == RB_SK_SOLO;
+            }
+        CHECK(npair == 28 && nsolo == 1);   /* the catalog: 29 sections, 28 of them paired */
+        CHECK(sec_kind(0x91020100u) == rb_section_kind(0x91020100u));   /* the lobby's copy (secids1.h) is the same function */
+        CHECK(sec_spectate(0x91100200u) == 1 && sec_spectate(0x91020200u) == 2 && sec_spectate(0x91100100u) == 2 && sec_spectate(0x91020100u) == 0 && sec_spectate(0x910C0300u) == 0);   /* step 3: where the second human spectates */
+        CHECK(rb_end_kind_from(0x910C0300u) == RB_EK_CAMPAIGN && rb_end_kind_from(0x91100200u) == RB_EK_CAMPAIGN && rb_end_kind_from(0x91010300u) == RB_EK_NOTSEC);
+
+        /* (b) rb_area_ok: every paired section of any episode, nothing else */
+        CHECK(rb_area_ok(0x91010200u) && rb_area_ok(0x91020100u) && rb_area_ok(0x91100100u) && rb_area_ok(0x910C0300u));
+        CHECK(rb_area_ok(0x91100200u) && !rb_area_ok(0x91080400u) && !rb_area_ok(0x91FF0000u) && !rb_area_ok(0x91000100u));
+        CHECK(!rb_area_ok(0x910E0000u) && rb_section_kind(0x910E0000u) != RB_SK_PAIR && rb_end_kind_from(0x910C0300u) == RB_EK_CAMPAIGN);   /* allep4s: the area after 12-3 is 0x910E0000 (no start table entry): END OF CO-OP, not a section to follow */
+
+        /* (c) a section change across an episode boundary is a normal SECTION change, no EPDONE, no close; the client follows it */
+        static const struct { uint32_t from, to; int32_t a, b; } hops[] = {
+            {0x91010300u, 0x91020100u, 256, 1}, {0x91020200u, 0x91030100u, 256, 1}, {0x91030200u, 0x91040100u, 256, 1}, {0x91050300u, 0x91060100u, 256, 1},
+            {0x910C0200u, 0x910C0300u, 256, 1}};
+        for (unsigned h = 0; h < sizeof hops / sizeof hops[0]; h++) {
+            sim_start();
+            S.phase = 3;
+            rb_triple nx = {hops[h].to, hops[h].a, hops[h].b};
+            logbuf[0] = 0;
+            CHECK(rb_section_change(&P[0].b, hops[h].from, hops[h].to, &nx) == RB_SC_SENT && !P[0].b.ep_local && P[0].b.ep_sent == 0 && P[0].b.sec_sent == 1);
+            tick(30);
+            CHECK(P[1].b.sec_pending && P[1].b.rs_area == hops[h].to && !P[1].b.ep_peer && P[1].b.sec_bad == 0);
+            CHECK(rb_section_change(&P[1].b, hops[h].from, hops[h].to, NULL) == RB_SC_NOTED && !P[1].b.ep_local && !P[1].b.sec_pending && P[1].b.sec_consumed == 1);   /* its own stock change consumed it */
+            CHECK(rb_ep_close_step(&P[0].b, 1, 1, T + 100000) == 0 && rb_ep_close_step(&P[1].b, 1, 1, T + 100000) == 0);   /* nothing to close */
+            CHECK(!strstr(logbuf, "END OF"));
+        }
+        {   /* the client that is behind follows the next episode's first section with the host's start triple (the stock section end, then the call) */
+            sim_start();
+            S.phase = 3;
+            rb_triple nx = {0x91020100u, 256, 1}, out;
+            CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, &nx) == RB_SC_SENT);
+            tick(4200);
+            CHECK(rb_restart_follow_at(&P[1].b, &out, 0) != 0 && out.area == 0x91020100u && out.a == 256 && out.b == 1 && P[1].b.sec_followed == 1);
+        }
+        /* (d) the client rejects a SECTION into the solo part / a non-section / the end; with the option off it still rejects every section outside Episode 1 */
+        {
+            uint8_t m[RB_MSG_MAX];
+            static const uint32_t bad[] = {0x91000100u, 0x91080400u, 0x910F0100u};
+            for (unsigned i = 0; i < 3; i++) {
+                sim_start();
+                S.phase = 3;
+                    logbuf[0] = 0;
+                rb_triple t = {bad[i], 256, 1};
+                rb_msg_section(m, sizeof m, 20, &t, 0x91010100u, RB_SEC_PEER);
+                CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN) == 0 && !P[1].b.sec_pending && P[1].b.sec_bad == 1);
+                CHECK(strstr(logbuf, "not a section of the campaign"));
+            }
+            sim_start();
+            S.phase = 3;
+            rb_triple t2 = {0x91050100u, 256, 1};
+            rb_msg_section(m, sizeof m, 21, &t2, 0x91040100u, RB_SEC_PEER);
+            CHECK(rb_on_event(&P[1].b, m, RB_SECTION_MSG_LEN) == 1 && P[1].b.sec_pending && P[1].b.rs_area == 0x91050100u && P[1].b.sec_bad == 0);   /* 5-1 is followed */
+        }
+
+        /* (e) the host's story start / restart: paired sections of any episode go to the client, the solo part and the non-sections end the session (not sent) */
+        {
+            sim_start();
+            static const struct { uint32_t area; int want; } cases[] = {{0x91020100u, RB_ST_SENT}, {0x91030100u, RB_ST_SENT}, {0x91050100u, RB_ST_SENT}, {0x91100100u, RB_ST_SENT},
+                                                                         {0x91100200u, RB_ST_SENT}, {0x91000100u, RB_ST_NOTSEC}, {0x91000200u, RB_ST_NOTSEC},
+                                                                         {0x91080400u, RB_ST_NOTSEC}, {0x910F0100u, RB_ST_NOTSEC}};
+            for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+                rb_triple rec = {cases[i].area, 256, 1};
+                unsigned sent = P[0].b.rs_sent;
+                logbuf[0] = 0;
+                tick(4000);   /* (a start of the same triple within 3 s would be a duplicate) */
+                CHECK(rb_start_seen(&P[0].b, 0x83E89Bu) == 1);
+                int r = rb_start_triple(&P[0].b, &rec);
+                CHECK(r == cases[i].want);
+                CHECK(P[0].b.rs_sent == sent + (cases[i].want == RB_ST_SENT));
+                if (cases[i].want == RB_ST_NOTSEC) CHECK(strstr(logbuf, "refused for the session: not a section of the campaign"));
+                CHECK(!P[0].b.st_pending);
+            }
+            CHECK(P[0].b.st_secbad == 4);
+            tick(30);
+            CHECK(P[1].b.rs_have && P[1].b.rs_area == 0x91100200u);   /* the last one (the solo 16-2, spectated) reached the client */
+            /* the restart hook (a Continue / game-over Yes): the same rule */
+            rb_triple r1 = {0x91100200u, 256, 1}, r2 = {0x91040100u, 256, 1}, r3 = {0x91000100u, 1, 1};
+            CHECK(rb_restart_host(&P[0].b, &r1) == 1 && rb_restart_host(&P[0].b, &r3) == RB_ST_NOTSEC);   /* the solo 16-2 is followed (the second human spectates) */
+            tick(4000);
+            CHECK(rb_restart_host(&P[0].b, &r2) == 1);
+            /* no session: nothing is refused (the game plays alone) */
+            S.started = 0;
+            CHECK(rb_restart_host(&P[0].b, &r1) == 0);
+            S.started = 1;
+            /* a junk start record (0x92 START id, the title's New Game before the table fallback) is still BAD, not a refusal */
+            rb_triple junk = {0x92010100u, 256, 1};
+            CHECK(rb_start_seen(&P[0].b, 0x83E89Bu) == 1 && rb_start_triple(&P[0].b, &junk) == RB_ST_BAD);
+        }
+
+        /* (f) the end of co-op: the campaign over (12-3 -> 0x91FF0000), the solo part (16-1 -> 16-2); kinds on both PCs, the close rule */
+        {
+            sim_start();
+            S.phase = 3;
+            logbuf[0] = 0;
+            CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND && P[0].b.ep_local && P[0].b.ep_kind == RB_EK_CAMPAIGN && P[0].b.ep_sent == 1);
+            CHECK(strstr(logbuf, "END OF CO-OP on this PC (host, section end no rendezvous ran): 910C0300 -> 91FF0000 (the campaign has ended)"));
+            tick(30);
+            CHECK(P[1].b.ep_peer && !P[1].b.ep_local && P[1].b.ep_kind == RB_EK_CAMPAIGN && strstr(logbuf, "EPDONE from the host: it passed the end of co-op (left 910C0300): this PC has not"));
+            CHECK(rb_ep_close_step(&P[0].b, 1, 0, T) == 0 && strstr(logbuf, "END OF CO-OP: the stock end flow runs on this PC"));
+            tick(1000);
+            CHECK(rb_ep_close_step(&P[0].b, 0, 0, T) == 1 && strstr(logbuf, "END OF CO-OP: the session closes now (the stock end flow (result, save) is over"));
+            /* the solo part: 16-1 -> 16-2 is a normal section change (the second human spectates), the end of the extra episode closes co-op */
+            sim_start();
+            S.phase = 3;
+            rb_triple nx = {0x91100200u, 256, 1};
+            CHECK(rb_section_change(&P[0].b, 0x91100100u, 0x91100200u, &nx) == RB_SC_SENT && !P[0].b.ep_local && P[0].b.sec_sent == 1);
+            tick(30);
+            CHECK(P[1].b.sec_pending && P[1].b.rs_area == 0x91100200u && !P[1].b.ep_peer);
+            CHECK(rb_section_change(&P[0].b, 0x91100200u, 0x91FF0000u, NULL) == RB_SC_EPEND && P[0].b.ep_kind == RB_EK_CAMPAIGN);
+            tick(30);
+            CHECK(P[1].b.ep_peer && P[1].b.ep_kind == RB_EK_CAMPAIGN);
+            /* a non-section next */
+            sim_start();
+            S.phase = 3;
+            CHECK(rb_section_change(&P[0].b, 0x91080300u, 0x91080400u, NULL) == RB_SC_EPEND && P[0].b.ep_kind == RB_EK_NOTSEC);
+            /* a change from an unreadable section is taken as a paired one; from a non-section (a lab warp into F1) nothing happens */
+            sim_start();
+            S.phase = 3;
+            rb_triple n2 = {0x91020200u, 256, 1};
+            CHECK(rb_section_change(&P[0].b, 0, 0x91020200u, &n2) == RB_SC_SENT);
+            CHECK(rb_section_change(&P[0].b, 0x910F0100u, 0x91020200u, &n2) == RB_SC_NONE);
+            /* a reset forgets the kind */
+            rb_reset(&P[0].b);
+            CHECK(P[0].b.ep_kind == 0);
+        }
+
+        /* (g) the status line names the refusals by id */
+        {
+            char st[4000];
+            sim_start();
+            rb_status(&P[0].b, st, sizeof st);
+            CHECK(strstr(st, "all episodes: starts refused by id (not a section 0), end kind 0"));
+        }
     }
 
     /* ============================================ 8b. rev1 live 8: the cross-level guard (ef4 07:57:18, the client crash exe+9d344 at 07:59:49) */

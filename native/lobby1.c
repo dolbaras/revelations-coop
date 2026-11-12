@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "lobby1.h"
+#include "secids1.h"
 
 enum { A_NONE = 0, A_ARMED, A_ROLE, A_P2, A_LAYOUT, A_PADS, A_PADINFO, A_DONE, A_NET_MODE, A_NET_ADDR, A_NET_GO, A_NET_READY, A_MODE, A_KICK, A_NET_WAY, A_NET_INVITE, A_DOWNED, A_NET_FRIEND };
 
@@ -34,6 +35,11 @@ struct l1 {
 /* ---------------------------------------------------------------- person names */
 static const char *const k_person_en[7] = {"Jill", "Chris", "Parker", "Keith", "Jessica", "Quint", "Raymond"};
 static char g_stock_names[7][48];
+/* allep1 (hunk1.h): Hunk is no campaign character, so his name is built in, one per language (L1_LANGS order: eng fre ita ger spa jpn rus pol dut por ptB chS chT).
+ * i18n1: the spelling is the game's own, from its Raid Mode character list (Coop_<lang>.gmd char_name_11 / char_name_s_11, build 13298487): "HUNK" in the Latin
+ * languages AND in Japanese (that list writes every name in Latin letters there; the Japanese Raid voice text epCOOP_jpn start_HUNK_00_00 says ハンク),
+ * "ХАНК" in Russian, 汉克 / 漢克 in Chinese. The other names of the lobby are the game's own too (Coop_<lang>.gmd char_name_00..06, menu.c) */
+static const char *const k_hunk_name[L1_LANGS] = {"HUNK", "HUNK", "HUNK", "HUNK", "HUNK", "HUNK", "\xD0\xA5\xD0\x90\xD0\x9D\xD0\x9A", "HUNK", "HUNK", "HUNK", "HUNK", "\xE6\xB1\x89\xE5\x85\x8B", "\xE6\xBC\xA2\xE5\x85\x8B"};
 
 /* first name of a full name: up to the first space, middle dot or katakana middle dot */
 static void first_name(const char *full, char *out, size_t size)
@@ -58,7 +64,7 @@ void l1_set_stock_names(const char names[7][48])
 
 const char *l1_person_name(int person, int lang)
 {
-    (void)lang;
+    if (person == 7) return k_hunk_name[lang >= 0 && lang < L1_LANGS ? lang : 0];   /* Hunk (hunk1.h) */
     if (person < 0 || person > 6) return "?";
     return g_stock_names[person][0] ? g_stock_names[person] : k_person_en[person];
 }
@@ -77,7 +83,7 @@ static int ci_contains(const char *s, const char *needle)
 int l1_person_from_class(const char *cls)
 {
     if (!cls) return -1;
-    static const struct { const char *key; int person; } map[] = {{"Jill", 0}, {"Chris", 1}, {"Parker", 2}, {"Keith", 3}, {"Jessica", 4}, {"Quint", 5}, {"Reymond", 6}, {"Raymond", 6}};
+    static const struct { const char *key; int person; } map[] = {{"Jill", 0}, {"Chris", 1}, {"Parker", 2}, {"Keith", 3}, {"Jessica", 4}, {"Quint", 5}, {"Reymond", 6}, {"Raymond", 6}, {"Hunk", 7}};
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
         if (ci_contains(cls, map[i].key)) return map[i].person;
     return -1;
@@ -610,9 +616,6 @@ static void net_status(const l1_t *l, char *out, size_t size, int *kind)
     }
 }
 
-/* an Episode 1 area: 0x9101SS00 (the episode byte of the campaign id) */
-static int ep1_area(unsigned a) { return (a & 0xFFFF0000u) == 0x91010000u; }
-
 /* the selection never rests on a row that cannot be used (lm1 live: a lobby opened on a running link had the locked Mode row selected) */
 static void sel_fix(l1_t *l, const l1_row *rows, int n)
 {
@@ -658,8 +661,8 @@ void l1_view_get(l1_t *l, l1_view *v)
         v->status_kind = v->net_status_kind;
         snprintf(v->note, sizeof v->note, "%s", l1_text(L1T_NOTE_SAVE_NET, lang));
         char t[400];
-        if (host && l->env.save_area && !ep1_area(l->env.save_area)) {   /* Continue would leave Episode 1: say it before the start */
-            l1_expand(l1_text(L1T_NET_EP_ONLY, lang), lang, t, sizeof t);
+        if (host && l->env.save_area && sec_kind(l->env.save_area) != RB_SK_PAIR && sec_kind(l->env.save_area) != RB_SK_SOLO) {   /* allep1: the save is in no section (0-1, 0-2, 8-4, F1): Continue would end the session; say it before the start */
+            l1_expand(l1_text(L1T_NET_SEC_NOTE, lang), lang, t, sizeof t);
             snprintf(v->note2, sizeof v->note2, "%s", t);
         } else if (host && l->net_state == L1NS_WAIT && l->env.alone_s >= 30)   /* nobody came: the internet case */
             snprintf(v->note2, sizeof v->note2, "%s", l1_text(L1T_NET_HOST_HINT, lang));
@@ -700,9 +703,6 @@ void l1_view_get(l1_t *l, l1_view *v)
         snprintf(v->note2, sizeof v->note2, "%s", l1_text(L1T_RAID_NOTE, lang));
 }
 
-/* "Episode 1": the game's own campaign text of the running language first, the built-in of the language when it was not loaded */
-static const char *ep1_word(int lang) { return l1_stock_have(L1K_EPISODE1) ? l1_stock(L1K_EPISODE1) : l1_text(L1T_EPISODE1, lang); }
-
 void l1_strip_text(const l1_strip_in *in, int lang, char *out, size_t size, int *kind)
 {
     char a[400], b[400], secs[16];
@@ -736,13 +736,12 @@ void l1_strip_text(const l1_strip_in *in, int lang, char *out, size_t size, int 
         l1_expand(l1_text(L1T_NET_ST_GO_HOST, lang), lang, b, sizeof b);
         l1_fmt(out, size, b, name, NULL);
         break;
-    case L1G_EP_ENDED: snprintf(out, size, "%s", l1_text(L1T_EP_ENDED, lang)), k = L1S_WARN; break;
-    case L1G_EP1_DONE: l1_fmt(out, size, l1_text(L1T_EP1_DONE, lang), ep1_word(lang), NULL); break;   /* ep1-flow E5 */
-    case L1G_EP1_BEHIND:
-        l1_fmt(a, sizeof a, l1_text(L1T_EP1_BEHIND, lang), ep1_word(lang), NULL);
-        join2(out, size, a, l1_text(L1T_TO_TITLE, lang));
+    case L1G_CAMP_DONE: snprintf(out, size, "%s", l1_text(L1T_END_DONE, lang)); break;   /* allep1: the campaign is over, the session has ended */
+    case L1G_CAMP_BEHIND:
+        join2(out, size, l1_text(L1T_END_BEHIND, lang), l1_text(L1T_TO_TITLE, lang));
         k = L1S_WARN;
         break;
+    case L1G_SEC_BAD: snprintf(out, size, "%s", l1_text(L1T_SEC_BAD, lang)), k = L1S_WARN; break;
     case L1G_SOLO_WATCH: l1_fmt(out, size, l1_text(L1T_SOLO_WATCH, lang), name, NULL); break;   /* ep1-solo E3 */
     case L1G_CONT_ROLES:   /* rev1 live 16: the host's Continue put the co-op save's roles back */
         l1_expand(l1_text(L1T_CONT_ROLES, lang), lang, b, sizeof b);

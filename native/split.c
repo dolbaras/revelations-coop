@@ -554,6 +554,10 @@ static struct {
     int old_own_on, old_own;   /* own-slot override before the exchange */
 } mx;
 static unsigned n_mx;
+/* scan1 (notes/scan1.md 2.2): the second human's Genesis runs in the same exchange as his menus, kind 3; scan1.c decides when it starts (SPLIT_XG_WANT_ENTER) and
+ * ends (SPLIT_XG_WANT_LEAVE) and is told about both (SPLIT_XG_BEGIN / SPLIT_XG_END). No hook = no kind 3. */
+static int (*xg_hook)(int op);
+void split_set_genesis_hook(int (*hook)(int op)) { xg_hook = hook; }
 
 static void menu_enter(int kind)
 {
@@ -573,17 +577,23 @@ static void menu_enter(int kind)
     capture_set_own(other_unit);
     mx.on = 1, mx.kind = kind, mx.t_enter = GetTickCount(), mx.seen_gui = 0, mx.quiet = 0;
     n_mx++;
-    r1_log("split: second human opens his %s: pads exchanged, own slot %d, roles flipped", kind == 1 ? "item menu (BACK)" : "pause menu (START)", other_unit);
+    r1_log("split: second human opens his %s: pads exchanged, own slot %d, roles flipped", kind == 1 ? "item menu (BACK)" : kind == 2 ? "pause menu (START)" : "Genesis scanner (whole view)",
+           other_unit);
+    if (kind == 3 && xg_hook)
+        xg_hook(SPLIT_XG_BEGIN);
 }
 
 static void menu_leave(const char *why)
 {
+    int kind = mx.kind;
     capture_set_own(mx.old_own_on ? mx.old_own : -1);
     capture_bind(0, mx.old_pad[0]);
     capture_bind(1, mx.old_pad[1]);
     testmode_pad_swap(0);
     mx.on = 0;
     r1_log("split: second human's menu over (%s): pads, own slot and roles back to the split layout", why);
+    if (kind == 3 && xg_hook)
+        xg_hook(SPLIT_XG_END);
 }
 
 /* a full-screen GUI that the engine draws in every viewport is running: managers 2 (game over), 3 (pause) have unit flags 0xC00 set while they run (live), manager 5
@@ -617,7 +627,14 @@ static void menu_frame(int gui)
                 menu_enter(1);   /* BACK */
             else if (edge & 0x0010)
                 menu_enter(2);   /* START */
+            else if (xg_hook && xg_hook(SPLIT_XG_WANT_ENTER))
+                menu_enter(3);   /* scan1: his Genesis */
         }
+        return;
+    }
+    if (mx.kind == 3) {   /* scan1: not a menu: it ends when scan1 says his Genesis use is over (a pause / cutscene meanwhile is whole view anyway) */
+        if (!xg_hook || xg_hook(SPLIT_XG_WANT_LEAVE))
+            menu_leave("the second human's Genesis use is over");
         return;
     }
     if (gui)

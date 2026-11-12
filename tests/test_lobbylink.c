@@ -173,8 +173,8 @@ int main(void)
             l1_t *pair[2] = {h, c};
             CHECK(wait_until(hk, ck, 3000, both_connected, pair));
         }
-        CHECK(status_eq(h, "Player has joined.  Mark yourself ready when you are set."));   /* the partner's name (lk_new's default name) */
-        CHECK(status_eq(c, "Joining as Parker (partner).  Mark yourself ready when you are set."));   /* the guest is told what the host gave him */
+        CHECK(status_eq(h, "Player has joined.  Choose 'I am ready' when you are set."));   /* the partner's name (lk_new's default name) */
+        CHECK(status_eq(c, "Joining as Parker (partner).  Choose 'I am ready' when you are set."));   /* the guest is told what the host gave him */
         CHECK(status_kind(c) == L1S_INFO);
 
         /* the ready row is shown and selectable only when connected: the joiner readies, the host sees it, the joiner waits */
@@ -223,8 +223,8 @@ int main(void)
             CHECK(wait_until(hk, ck, 3000, both_connected, pair));
         }
         pump(hk, ck, 40);
-        CHECK(status_eq(h, "Player has joined.  Mark yourself ready when you are set."));   /* the old reason went with the new partner */
-        CHECK(status_eq(c, "Joining as Parker (partner).  Mark yourself ready when you are set."));
+        CHECK(status_eq(h, "Player has joined.  Choose 'I am ready' when you are set."));   /* the old reason went with the new partner */
+        CHECK(status_eq(c, "Joining as Parker (partner).  Choose 'I am ready' when you are set."));
 
         /* the host leaves (Disconnect on the host): the joiner is told that the host ended the session (not a generic "connection failed") */
         click(h, L1T_NET_STOP);
@@ -305,7 +305,7 @@ int main(void)
             CHECK(wait_until(hk, ck, 3000, both_connected, pair));
         }
         pump(hk, ck, 40);
-        CHECK(status_eq(h, "Guesty has joined.  Mark yourself ready when you are set."));
+        CHECK(status_eq(h, "Guesty has joined.  Choose 'I am ready' when you are set."));
         CHECK(find_row(h, L1T_KICK) >= 0 && find_row(c, L1T_KICK) < 0);   /* only the host can remove */
         click(h, L1T_KICK);
         CHECK(l1_take_request(h) == L1R_NONE);   /* the first press asks */
@@ -379,7 +379,7 @@ int main(void)
         lk_info hi, ci;
         lk_get_info(hk, &hi), lk_get_info(ck, &ci);
         CHECK(hi.started && ci.started);
-        CHECK(status_eq(h, "Start Episode 1: Campaign > Continue or New Game. Guesty follows you automatically."));
+        CHECK(status_eq(h, "Start the story: 'Campaign' > 'Continue' or 'New Game'. Guesty follows you automatically."));
         CHECK(status_eq(c, "Waiting for Hosty to start the story. Your game follows automatically."));
         lk_stop(hk);
         {

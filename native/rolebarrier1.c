@@ -55,6 +55,12 @@ const rbk_def rbk_defs[RBK_N] = {
     {"lstart", "FUN_0041CFC0 the aCut area's load step (1 = the level may start: units placed, scene scripts, enemies next)", 0x41CFC0u, {0x51, 0x56, 0x57, 0x8B, 0xF9, 0x33, 0xF6}, 7, RBK_POST, -1},
     /* mov eax,[0x1169110]; test eax,eax (cdecl, one byte argument, plain ret: an early return is a plain ret) */
     {"cont", "FUN_0041EFE0 the stock Continue request (game-over Yes, the pause menu's checkpoint reload: area change to aStartContinue)", 0x41EFE0u, {0xA1, 0x10, 0x91, 0x16, 0x01, 0x85, 0xC0}, 7, RBK_PRE, 0},
+    /* allep1: push ecx; push ebx; push ebp; mov ebp,ecx (thiscall(class id, group), ret 8: an observer that may rewrite the class argument in place) */
+    {"bagid", "sItemBox_vf17 0x84DC50 the item box's bag of a character id (Hunk has none: his class id is read as Parker's)", 0x84DC50u, {0x51, 0x53, 0x55, 0x8B, 0xE9}, 5, RBK_PRE, -1},
+    /* mov eax,[ecx]; mov edx,[eax+0x10]; sub esp,0x10 (fastcall(this), plain ret) */
+    {"pclsc", "FUN_0042A730 creates the section's humans from the class ids of the player setup object", 0x42A730u, {0x8B, 0x01, 0x8B, 0x50, 0x10, 0x83, 0xEC, 0x10}, 8, RBK_PRE, -1},
+    /* sub esp,0x94 (one 6-byte instruction) */
+    {"pclsp", "FUN_0042B720 preloads the resources of those humans", 0x42B720u, {0x81, 0xEC, 0x94, 0x00, 0x00, 0x00}, 6, RBK_PRE, -1},
 };
 
 const char *rbk_state_name(int st)
@@ -313,7 +319,7 @@ void rb_reset(rb_t *b)
     b->rs_diff = b->applied_diff = -1;
     memset(b->nosess_logged, 0, sizeof b->nosess_logged);
     b->sec_pending = 0, b->sec_from = 0, b->sec_how = 0, b->own_sec_have = 0;
-    b->ep_local = b->ep_peer = 0, b->ep_local_t = b->ep_peer_t = 0, b->ep_from = 0, b->ep_seen_flow = b->ep_closed = 0;
+    b->ep_local = b->ep_peer = 0, b->ep_local_t = b->ep_peer_t = 0, b->ep_from = 0, b->ep_seen_flow = b->ep_closed = 0; b->ep_kind = 0;
     b->lvl_area = 0, b->xl_epoch = 0;
     /* continue1 */
     b->rs_cp.have = b->applied_cp.have = b->tx_cp.have = 0;
@@ -388,6 +394,8 @@ int rb_msg_contreq(uint8_t *out, size_t cap, uint16_t seq)
     return RB_CONTREQ_MSG_LEN;
 }
 
+static const char *kind_why(int k);
+
 int rb_triple_ok(const rb_triple *t, char *why, size_t wsz)
 {
     const char *w = NULL;
@@ -443,7 +451,7 @@ int rb_on_event(rb_t *b, const uint8_t *body, unsigned len)
         }
         if (b->ep_local || b->ep_peer) {   /* E5: after the end of Episode 1 nothing is followed (the next part is Episode 2) */
             b->rs_rejected++;
-            blog(b, "barrier: RESTART #%u from the host (area %08X %d / %d) ignored: Episode 1 has ended", seq, t.area, t.a, t.b);
+            blog(b, "barrier: RESTART #%u from the host (area %08X %d / %d) ignored: the co-op session has reached its end", seq, t.area, t.a, t.b);
             return 0;
         }
         b->rs_have = 1, b->rs_seq = seq, b->rs_area = t.area, b->rs_a = t.a, b->rs_b = t.b, b->rs_t = b->io.now ? b->io.now(b->io.user) : 0;
@@ -505,14 +513,14 @@ int rb_on_event(rb_t *b, const uint8_t *body, unsigned len)
             blog(b, "barrier: SECTION from the client ignored (the host decides)");
             return 0;
         }
-        if (!rb_triple_ok(&t, why, sizeof why) || !rb_ep1_area(t.area)) {
+        if (!rb_triple_ok(&t, why, sizeof why) || !rb_area_ok(t.area)) {
             b->sec_bad++;
-            blog(b, "barrier: SECTION #%u from the host rejected: %s (area %08X, %d, %d)", seq, rb_ep1_area(t.area) ? why : "not a section of Episode 1", t.area, t.a, t.b);
+            blog(b, "barrier: SECTION #%u from the host rejected: %s (area %08X, %d, %d)", seq, rb_section_kind(t.area) == RB_SK_PAIR ? why : kind_why(rb_section_kind(t.area)), t.area, t.a, t.b);
             return 0;
         }
         if (b->ep_local || b->ep_peer) {
             b->sec_bad++;
-            blog(b, "barrier: SECTION #%u from the host (area %08X) ignored: Episode 1 has ended", seq, t.area);
+            blog(b, "barrier: SECTION #%u from the host (area %08X) ignored: the co-op session has reached its end", seq, t.area);
             return 0;
         }
         uint32_t now = b->io.now ? b->io.now(b->io.user) : 0;
@@ -541,10 +549,11 @@ int rb_on_event(rb_t *b, const uint8_t *body, unsigned len)
         if (!b->ep_peer) {
             b->ep_peer = 1, b->ep_peer_t = b->io.now ? b->io.now(b->io.user) : 0;
             if (!b->ep_from) b->ep_from = from;
+            if (!b->ep_local) b->ep_kind = rb_end_kind_from(from);   /* allep1: what the partner's end was, from the section it left */
         }
-        if (!b->host && (b->rs_have || b->sec_pending)) blog(b, "barrier: a waiting host triple (area %08X) is dropped: Episode 1 has ended", b->rs_area);
+        if (!b->host && (b->rs_have || b->sec_pending)) blog(b, "barrier: a waiting host triple (area %08X) is dropped: the co-op session has reached its end", b->rs_area);
         if (!b->host) b->rs_have = 0, b->sec_pending = 0;
-        blog(b, "barrier: EPDONE from the %s: it passed the end of Episode 1 (left %08X)%s", b->host ? "client" : "host", from,
+        blog(b, "barrier: EPDONE from the %s: it passed the end of co-op (left %08X)%s", b->host ? "client" : "host", from,
              b->ep_local ? "; this PC passed it too" : ": this PC has not (the session closes when the partner's end flow is over)");
         return 1;
     }
@@ -792,20 +801,28 @@ int rb_cp_rec_take(uint32_t w[9], const rb_triple *t, const rb_cp *cp)
     return memcmp(old, w, sizeof old) != 0;
 }
 
+/* allep1: a start / restart into the solo 16-2 or a non-section id (0-1, 0-2, 8-4, F1, ...) is not shared: not sent, the glue ends the session with a message */
+static int id_refused(rb_t *b, const rb_triple *t)
+{
+    if ((t->area >> 24) != 0x91u) return 0;
+    int k = rb_section_kind(t->area);
+    if (k != RB_SK_NOTSEC) return 0;   /* (the solo 16-2 is followed: the second human spectates) */
+    b->st_secbad++;
+    blog(b, "barrier: host restart / start in area %08X is refused for the session: %s (the session ends)", t->area, kind_why(k));
+    return RB_ST_NOTSEC;
+}
+
 int rb_restart_host(rb_t *b, const rb_triple *t)
 {
     uint8_t body[RB_MSG_MAX];
     char why[100];
     rb_sinfo si;
     if (!b->enabled || !b->io.session || !b->io.session(b->io.user, &si) || !si.started) return 0;
+    int ref = id_refused(b, t);
+    if (ref) return ref;
     if (!rb_triple_ok(t, why, sizeof why)) {
         blog(b, "barrier: host restart (area %08X, %d, %d) NOT sent: %s", t->area, t->a, t->b, why);
         return 0;
-    }
-    if (b->cfg.ep1_only && !rb_ep1_area(t->area)) {   /* the product supports Episode 1 only: the partner does not follow, the glue ends the session */
-        b->st_ep1++;
-        blog(b, "barrier: host restart / start in area %08X is outside Episode 1: not sent (the session ends)", t->area);
-        return RB_ST_EP1;
     }
     b->lvl_area = t->area;   /* rev1 live 8: this PC loads that section now */
     rb_cp cp = b->tx_cp;
@@ -1208,7 +1225,20 @@ int rb_placed(float x, float y, float z)
     return ax + ay + az > 1.0f;
 }
 
-int rb_ep1_area(uint32_t area) { return (area & 0xFFFF0000u) == 0x91010000u && (area & 0xFF00u) != 0 && (area & 0xFF00u) != 0xFF00u; }
+int rb_section_kind(uint32_t area) { return sec_kind(area); }   /* allep1: secids1.h */
+
+int rb_area_ok(uint32_t area) { int k = rb_section_kind(area); return k == RB_SK_PAIR || k == RB_SK_SOLO; }   /* the solo 16-2 is followed: the second human spectates */
+
+int rb_end_kind_from(uint32_t from)
+{
+    if (from == 0x910C0300u || from == 0x91100200u) return RB_EK_CAMPAIGN;   /* 12-3: the last section of the story; 16-2: the end of the extra episode */
+    return RB_EK_NOTSEC;
+}
+
+static const char *kind_why(int k)
+{
+    return k == RB_SK_SOLO ? "a part played by one character alone (16-2)" : k == RB_SK_END ? "the campaign has ended" : k == RB_SK_NOTSEC ? "not a section of the campaign (no area, or the game leaves)" : "a paired section";
+}
 
 int rb_table_triple(rb_rd32_fn rd, void *user, uint32_t gamesys_ptr, uint32_t area, rb_triple *out)
 {
@@ -1269,6 +1299,10 @@ int rb_start_triple(rb_t *b, const rb_triple *rec)
     if (!b->st_pending) return RB_ST_NONE;
     b->st_pending = 0;
     char why[100];
+    if (rec && b->enabled) {
+        int ref = id_refused(b, rec);
+        if (ref) return ref;
+    }
     if (!rec || !rb_triple_ok(rec, why, sizeof why)) {
         b->st_bad++;
         if (rec) blog(b, "barrier: host story start (from %08X): the start triple area %08X %d / %d is not plausible (%s): not sent", b->st_ret, rec->area, rec->a, rec->b, why);
@@ -1288,7 +1322,7 @@ int rb_start_triple(rb_t *b, const rb_triple *rec)
         blog(b, "barrier: host story start (FUN_00720540 from %08X): area %08X checkpoints %d / %d sent: the client loads it by itself", b->st_ret, rec->area, rec->a, rec->b);
         return RB_ST_SENT;
     }
-    return r == RB_ST_EP1 ? RB_ST_EP1 : RB_ST_NONE;
+    return r == RB_ST_NOTSEC ? r : RB_ST_NONE;
 }
 
 void rb_restart_inject(rb_t *b, const rb_triple *t)
@@ -1330,19 +1364,21 @@ int rb_section_change(rb_t *b, uint32_t from, uint32_t next, const rb_triple *ne
     uint32_t now = b->io.now ? b->io.now(b->io.user) : 0;
     b->sec_changes++;
     if (!b->enabled || !b->io.session || !b->io.session(b->io.user, &si) || !si.started) return RB_SC_NONE;
-    int from_ep1 = from ? rb_ep1_area(from) : b->cfg.ep1_only;   /* an unreadable section: the product plays Episode 1 only */
-    if (!from_ep1) return RB_SC_NONE;   /* a lab session outside Episode 1 (REV1_ANYEPISODE=1): each PC goes on by itself, as before ep1-flow */
+    int from_ok = from ? rb_area_ok(from) : 1;   /* any paired section; an unreadable one is taken as one */
+    if (!from_ok) return RB_SC_NONE;   /* a lab warp into a part that is no paired section: each PC goes on by itself */
     b->own_sec_have = 1, b->own_sec_area = next, b->own_sec_t = now, b->own_sec_from = from;
     b->lvl_area = next;   /* rev1 live 8 */
-    if (!rb_ep1_area(next)) {   /* E5: the end of Episode 1 (1-3 -> the next episode) */
+    if (!rb_area_ok(next)) {   /* the end of co-op: the campaign is over (0x91FF0000), the solo 16-2 follows, or the next id is no section. An episode end (1-3 -> 2-1 ...) is a normal section change below. */
+        int nk = rb_section_kind(next);
         if (!b->ep_local) b->ep_local = 1, b->ep_local_t = now ? now : 1, b->ep_from = from, b->ep_seen_flow = 0, b->ep_closed = 0;
-        if (!b->host && (b->rs_have || b->sec_pending)) blog(b, "barrier: a waiting host triple (area %08X) is dropped: Episode 1 has ended", b->rs_area);
+        b->ep_kind = nk == RB_SK_END ? RB_EK_CAMPAIGN : RB_EK_NOTSEC;
+        if (!b->host && (b->rs_have || b->sec_pending)) blog(b, "barrier: a waiting host triple (area %08X) is dropped: the co-op session has reached its end", b->rs_area);
         if (!b->host) b->rs_have = 0, b->sec_pending = 0;
         int len = rb_msg_epdone(body, sizeof body, from);
         int ok = len && b->io.send && b->io.send(b->io.user, body, (unsigned)len);
         b->ep_sent += ok != 0;
-        blog(b, "barrier: END OF EPISODE 1 on this PC (%s, section end %s): %08X -> %08X; %s; the session closes after the stock end flow (result, save)", b->host ? "host" : "client",
-             how_text(b->pt[RB_SECTION].st), from, next, ok ? "the partner is told (EPDONE)" : "EPDONE could NOT be sent");
+        blog(b, "barrier: END OF CO-OP on this PC (%s, section end %s): %08X -> %08X (%s); %s; the session closes after the stock end flow (result, save)", b->host ? "host" : "client",
+                 how_text(b->pt[RB_SECTION].st), from, next, kind_why(nk), ok ? "the partner is told (EPDONE)" : "EPDONE could NOT be sent");
         return RB_SC_EPEND;
     }
     if (!b->host) {
@@ -1375,15 +1411,15 @@ int rb_ep_close_step(rb_t *b, int in_end_flow, int level_out, uint32_t now)
     if (!b->ep_local || b->ep_closed) return 0;
     if (in_end_flow > 0 && !b->ep_seen_flow) {
         b->ep_seen_flow = 1;
-        blog(b, "barrier: END OF EPISODE 1: the stock end flow runs on this PC (aEpisodeEnd: result, save)");
+        blog(b, "barrier: END OF CO-OP: the stock end flow runs on this PC (aEpisodeEnd: result, save)");
     }
     const char *why = NULL;
     if (b->ep_seen_flow && in_end_flow == 0) why = "the stock end flow (result, save) is over";
-    else if (level_out && (int32_t)(now - b->ep_local_t) > 2000) why = "a level outside Episode 1 is there (the latest point)";
-    else if ((uint32_t)(now - b->ep_local_t) >= b->cfg.ep_close_cap_ms) why = "the time limit after the end of Episode 1 passed";
+    else if (level_out && (int32_t)(now - b->ep_local_t) > 2000) why = "a level that is no paired section is there (the latest point)";
+    else if ((uint32_t)(now - b->ep_local_t) >= b->cfg.ep_close_cap_ms) why = "the time limit after the end of co-op passed";
     if (!why) return 0;
     b->ep_closed = 1;
-    blog(b, "barrier: END OF EPISODE 1: the session closes now (%s, %u ms after this PC's end)", why, (unsigned)(now - b->ep_local_t));
+    blog(b, "barrier: END OF CO-OP: the session closes now (%s, %u ms after this PC's end)", why, (unsigned)(now - b->ep_local_t));
     return 1;
 }
 
@@ -1495,14 +1531,14 @@ void rb_status(const rb_t *b, char *out, size_t size)
              "cutscene %s (n=%u, pending %d): held frames %u in %u holds, released by peer %u / timeout %u, passes without session %u, getter answers replaced %u; "
              "arrivals tx %u rx %u; cutscenes begun %u (scene scripts, never held: %u), movies %u, section ends %u; "
              "loads: begun %u, done %u, stale %u, cross-level refused %u (level %08X); restart: host sent %u, client got %u rejected %u used %u without triple %u, followed %u%s; "
-             "story starts (FUN_00720540): calls %u, section changes %u, sent %u, duplicates %u, outside Episode 1 %u, bad %u; "
-             "ep1-flow: own section changes %u (last %08X -> %08X), SECTION sent %u got %u consumed %u followed %u (stock ends asked %u, fallbacks %u) bad %u%s; end of Episode 1: here %d, partner %d, EPDONE sent %u got %u, "
+             "story starts (FUN_00720540): calls %u, section changes %u, sent %u, duplicates %u, refused by id %u, bad %u; "
+             "ep1-flow: own section changes %u (last %08X -> %08X), SECTION sent %u got %u consumed %u followed %u (stock ends asked %u, fallbacks %u) bad %u%s; end of co-op: here %d, partner %d, EPDONE sent %u got %u, "
              "end flow seen %d, closed %d; last: %s",
              b->enabled ? "ON" : "off", stn[b->pt[RB_SECTION].st & 3], b->pt[RB_SECTION].n, b->k_holds[RB_SECTION], b->k_episodes[RB_SECTION], b->k_peer[RB_SECTION], b->k_timeout[RB_SECTION],
              b->k_nosession[RB_SECTION], stn[b->pt[RB_PCS].st & 3], b->pt[RB_PCS].n, b->pcs_pending, b->k_holds[RB_PCS], b->k_episodes[RB_PCS], b->k_peer[RB_PCS], b->k_timeout[RB_PCS],
              b->k_nosession[RB_PCS], b->pcs_changed, b->arrivals_tx, b->arrivals_rx, b->pcs_begins, b->pcs_ambient, b->movie_begins, b->section_ends, b->loads_begun, b->loads_done,
              b->loads_stale, b->loads_xl, b->lvl_area, b->rs_sent, b->rs_received, b->rs_rejected, b->rs_applied, b->rs_unmatched, b->rs_followed, b->rs_have ? " (a triple is waiting)" : "", b->st_calls, b->st_section,
-             b->st_sent, b->st_dup, b->st_ep1, b->st_bad, b->sec_changes, b->own_sec_from, b->own_sec_area, b->sec_sent, b->sec_got, b->sec_consumed, b->sec_followed, b->sec_stock_count, b->sec_stock_fallback, b->sec_bad,
+             b->st_sent, b->st_dup, b->st_secbad, b->st_bad, b->sec_changes, b->own_sec_from, b->own_sec_area, b->sec_sent, b->sec_got, b->sec_consumed, b->sec_followed, b->sec_stock_count, b->sec_stock_fallback, b->sec_bad,
              b->sec_pending ? " (a next section is waiting)" : "", b->ep_local, b->ep_peer, b->ep_sent, b->ep_got, b->ep_seen_flow, b->ep_closed, b->why[0] ? b->why : "-");
     size_t n = strlen(out);
     if (n + 1 < size)
@@ -1517,6 +1553,9 @@ void rb_status(const rb_t *b, char *out, size_t size)
     if (n + 1 < size)
         snprintf(out + n, size - n, "; checkpoint mirror %s: passes sent %u got %u, taken here %u (calls %u), already had %u, dropped %u, other area %u%s", b->cfg.cp_mirror ? "ON" : "off",
                  b->cpm_sent, b->cpm_got, b->cpm_done, b->cpm_calls, b->cpm_had, b->cpm_dropped, b->cpm_other, b->cpm_in.have ? " (one waiting)" : "");
+    n = strlen(out);
+    if (n + 1 < size)   /* allep1 */
+        snprintf(out + n, size - n, "; all episodes: starts refused by id (not a section %u), end kind %d", b->st_secbad, b->ep_kind);
     n = strlen(out);
     if (n + 1 < size)
         snprintf(out + n, size - n, "; saved checkpoint here mID %d (%d / %d), the host's mID %d (%d / %d): stock follows refused %u, own Continues redirected %u", b->cp_saved.id, b->cp_saved.a,

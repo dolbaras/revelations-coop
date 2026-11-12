@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "secids1.h"
+
 typedef struct { uint32_t area; int32_t a, b; } rb_triple;   /* a restart: area id, checkpoint ids A / B (section 4) */
 
 /* ---------------------------------------------------------------- 1. role */
@@ -59,7 +61,11 @@ typedef struct {
 
 /* continue1: RBK_LSTART = the aCut area's load step FUN_0041cfc0 (POST filter: the level-start hold of a restart); RBK_CONT = the stock Continue request FUN_0041efe0
  * (PRE gate: the guest's own Continue is told to the host; a second request while one is on its way is dropped) */
-enum { RBK_EPEND = 0, RBK_PCS, RBK_MOVIE, RBK_PCSEND, RBK_RESTART, RBK_START, RBK_LSTART, RBK_CONT, RBK_N };
+/* allep1 (hunk1.h): RBK_BAGID = sItemBox_vf17 0x84DC50, the bag of a character id: PRE observer that rewrites the class argument of a Hunk human to Parker's (the item box has a bag per campaign
+ * character, none for Hunk: the engine asserted `pMyBag is invalid pointer` at the level start of a Continue, allep hk1) */
+enum { RBK_EPEND = 0, RBK_PCS, RBK_MOVIE, RBK_PCSEND, RBK_RESTART, RBK_START, RBK_LSTART, RBK_CONT, RBK_BAGID, RBK_PCLSC, RBK_PCLSP, RBK_N };
+/* allep1 (hunk1.h): RBK_PCLSC = FUN_0042A730 (creates the section's humans from the class ids [[0x116A340] + 0x24 / 0x28]) and RBK_PCLSP = FUN_0042B720 (preloads their resources): PRE observers that
+ * write the Hunk class into slot 1 right before the engine reads it (same thread: no race with the engine's own write; the 3 ms persist thread lost that race on the host PC in allep hk1) */
 enum { RBK_PRE = 0, RBK_POST };
 #define RBK_SIG_MAX 12
 
@@ -112,8 +118,8 @@ const char *rbk_state_name(int st);
 /* RB_LSTART (continue1): the level start after a restart (the aCut area's load step FUN_0041cfc0 answered "ready"): both PCs start the reloaded level together */
 enum { RB_SECTION = 0, RB_PCS = 1, RB_LSTART = 2, RB_PT_N = 3 };
 enum { RB_PROCEED = 0, RB_HOLD = 1 };
-/* RBM_SECTION (ep1-flow E4): host -> client, the host passed a section end of Episode 1: the next section's start triple {seq, area, a, b, from, how};
- * RBM_EPDONE (ep1-flow E5): either PC -> the other, this PC passed the end of Episode 1 (its section change went out of Episode 1) {from};
+/* RBM_SECTION (ep1-flow E4): host -> client, the host passed a section end (any episode): the next section's start triple {seq, area, a, b, from, how};
+ * RBM_EPDONE (ep1-flow E5): either PC -> the other, this PC passed the end of co-op (its section change went to the end of the campaign, the solo 16-2 or a non-section) {from};
  * RBM_CONTREQ (continue1): client -> host, the guest chose Continue (its stock Continue request FUN_0041efe0) and no host triple was waiting {seq} */
 enum { RBM_ARRIVE = 1, RBM_RESTART = 2, RBM_SECTION = 3, RBM_EPDONE = 4, RBM_CONTREQ = 5 };   /* 6 = RBM_CPPASS (section 7) */
 #define RB_SECTION_MSG_LEN 21
@@ -166,7 +172,6 @@ typedef struct {
     uint32_t stale_epoch_ms;     /* an epoch the other PC started while this level stays: report loaded anyway after this long (default 8000) */
     int no_triple_hold_ms;       /* client Continue without a host triple: 0 = go on with its own (default), >0 = answer "not now" for this long */
     int follow_ms;               /* client: a host triple that no own Continue used within this time makes the client restart by itself with it (0 = never; default 1500) */
-    int ep1_only;                /* host: a story start / restart outside Episode 1 is not sent (rb_restart_host -> RB_ST_EP1; the product sets 1, the library default 0) */
     /* ep1-flow E4: the host's next section (RBM_SECTION) on the client */
     int sec_follow_ms;           /* a client that is not at the end of the section itself follows the host into the next section after this long (default 4000) */
     int sec_window_ms;           /* the client's own section change to the same area this close to the host's triple is the same change: no follow (default 20000) */
@@ -271,7 +276,7 @@ typedef struct {
     /* lobby-must: the host's story start (FUN_00720540 observer) and the last triple sent (one start = one RESTART even when both writers run) */
     int st_pending;
     uint32_t st_ret, st_t;
-    unsigned st_calls, st_section, st_sent, st_dup, st_ep1, st_bad;
+    unsigned st_calls, st_section, st_sent, st_dup, st_bad;
     int tx_have;
     rb_triple tx_last;
     uint32_t tx_t;
@@ -308,6 +313,8 @@ typedef struct {
     uint32_t ep_local_t, ep_peer_t, ep_from;
     unsigned ep_sent, ep_got;
     int ep_seen_flow, ep_closed;  /* the close rule (rb_ep_close_step): the stock end flow (aEpisodeEnd) was seen; the close was asked for */
+    int ep_kind;                  /* allep1: what the end was (RB_EK_*) */
+    unsigned st_secbad;           /* allep1: host starts / restarts refused by id (RB_ST_NOTSEC) */
     /* continue1 (A): the checkpoint record with the restart */
     rb_cp tx_cp;                 /* host: the record to send with the next restart (the glue reads it in the restart hook) */
     rb_cp rs_cp;                 /* client: the record that came with the waiting triple */
@@ -449,14 +456,24 @@ int rb_msg_restart_k(uint8_t *out, size_t cap, uint16_t seq, uint32_t area, int3
 #define RB_GF_SECTION_END 2u
 
 /* lobby-must: the host's story start. Results of rb_start_triple / rb_restart_host (besides 1 = sent, 0 = not sent): */
-enum { RB_ST_NONE = 0, RB_ST_SENT = 1, RB_ST_DUP = 2, RB_ST_EP1 = -2, RB_ST_BAD = -3 };
+enum { RB_ST_NONE = 0, RB_ST_SENT = 1, RB_ST_DUP = 2, RB_ST_BAD = -3, RB_ST_NOTSEC = -4 };   /* (allep1: NOTSEC / SOLO = the id is the solo 16-2 / no section: not sent, the glue ends the session with its message) */
 #define RB_SECTION_FN_LO 0x42D160u   /* cEpisodeEndState_vf7: its calls of FUN_00720540 are the section change, not a start */
 #define RB_SECTION_FN_HI 0x42D6E8u
-int rb_ep1_area(uint32_t area);                     /* 0x9101SS00: a section of Episode 1 */
+/* allep1 (episode-catalog.md, FACT live): the 29 story sections have an area class; 28 start with two playable characters (PAIR), 16-2 (0x91100200, Parker alone, the extra
+ * episode) is SOLO. 0-1 / 0-2 / 8-4 (0x91000100 / 0x91000200 / 0x91080400) have no area class (warp falls back to the Episode 1 start) and F1 (0x910F0100) makes the game exit:
+ * NOTSEC. RB_SK_END = the campaign is over (0x91FF0000 "no next section", or an id that is no 0x91 campaign id); the real area after 12-3 is 0x910E0000 (NOTSEC, allep4s). */
+/* RB_SK_* (secids1.h) */
+int rb_section_kind(uint32_t area);
+/* the area may be played and followed in a session: a paired section of any episode */
+int rb_area_ok(uint32_t area);
+/* allep1: how an end of co-op is named (rb_t.ep_kind, RBM_EPDONE carries only `from`): RB_EK_*; derived from the finished section when
+ * the PC only knows the partner's EPDONE: the last section of the story (12-3) = the campaign, 16-1 = the solo part */
+enum { RB_EK_NONE = 0, RB_EK_CAMPAIGN = 1, RB_EK_NOTSEC = 3 };
+int rb_end_kind_from(uint32_t from);
 /* host, the observer of FUN_00720540: 1 = this call is a story start of this PC (the glue reads the start record in its next frame), 0 = a section change / not host */
 int rb_start_seen(rb_t *b, uint32_t ret_addr);
-/* host, a frame after rb_start_seen: the triple of the start record. RB_ST_SENT, RB_ST_DUP (the restart hook sent the same within 3 s), RB_ST_EP1 (cfg.ep1_only
- * and outside Episode 1: not sent, the glue ends the session), RB_ST_BAD, RB_ST_NONE (nothing pending). */
+/* host, a frame after rb_start_seen: the triple of the start record. RB_ST_SENT, RB_ST_DUP (the restart hook sent the same within 3 s), RB_ST_NOTSEC / RB_ST_SOLO (the id is no paired section:
+ * not sent, the glue ends the session), RB_ST_BAD, RB_ST_NONE (nothing pending). */
 int rb_start_triple(rb_t *b, const rb_triple *rec);
 /* lm2 / lm2b live (the title's New Game on the host): after FUN_00720540 the global start record holds the START id 0x92010100 with checkpoints 256 / 1, not
  * a 0x91 area ("area is not a campaign section id"), so nothing was sent and the guest stayed at the title. The restart the guest needs is the one of the title
@@ -475,7 +492,7 @@ int rb_table_triple(rb_rd32_fn rd, void *user, uint32_t gamesys_ptr, uint32_t ar
 typedef int (*rb_isobj_fn)(void *user, uint32_t v);
 int rb_bag_shared(rb_rd32_fn rd, rb_isobj_fn is_obj, void *user, uint32_t bag_a, uint32_t bag_b, uint32_t *out, int max);
 
-/* ---------------------------------------------------------------- 5. ep1-flow: the section change (E4) and the end of Episode 1 (E5)
+/* ---------------------------------------------------------------- 5. ep1-flow: the section change (E4) and the end of co-op (E5)
  * E4 (gap table of notes\ep1-coop-map.md): before this, each PC changed the section by itself after the `epend` rendezvous (180 s cap), so a PC that never reached
  * the end stayed in the old section. Now the HOST's own section change (cEpisodeEndState_vf7 calls FUN_00720540(record, next): 1-1 -> 0x91010200, 1-2 ->
  * 0x91010300) sends the next section's start triple (the start table's checkpoints: (91010200, 512, 0), (91010300, 256, 2)). The client follows it with the
@@ -489,8 +506,8 @@ int rb_msg_epdone(uint8_t *out, size_t cap, uint32_t from);                     
 enum { RB_SC_NONE = 0, RB_SC_SENT = 1, RB_SC_EPEND = 2, RB_SC_NOTED = 3, RB_SC_BAD = -1 };
 /* this PC's own section change (both roles; the glue calls it from the `start` observer when the caller is cEpisodeEndState_vf7): from = the section that ended
  * (the running area's hash, 0 = unknown), next = FUN_00720540's area, next_start = the start table's triple of next (NULL = not found).
- * RB_SC_SENT host: RBM_SECTION sent; RB_SC_EPEND the end of Episode 1 (RBM_EPDONE sent, the follow is off from now on); RB_SC_NOTED client: noted (the host's
- * triple to the same area is consumed); RB_SC_BAD host: no start triple for next (nothing sent, logged); RB_SC_NONE: no session / not a section of Episode 1. */
+ * RB_SC_SENT host: RBM_SECTION sent; RB_SC_EPEND the end of co-op (RBM_EPDONE sent, the follow is off from now on); RB_SC_NOTED client: noted (the host's
+ * triple to the same area is consumed); RB_SC_BAD host: no start triple for next (nothing sent, logged); RB_SC_NONE: no session / not a paired section. */
 int rb_section_change(rb_t *b, uint32_t from, uint32_t next, const rb_triple *next_start);
 /* E5, once per frame while this PC's own end of Episode 1 is known: in_end_flow = the running area is the stock episode end (aEpisodeEnd), level_out = a level
  * with player units whose area is not a section of Episode 1 (2-1 loaded: the latest point). 1 once = close the session now (b->why says why):
@@ -557,10 +574,13 @@ void rb_status(const rb_t *b, char *out, size_t size);
 /* rolebarrier1_game.c (the game glue, game thread): once from probe_install; the console command `barrier status|apply|revert|auto|restart|set` */
 int rolebarrier_init(void);
 void rolebarrier_cmd(const char *arg, char *out, int size);
-unsigned rolebarrier_ep_block_ms(void);   /* GetTickCount when this PC (host) started outside Episode 1 and the session was closed; 0 = never (the in-game strip) */
 /* ep1-flow E5: GetTickCount | 1 when the end of Episode 1 became known here (this PC's own end or the partner's EPDONE; 0 = not, or older than 40 min);
  * *local = this PC passed it itself; *closed = when this PC closed the session for it (0 = not yet). menu.c: the strip, and no loss strip / title return for it. */
 unsigned rolebarrier_ep1_end(int *local, unsigned *closed);
+/* allep1: GetTickCount | 1 when this PC (host) started the solo 16-2 / a non-section id with the room option on and the session was closed (*solo = the solo part); 0 = never */
+unsigned rolebarrier_sec_block(int *solo);
+int rolebarrier_spectating(unsigned *watched);   /* allep1: 1 = this PC spectates in the solo 16-2 (no unit of its own); *watched = the unit it watches */
+int rolebarrier_end_kind(void);   /* allep1: RB_EK_* of the end of co-op that became known here */
 /* lab tools that edit units in memory (probe.c `packcopy`) register an undo here: it runs on the game thread right before FUN_00720870 reloads the level
  * (the host's Continue / game-over "Yes", the guest's own, the follow), i.e. before the teardown that would free shared objects twice (wp6). Only while the
  * restart hook is in force (a network session, REV1_BARRIER=1 or `barrier apply`). At most 4. */

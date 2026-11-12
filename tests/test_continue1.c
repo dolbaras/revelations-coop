@@ -681,7 +681,7 @@ int main(void)
     /* ============================================ hooks, image facts, glue wiring */
     {
         static const uint8_t ls[7] = {0x51, 0x56, 0x57, 0x8B, 0xF9, 0x33, 0xF6}, ct[7] = {0xA1, 0x10, 0x91, 0x16, 0x01, 0x85, 0xC0};
-        CHECK(RBK_N == 8 && rbk_defs[RBK_LSTART].va == 0x41CFC0u && !memcmp(rbk_defs[RBK_LSTART].sig, ls, 7) && rbk_defs[RBK_LSTART].steal == 7 &&
+        CHECK(RBK_N == 11 && rbk_defs[RBK_LSTART].va == 0x41CFC0u && !memcmp(rbk_defs[RBK_LSTART].sig, ls, 7) && rbk_defs[RBK_LSTART].steal == 7 &&
               rbk_defs[RBK_LSTART].kind == RBK_POST && rbk_defs[RBK_LSTART].hold_ret == -1 && !strcmp(rbk_defs[RBK_LSTART].name, "lstart"));
         CHECK(rbk_defs[RBK_CONT].va == 0x41EFE0u && !memcmp(rbk_defs[RBK_CONT].sig, ct, 7) && rbk_defs[RBK_CONT].steal == 7 && rbk_defs[RBK_CONT].kind == RBK_PRE &&
               rbk_defs[RBK_CONT].hold_ret == 0 && !strcmp(rbk_defs[RBK_CONT].name, "cont"));

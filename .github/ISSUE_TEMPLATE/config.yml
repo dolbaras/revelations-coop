@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Players' guide (install, network, saves, limits)
+    url: https://github.com/dolbaras/revelations-coop/blob/main/docs/release-readme.txt
+    about: The README-COOP.txt in the release archive lists the known limits and how to report a problem.

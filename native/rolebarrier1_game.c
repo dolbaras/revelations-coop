@@ -27,6 +27,41 @@
 #include "capture.h"
 #include "net1.h"
 #include "rolebarrier1.h"
+#include "world1_game.h"
+#include "hunk1.h"
+
+/* The Hunk feature (hunk1.h). PRODUCT default (2026-11-12, after lab slot S7: 2-2 with Hunk to its end and into 3-1 on both PCs): HK_PRODUCT = Hunk instead of the story-locked
+ * Parker of 2-2 only. REV1_LAB_HUNK=0 switches it off (the spectator rule of 2-2 again); 1 / 2 / 3 are the LAB modes (16-2, every paired section, 2-2 + 16-1). */
+static int lab_hunk_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *v = getenv("REV1_LAB_HUNK");
+        on = !v || !v[0] ? HK_PRODUCT : v[0] == '0' ? 0 : v[0] == '1' ? 1 : v[0] == '2' ? 2 : v[0] == '3' ? 3 : HK_PRODUCT;   /* 2 = LAB: Hunk in every paired section, 3 = LAB: also 16-1 */
+    }
+    return on;
+}
+
+/* the mode in force now. Lab T3 2026-11-12: in an offline split game the second human's Hunk in 2-2 stood frozen: the script's FsmLockPlayer mIsLockPartner=1 locks "the
+ * partner" = the split's second human (FUN_006B3B80: E1C |= 4, F44 |= 8). world1 (bag1_game.inc hunk_split_unlock) gives him the stock unlock FUN_006AE390, so the PRODUCT mode
+ * counts in a split game too (it was network-only in f8b31c4 while the cause was unknown). */
+static int hunk_mode(void)
+{
+    return lab_hunk_on();
+}
+
+/* LAB ONLY (allep step 4: the 2-2 death study): REV1_LAB_NOSPEC=1 switches the spectator rule off so that the human Parker of 2-2 / 16-1 exists in the pair again. Never set in the product. */
+static int lab_sec_spectate(uint32_t area)
+{
+    static int off = -1;
+    if (off < 0) {
+        const char *v = getenv("REV1_LAB_NOSPEC");
+        off = v && v[0] == '1';
+    }
+    return off ? 0 : hk_spectate(hunk_mode(), area);
+}
+
+
 
 #define CAMROOT_PTR 0x11E00B8u
 #define PCSMAN_PTR 0x116A34Cu     /* [..] = sPcsManager */
@@ -54,9 +89,14 @@ static lk_t *reg_link;
 static int g_role_pad_checks;
 static int g_role_own_fixes;   /* wp12: the partner's own slot put back after something else took it (the lobby close did, fixed in menu.c) */
 static unsigned g_logged[RBK_N];
-/* lobby-must: the Episode 1 gate (the host started outside Episode 1: the session ended) and the client's follow at the title */
-static volatile unsigned g_ep_block_ms;
-static int g_ep_stop;              /* the frame must close the session (outside the lock) */
+/* lobby-must: the host's start of a part that cannot be shared (the session ends) and the client's follow at the title */
+/* allep1 (the room option "Experimental: all episodes"): the host started the solo 16-2 / a non-section id (the session ends with its own message); the kind of an end of co-op */
+static int g_sec_stop;             /* the frame must close the session: 1 = a non-section id, 2 = the solo part (outside the lock) */
+static volatile unsigned g_sec_block_ms;
+static volatile int g_spec_sect;      /* allep1: the section this PC loads / plays is the solo 16-2: the partner's PC must not claim own slot 1 (live allep2j: the client crashed at exe+2c9e10, a null unit read at the 16-2 load) */
+static volatile int g_spectate;       /* allep1: this PC has no unit in the solo 16-2 and watches the other human */
+static volatile unsigned g_spec_unit;
+static volatile int g_end_kind;    /* RB_EK_* of the end of co-op that became known (rb_t.ep_kind, kept outside B like g_ep1_t) */
 static rb_triple g_fol_last;       /* the follow at the title: the last triple tried and when (a refused call is tried again while no level loaded) */
 static unsigned g_fol_t, g_fol_tries;
 static int g_gf_set;               /* rev1 live 10: this PC set its section-end game flags for a SECTION follow (cleared before a fallback restart call) */
@@ -470,6 +510,21 @@ static const char *restart_caller(uint32_t ret)
     }
 }
 
+/* every section start (host restart, client restart, section change) on this PC: the spectator rule of the section and, with the Hunk option, the second human's class (hunk1.h): Hunk
+ * is persisted into slot 1 for the solo part and taken away at the next section. Called under the barrier's lock; world_player_class only stores a word and starts a thread once. */
+static hk_t g_hk;
+static int hunk_split;   /* an offline split game with the Hunk option (barrier_frame): only the section observers are installed */
+static volatile int g_split_st;   /* hunk1.h: a story start of an offline split game is waiting for its complete start record (barrier_frame) */
+static volatile int g_hk_lvl;   /* a level (not the title) has been seen since the last SET: only then is a title area "back at the title" (a Continue from the title calls the restart while the title still runs) */
+static void sect_start(uint32_t area)
+{
+    g_spec_sect = lab_sec_spectate(area);
+    int a = hk_step(&g_hk, hunk_mode(), area);
+    if (a == HK_SET) world_player_class(HK_SLOT, HK_CLASS_HUNK), g_hk_lvl = 0;
+    else if (a == HK_CLEAR) world_player_class(HK_SLOT, 0);
+    if (a != HK_KEEP) r1_log("hunk: section %08x: %s the persisted Hunk class in slot 1", area, a == HK_SET ? "writing" : "taking away");
+}
+
 static uint32_t __attribute__((force_align_arg_pointer)) cb_restart(rbk_frame *f)
 {
     rb_triple t = {f->arg[0], (int32_t)f->arg[1], (int32_t)f->arg[2]};
@@ -482,7 +537,9 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_restart(rbk_frame *f
     if (B.host) {
         B.tx_diff = campaign_diff();
         cp_read(&B.tx_cp);   /* continue1: the host's record after its own checkpoint read (the stock Continue) travels with RESTART */
-        if (rb_restart_host(&B, &t) == RB_ST_EP1) g_ep_stop = 1;
+        int rh = rb_restart_host(&B, &t);
+        sect_start(t.area);
+        if (rh == RB_ST_NOTSEC) g_sec_stop = 1;
         snprintf(what, sizeof what, "restart as the host: area %08x checkpoints %d / %d (%s)", t.area, t.a, t.b, B.why);
         mark(RBK_RESTART, 0, what);
     } else {
@@ -492,6 +549,7 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_restart(rbk_frame *f
         B.call_stock = 0;
         int changed = (r == 1 && (t.area != own.area || t.a != own.a || t.b != own.b)) || r == -1;
         if (r == 1) f->arg[0] = t.area, f->arg[1] = (uint32_t)t.a, f->arg[2] = (uint32_t)t.b, diff_take = B.applied_diff, cp_take_it = B.applied_cp, cp_t = t;
+        if (r == 1 || r == 0) sect_start(t.area);
         hold = r == -1;
         snprintf(what, sizeof what, "restart as the client or offline: own area %08x %d / %d -> %s area %08x %d / %d (%s)", own.area, own.a, own.b, hold ? "NOT NOW" : "runs with", t.area, t.a, t.b, B.why);
         mark(RBK_RESTART, changed, what);
@@ -531,6 +589,43 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_cont(rbk_frame *f)
     r1_log("barrier: cont #%u: %s", HS[RBK_CONT].calls, what);
     LeaveCriticalSection(&cs);
     return (uint32_t)drop;
+}
+
+/* allep1 (hunk1.h): the item box has a bag per campaign character (id = ((class >> 4) & 0xF) + 8 * group) and none for Hunk: a Hunk human asked for its bag at a level start from a save
+ * (FUN_00858b70: `pMyBag is invalid pointer`, sItemBox.cpp 0x4C6) crashed the guest's PC. A Hunk class id is read as Parker's: the bag of that persistent character stands in for him. */
+static uint32_t __attribute__((force_align_arg_pointer)) cb_bagid(rbk_frame *f)
+{
+    if (f->arg[0] == HK_CLASS_HUNK) {
+        f->arg[0] = HK_BAG_AS;
+        HS[RBK_BAGID].calls++;
+        HS[RBK_BAGID].changed++;
+        static unsigned logged;
+        if (logged < 8) {
+            logged++;
+            r1_log("hunk: the item box's bag of class %08x is asked (from %08x): answered with the bag of %08x (Parker)", (unsigned)HK_CLASS_HUNK, f->ret_addr, (unsigned)HK_BAG_AS);
+        }
+    }
+    return 0;
+}
+
+/* allep1 (hunk1.h): right before the engine creates / preloads the section's humans, slot 1's class id is Hunk's (the section start wrote the engine's own value earlier, this write comes last and on
+ * the engine's own thread, so there is nothing to race: the 3 ms persist thread alone lost the race on the host PC) */
+static uint32_t __attribute__((force_align_arg_pointer)) cb_pcls(rbk_frame *f)
+{
+    (void)f;
+    if (g_hk.on) {
+        uint32_t obj = rd32(EPISODE_PTR);
+        uint32_t was = obj > 0x10000 ? rd32(obj + 0x28) : 0;
+        if (obj > 0x10000 && was != HK_CLASS_HUNK) {
+            *(volatile uint32_t *)(uintptr_t)(obj + 0x28) = HK_CLASS_HUNK;
+            static unsigned logged;
+            if (logged < 8) {
+                logged++;
+                r1_log("hunk: the player class of slot 1 was %08x at the creation / preload (from %08x): set to %08x now", (unsigned)was, f->ret_addr, (unsigned)HK_CLASS_HUNK);
+            }
+        }
+    }
+    return 0;
 }
 
 /* continue1 (C) / (D): the engine state in which the stock Continue may be asked (what FUN_006d0ff0 needs, else aStartContinue asserts); NULL = it may */
@@ -703,6 +798,7 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_start(rbk_frame *f)
     EnterCriticalSection(&cs);
     int st = rb_start_seen(&B, f->ret_addr);
     if (st) g_st_area = f->arg[1];
+    if (!section && !st && hunk_split) g_split_st = 1;   /* hunk1.h: an offline split game's story start (the title's New Game / Continue / Load): decided next frame (T3 2026-11-12) */
     mark(RBK_START, 0, "observer");
     if (g_logged[RBK_START] < 40) {
         g_logged[RBK_START]++;
@@ -713,9 +809,11 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_start(rbk_frame *f)
         r1_log("barrier: section change on this PC (%s): finished section %08x (running area %s) -> %08x, start table %s %d / %d", B.host ? "host" : "client", from, an[0] ? an : "?",
                f->arg[1], nx_ok ? "entry" : "has NO entry", nx_ok ? nx.a : 0, nx_ok ? nx.b : 0);
         int r = rb_section_change(&B, from, f->arg[1], nx_ok ? &nx : NULL);
+        sect_start(f->arg[1]);
         if (r == RB_SC_EPEND) {
             g_ep1_local = 1;
             if (!g_ep1_t) g_ep1_t = GetTickCount() | 1;
+            g_end_kind = B.ep_kind;
         }
     }
     LeaveCriticalSection(&cs);
@@ -748,6 +846,14 @@ static int start_triple_now(rb_triple *t)
         *t = r;
         return 1;
     }
+    if (have && (r.area >> 24) == 0x92u) {   /* allep1 (live allep1b): the record holds the START id 0x92EESS00 with the section's checkpoints (a warp / Continue into 2-1: 92020100 768 / 0); its section is what loads, not FUN_00720540's argument */
+        rb_triple m = {0x91000000u | (r.area & 0x00FFFF00u), r.a, r.b}, tab;
+        if (rb_triple_ok(&m, NULL, 0) && rb_table_triple(rd32_cb, NULL, GAMESYS_PTR, m.area, &tab) && tab.a == m.a && tab.b == m.b) {
+            *t = m;
+            r1_log("barrier: host story start: the start record holds the START id %08x %d / %d = the start table's entry of section %08x: that triple is used", r.area, r.a, r.b, m.area);
+            return 1;
+        }
+    }
     if (rb_table_triple(rd32_cb, NULL, GAMESYS_PTR, g_st_area, t)) {
         r1_log("barrier: host story start: the start record holds %s (area %08x %d / %d): the start table's entry of area %08x is used (area %08x %d / %d)", have ? "no start" : "nothing",
                have ? r.area : 0u, have ? r.a : 0, have ? r.b : 0, g_st_area, t->area, t->a, t->b);
@@ -771,7 +877,17 @@ static int level_present(void)
     return 0;
 }
 
-unsigned rolebarrier_ep_block_ms(void) { return g_ep_block_ms; }
+unsigned rolebarrier_sec_block(int *solo)
+{
+    if (solo) *solo = 0;   /* (the solo 16-2 is followed now: only a non-section id closes the session) */
+    return g_sec_block_ms;
+}
+int rolebarrier_end_kind(void) { return g_end_kind; }
+int rolebarrier_spectating(unsigned *watched)
+{
+    if (watched) *watched = g_spectate ? g_spec_unit : 0;
+    return g_spectate;
+}
 int rolebarrier_level_present(void) { return level_present(); }   /* rev1 live 15: coopsave1_game.c */
 static int running_area(char *name, int size, unsigned *hash);
 /* rev1 live 15 (m15l9): the running area is the title (aRevelationsTitle: the press-start screen and the title menu) */
@@ -840,6 +956,9 @@ static uint32_t cb_addr(int i)
     case RBK_START: return (uint32_t)(uintptr_t)cb_start;
     case RBK_LSTART: return (uint32_t)(uintptr_t)cb_lstart;
     case RBK_CONT: return (uint32_t)(uintptr_t)cb_cont;
+    case RBK_BAGID: return (uint32_t)(uintptr_t)cb_bagid;
+    case RBK_PCLSC:
+    case RBK_PCLSP: return (uint32_t)(uintptr_t)cb_pcls;
     default: return CBS_DUMMY;
     }
 }
@@ -849,6 +968,8 @@ static void hooks_sync(int want)
 {
     for (int i = 0; i < RBK_N; i++) {
         int d = hm[i] == 1 ? 1 : hm[i] == 2 ? 0 : (want && !skipped[i]);
+        if ((i == RBK_BAGID || i == RBK_PCLSC || i == RBK_PCLSP) && hm[i] == 0) d = hunk_mode() && (want || hunk_split) && !skipped[i];   /* a co-op game only (HK_PRODUCT is on by default, in a session) */
+        if ((i == RBK_RESTART || i == RBK_START) && hm[i] == 0 && hunk_split && !skipped[i]) d = 1;   /* the split game's section observers (B stays disabled: no holds, no triples) */   /* hunk1.h: with the Hunk option, session or not (a split game too) */
         if (d == hook_last[i]) continue;
         if (d) rbk_apply(&HS[i], &rbk_defs[i], &MEM, cb_addr(i));
         else rbk_revert(&HS[i], &rbk_defs[i], &MEM);
@@ -876,8 +997,19 @@ static void apply_role(int session_ok, int role)
     } else if (R.applied) {
         capture_state_t st;   /* the puppet module unbinds all roles when the session leaves PLAYING: keep ours */
         capture_get_state(&st);
-        if (!st.role[R.role].enabled) capture_bind(R.role, 0), g_role_pad_checks++;
-        if (R.role == 1 && !(st.own_on && st.own_slot == 1)) {   /* the partner's PC answers own slot 1 for the whole session (pickups, doors, prompts) */
+        if (R.role == 1 && g_spec_sect == 2) {   /* the unit of slot 1 exists (2-2 / 16-1) but its human would die: this PC's pad drives nothing of it, the story keeps the AI Parker */
+            if (st.role[1].enabled) {
+                capture_unbind(1);
+                r1_log("barrier: SPECTATOR section (2-2 / 16-1): the partner's character is left to the story (AI): capture_unbind(1)");
+            }
+        } else if (!st.role[R.role].enabled)
+            capture_bind(R.role, 0), g_role_pad_checks++;
+        if (R.role == 1 && g_spec_sect) {   /* allep1: the solo 16-2 has no unit for slot 1: this PC answers the engine's default own slot (0 = the only human, driven by the other PC's records) */
+            if (st.own_on) {
+                capture_set_own(-1);
+                r1_log("barrier: SPECTATOR section (16-2): the partner's own slot 1 is given up for this section: capture_set_own(-1)");
+            }
+        } else if (R.role == 1 && !(st.own_on && st.own_slot == 1)) {   /* the partner's PC answers own slot 1 for the whole session (pickups, doors, prompts) */
             capture_set_own(1);
             if (g_role_own_fixes++ < 8) r1_log("barrier: the partner's own slot was lost (own %s, slot %u): capture_set_own(1) again (#%d)", st.own_on ? "on" : "off", st.own_slot, g_role_own_fixes);
         }
@@ -901,19 +1033,26 @@ static void barrier_frame(void)
         }
     }
     int want = mode == 1 || (mode == 0 && (env_on || active));
+    hunk_split = mode == 0 && !active && hunk_mode() && menu_split_armed();   /* hunk1.h: a split game with the Hunk option needs the section observers (restart, start) and nothing else of the barrier: enabling it whole made the return to the title crash (hk4 21:09) */
     B.host = in.host != 0;
     if (active && !g_was_active) {   /* a new START: the last session's rendezvous, triples and end of Episode 1 are forgotten (with REV1_BARRIER=1 B stays enabled between sessions) */
         rb_reset(&B);
-        g_ep1_t = 0, g_ep1_local = 0, g_ep1_closed = 0, g_ep1_close = 0;
+        g_ep1_t = 0, g_ep1_local = 0, g_ep1_closed = 0, g_ep1_close = 0, g_end_kind = 0, g_sec_stop = 0;
     }
     g_was_active = active;
     rb_set_enabled(&B, want);
     apply_role(mode != 2 && role_mode != 2 && active, in.role);
     hooks_sync(want);
     hooks_last = want;
+    if (g_split_st) {   /* hunk1.h: the story start of an offline split game is no restart and no section change (lab T3: 2-2 by the title gave the split ParkerLight, locked by the story):
+                         * the section's Hunk class is decided from the complete start record of this frame, as the host does in a session (a lab warp shows the warped section here) */
+        g_split_st = 0;
+        rb_triple rec;
+        if (hunk_split && start_triple_now(&rec)) sect_start(rec.area);
+    }
     if (want) {
         drain_events();
-        if (B.ep_peer && !g_ep1_t) g_ep1_t = GetTickCount() | 1;   /* E5: the partner passed the end of Episode 1 */
+        if (B.ep_peer && !g_ep1_t) g_ep1_t = GetTickCount() | 1, g_end_kind = B.ep_kind;   /* E5: the partner passed the end of Episode 1 */
         if (active && B.ep_local && !B.ep_closed) {   /* E5: this PC's own end: close the session after the stock end flow (result, save) */
             static char last_an[48];
             char an[48];
@@ -922,9 +1061,9 @@ static void barrier_frame(void)
             /* the stock end flow: aEpisodeEnd (vf7's next class for the next episode: result, save states) and the flow areas it may pass through for the
              * result / the save (aSceneResult, aSceneSave: cFlowManageArea classes of work\dti-rev1.txt); anything else after it (aEpisodeTitle) = over */
             int in_end = !rd ? -1 : !strcmp(an, "aEpisodeEnd") || !strcmp(an, "aSceneSave") || !strcmp(an, "aSceneResult");
-            int lvl_out = rd && level_present() && sec_of(h) && !rb_ep1_area(sec_of(h));   /* (aCut2100 = 2-1 loaded) */
+            int lvl_out = rd && level_present() && sec_of(h) && !rb_area_ok(sec_of(h));   /* (a level that is no paired section: the latest point to close) */
             if (rd && strcmp(an, last_an)) {
-                r1_log("barrier: END OF EPISODE 1: the running area is now %s (%08x)%s", an, h, lvl_out ? ", a level outside Episode 1" : "");
+                r1_log("barrier: END OF CO-OP: the running area is now %s (%08x)%s", an, h, lvl_out ? ", a level that is no paired section" : "");
                 snprintf(last_an, sizeof last_an, "%s", an);
             }
             if (rb_ep_close_step(&B, in_end, lvl_out, GetTickCount())) g_ep1_close = 1, snprintf(g_ep1_area, sizeof g_ep1_area, "%s", rd ? an : "?");
@@ -936,6 +1075,23 @@ static void barrier_frame(void)
             float pos[3] = {0, 0, 0};
             if (own) r1_safe_read((void *)(size_t)(own + 0x40), pos, sizeof pos);
             int playable = root && mgr0 && own && rb_placed(pos[0], pos[1], pos[2]);   /* e1w2: the units wait at 0,0,0 through the load / start movie */
+            /* allep1: the solo part of the extra episode (16-2, Parker alone): this PC's character has no unit at all. This PC SPECTATES: it is loaded when the camera
+             * stands and the other human is placed (the only human of the level; its pad records come over the network), the camera follows it as in a one-human level */
+            int spectate = 0;
+            if (in.role == 1 && root && mgr0) {
+                unsigned other = unit_by_slot(0);
+                char san[48];
+                unsigned sh = 0;
+                int sk = other && running_area(san, sizeof san, &sh) ? lab_sec_spectate(sec_of(sh)) : 0;
+                if (sk == 2 || (sk == 1 && !own)) {
+                    float op[3] = {0, 0, 0};
+                    r1_safe_read((void *)(size_t)(other + 0x40), op, sizeof op);
+                    spectate = 1, g_spec_unit = other;
+                    if (rb_placed(op[0], op[1], op[2])) playable = 1;
+                }
+            }
+            if (spectate != g_spectate) r1_log("barrier: %s", spectate ? "SPECTATOR: the solo part has no character for this PC's human: it watches the other human (loaded when that unit is placed)" : "spectator: this PC has a character again / left the solo part");
+            g_spectate = spectate;
             rb_load_step(&B, playable);
         } else
             rb_load_step(&B, 0);
@@ -946,13 +1102,20 @@ static void barrier_frame(void)
         int ok = start_triple_now(&rec);
         B.tx_diff = campaign_diff();   /* New Game: the difficulty the player just chose (live check: the host's log names it) */
         int r = rb_start_triple(&B, ok ? &rec : NULL);
-        if (r == RB_ST_EP1) g_ep_stop = 1;
+        if (ok) sect_start(rec.area);   /* hunk1.h: the host's New Game / warp start is no restart or section change: the section's spectator flag and the Hunk class are decided here too (the level is created later) */
+        if (r == RB_ST_NOTSEC) g_sec_stop = 1;
         else if (r == RB_ST_DUP) r1_log("barrier: host story start: the restart hook sent this triple already (area %08x %d / %d)", rec.area, rec.a, rec.b);
     }
-    int ep_stop = g_ep_stop, ep1_close = g_ep1_close;
-    g_ep_stop = 0, g_ep1_close = 0;
+    int ep1_close = g_ep1_close, sec_stop = g_sec_stop;
+    g_ep1_close = 0, g_sec_stop = 0;
     rb_triple fol;
     int at_title = !level_present();
+    if (g_hk.on && !rolebarrier_title_area()) g_hk_lvl = 1;
+    if (g_hk.on && g_hk_lvl && rolebarrier_title_area()) {   /* hunk1.h safety: the game went back to the title from the solo part (no section hook fires for a New game): the next level must not build a Hunk */
+        g_hk.on = 0, g_hk.clears++;
+        world_player_class(HK_SLOT, 0);
+        r1_log("hunk: back at the title: the persisted Hunk class in slot 1 is taken away");
+    }
     int folr = (want && active) ? rb_restart_follow_at(&B, &fol, at_title) : RB_FOL_NONE;   /* `barrier set follow 0` switches it off */
     int secend = folr == RB_FOL_SECEND;   /* rev1 live 10: the follow into the next section by this PC's own stock section end */
     int follow = folr == RB_FOL_CALL;
@@ -1011,14 +1174,14 @@ static void barrier_frame(void)
         rb_cpm_applied(&B, called, &after);
         LeaveCriticalSection(&cs);
     }
-    if (ep_stop) {   /* the host started outside Episode 1: the partner cannot follow, the session ends (the partner reads "the host has ended the session") */
-        g_ep_block_ms = GetTickCount() | 1;
-        r1_log("barrier: this PC started a part outside Episode 1: the network session is closed (Episode 1 only in this version)");
+    if (sec_stop) {   /* allep1: the host started the solo 16-2 / a non-section id: the partner cannot play it, the session ends (the partner reads "the host has ended the session") */
+        g_sec_block_ms = GetTickCount() | 1;
+        r1_log("barrier: this PC started %s: the network session is closed (all episodes: only paired sections are shared)", sec_stop == 2 ? "the solo part (16-2)" : "a part that is no section of the campaign");
         net1_stop();
     }
     if (ep1_close) {   /* E5: after this PC's own stock end flow; the strip and the silence about the partner's end are menu.c's (rolebarrier_ep1_end) */
         g_ep1_closed = GetTickCount() | 1;
-        r1_log("barrier: END OF EPISODE 1: this PC closes the network session (running area %s); Episode 2 is not played in the session", g_ep1_area);
+        r1_log("barrier: END OF CO-OP: this PC closes the network session after its end flow (running area %s)", g_ep1_area);
         net1_stop();
     }
     if (secend) {   /* outside the lock: the flags the section's final script sets; cEpisodeEndState_vf7 follows within frames (epend / start hooks) */
@@ -1077,7 +1240,6 @@ int rolebarrier_init(void)
     eq_ready = 1;
     rb_io io = {io_now, io_session, io_send, io_begin, io_done, io_log, NULL};
     rb_init(&B, &io, NULL);
-    B.cfg.ep1_only = !(r1_env("REV1_ANYEPISODE", v, sizeof v) && v[0] == '1');   /* the product: Episode 1 only (lab: REV1_ANYEPISODE=1 lets 9-2 tests run) */
     rb_role_init(&R);
     env_on = r1_env("REV1_BARRIER", v, sizeof v) && atoi(v) == 1;
     if (r1_env("REV1_BARRIER_OFF", v, sizeof v)) {   /* comma separated hook names; "role" and "load" switch those parts off */
@@ -1174,7 +1336,6 @@ void rolebarrier_cmd(const char *arg, char *out, int size)
         else if (!strcmp(w1, "latch")) B.cfg.latch_ms = v;
         else if (!strcmp(w1, "notriple")) B.cfg.no_triple_hold_ms = (int)v;
         else if (!strcmp(w1, "follow")) B.cfg.follow_ms = (int)v;
-        else if (!strcmp(w1, "ep1only")) B.cfg.ep1_only = v != 0;
         /* continue1: the switches (1 = the fix, 0 = the model before it) and the limits */
         else if (!strcmp(w1, "cpsync")) B.cfg.cp_sync = v != 0;
         else if (!strcmp(w1, "lhold")) B.cfg.lstart_hold = v != 0;
@@ -1194,7 +1355,7 @@ void rolebarrier_cmd(const char *arg, char *out, int size)
             LeaveCriticalSection(&cs);
             return;
         } else {
-            snprintf(out, (size_t)size, "barrier set section|pcs|latch|notriple|follow|lstart|shieldms|stockwait|contwait <ms> | ep1only|cpsync|lhold|shield|stock|contreq 0|1 | logs 0");
+            snprintf(out, (size_t)size, "barrier set section|pcs|latch|notriple|follow|lstart|shieldms|stockwait|contwait <ms> | cpsync|lhold|shield|stock|contreq 0|1 | logs 0");
             LeaveCriticalSection(&cs);
             return;
         }
@@ -1210,6 +1371,14 @@ void rolebarrier_cmd(const char *arg, char *out, int size)
             snprintf(out, (size_t)size, "barrier: cp: record %08X: +8 %08X mask %04X area %08X mID %d checkpoints %d / %d; sCheckPoint +0x5c %08X; save manager busy %u slot %d; the area start's movie after a restart: %s",
                      r, w[2], w[4] & 0xFFFFu, w[5], (int32_t)w[6], (int32_t)w[7], (int32_t)w[8], rd32(rd32(CHECKPT_PTR) + 0x5C), rd32(rd32(SAVEMAN_PTR) + 0xB4),
                      (int)rd32(rd32(SAVEMAN_PTR) + 0xE0), rb_start_movie_plays(0, 1, (int32_t)w[6]) ? "PLAYS (mID <= 0)" : "skipped");
+    } else if (!strcmp(sub, "hunk")) {   /* LAB (Hunk program): barrier hunk on | off: slot 1 of the NEXT level start is a Hunk (the same as a section start of the solo part does), for a start the section hooks do not see
+                                          * (an offline New Game of a split game); needs REV1_LAB_HUNK set (the creation hooks are installed with it) */
+        if (!strcmp(w1, "on") || !strcmp(w1, "off")) {
+            int on = w1[1] == 'n';
+            g_hk.on = on, g_hk_lvl = 0;
+            world_player_class(HK_SLOT, on ? HK_CLASS_HUNK : 0);
+            snprintf(out, (size_t)size, "barrier hunk %s: the persisted Hunk class of slot 1 is %s (hooks: %s)", w1, on ? "ON" : "off", lab_hunk_on() ? "installed" : "NOT installed: start the game with REV1_LAB_HUNK=1");
+        } else snprintf(out, (size_t)size, "barrier hunk: %s (usage: barrier hunk on|off)", g_hk.on ? "ON" : "off");
     } else if (!strcmp(sub, "gflags")) {   /* rev1 live 10, LAB: barrier gflags [get | set | clear]: the two section-end game flags (set = this PC's own stock section end) */
         if (!strcmp(w1, "set") || !strcmp(w1, "clear")) {
             int ok = section_end_flags(w1[0] == 's');
@@ -1228,6 +1397,14 @@ void rolebarrier_cmd(const char *arg, char *out, int size)
             snprintf(out, (size_t)size, "barrier gflags: holder %08X (%u objects); section end: episode object %08X bit 2 = %d, cut object %08X bit 2 = %d; restart bits (object %08X): 1 = %d, 3 = %d; set %u failed %u cleared %u",
                      holder, n, oe, be, oc, bc, orr, b1, b3, g_gf_sets, g_gf_fails, g_gf_clears);
         }
+    } else if (!strcmp(sub, "table")) {   /* allep1 (LAB): barrier table <hex area>: the start table's triple of a section (what the host sends the client) and the id's kind */
+        rb_triple t;
+        uint32_t area = (uint32_t)strtoul(w1, NULL, 16);
+        int kind = rb_section_kind(area);
+        if (rb_table_triple(rd32_u, NULL, GAMESYS_PTR, area, &t))
+            snprintf(out, (size_t)size, "barrier: table %08x: checkpoints %d / %d (kind %s)", area, t.a, t.b, kind == RB_SK_PAIR ? "paired section" : kind == RB_SK_SOLO ? "SOLO part" : kind == RB_SK_NOTSEC ? "NOT a section" : "end");
+        else
+            snprintf(out, (size_t)size, "barrier: table %08x: no entry in the start table (kind %s)", area, kind == RB_SK_PAIR ? "paired section" : kind == RB_SK_SOLO ? "SOLO part" : kind == RB_SK_NOTSEC ? "NOT a section" : "end");
     } else if (!strcmp(sub, "restart")) {
         rb_triple t = {(uint32_t)strtoul(w2, NULL, 16), atoi(w3), atoi(w4)};
         const char *more = w5;

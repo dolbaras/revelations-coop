@@ -117,7 +117,7 @@ the installed script writes its zip, uninstall removes it) and the shared `tools
   0.1.0 the DLL makes these folders at the first screenshot, before it made them at every game start). The game's saves, the co-op save `rev1_coop_save\COOP0.DAT` and `rev1_coop.ini` (the lobby's settings,
   `%LOCALAPPDATA%\CAPCOM\RESIDENT EVIL REVELATIONS`) are not touched.
 - Texts in 13 languages (en ru de fr it es pt pt-br nl pl ja zh-cn zh-tw; the game's own set), chosen by Windows' language, `-Lang` or the list in the window. The first page
-  names where co-op starts (the "Co-Op Play" row), what is covered (split screen: the campaign; network: Episode 1), both network ways (Steam friends; IP address with UDP
+  names where co-op starts (the "Co-Op Play" row), what is covered (split screen and network: the campaign), both network ways (Steam friends; IP address with UDP
   28410 and the firewall) and the co-op save (round 15: a network game keeps its own save on each PC, the solo save is not changed); the launcher's update window carries the network line.
 
 ## Other mods' dinput8.dll: the DLL side
@@ -137,7 +137,7 @@ the Revelations 2 mod ran the Fusion Fix's loader live this way on 2026-11-07).
 `powershell -File tests\test_installer.ps1 [-RealGame <folder with a COPY of the real rerev.exe>] [-OldZip <released zip>] [-Online] [-Keep]` (everything in a temp folder, no game is
 started; without `-Online` no network but 127.0.0.1). The same cases as the Revelations 2 mod's test plus this mod's (2026-11-09: 266 checks with `-OldZip`, see "Release status"):
 - the package: the zip's layout, every entry name with "/", the payload list, the log collector in it, the DLL version gate (another version refused, the same one taken); the
-  0.1.0 package's readme (its own version, UDP 28410, the firewall, Episode 1, no "known problems" list and no pre-release wording), `R1_VERSION`, the "Full release" section here;
+  0.1.0 package's readme (its own version, UDP 28410, the firewall, the whole campaign, no "known problems" list and no pre-release wording), `R1_VERSION`, the "Full release" section here;
 - the installer: a fake exe is refused without a trace; install over a game with a foreign dinput8.dll (backup, record, two shortcuts, every other game file untouched, a
   `dinput8_real.dll` and a plugin folder of the player survive, the result says the foreign DLL is off); reinstall; uninstall (byte for byte); a game without dinput8.dll (the
   mod's logs and an empty `rev1_coop\` go too); a path with spaces and an apostrophe (a screenshot and a look-alike log stay); the installed log collector writes its zip;
@@ -175,10 +175,21 @@ GitHub never reports a pre-release as "latest", so a pre-release is never instal
 | Pre-release 1 | `0.0.1`, tag `v0.0.1`, GitHub "pre-release" | published 2026-11-05 |
 | Pre-release 2 | `0.0.2`, tag `v0.0.2`, GitHub "pre-release" | published 2026-11-06 (`R1_VERSION` was `0.0.2-pre2`) |
 | First full release | `0.1.0` (tag `v0.1.0`, NOT a pre-release) | higher than any `0.0.N`, so every tester who installed a pre-release is updated by the shortcut at the next start |
+| Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release; prepared on branch allep1, NOT published) | network co-op over all episodes (no setting); `R1_VERSION` in `native/r1.h` is `0.2.0` |
 
 Rules: never publish a full release with a version below `0.1.0`; never mark `v0.1.0` or higher as a pre-release while it should reach players; no "RC" wording anywhere (title,
 notes, tag message, README). Both players need the same package: the network hello carries the mod version (`R1_VERSION`) and refuses another one with a reason; a release that
 changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
+
+## 0.2.0 (all episodes; prepared, not published)
+
+- **Number:** `0.2.0` (the first release that changes what the network game does between the sections; 0.1.x would hide that). `R1_VERSION` = `0.2.0`; the package, tag and `coop\version.txt` all say `0.2.0`.
+- **How it is built in:** `native/r1.h` `#define R1_VERSION "0.2.0"`; `package.ps1 -Version 0.2.0` refuses a DLL that does not hold the string `0.2.0` (the DLL holds it as a string of its own between two zero bytes), `README-COOP.txt` and `coop\version.txt` get it from `-Version`.
+- **0.1.0 -> 0.2.0 by the shortcut:** the 0.1.0 launcher (the one on the player's PC, `coop\coop-launcher.ps1`) asks `releases/latest` at the start of the game, sees a tag that parses as a higher .NET `[version]`, downloads the zip, checks it against the digest of the release JSON and runs the new installer (the protocol above: record, backup, chain).
+  `tests\test_installer.ps1 -OldZip work\dist-010-r17\revelations-coop-0.1.0.zip` (the PUBLISHED v0.1.0 asset, sha256 starts `17f3348f...`, the digest recorded below) runs exactly that: ITS launcher updates a stand-in game folder to the 0.2.0 package of this tree through the local feed (268 of 268, 2026-11-11).
+- **0.1.0 meets 0.2.0 in a game:** the hello carries the mod version string (`coop_session.c`: `mod_mismatch`, refusal `CP_REF_MODVER`): the host refuses the other version with the text `co-op mod X on the host, Y here: both need the same version (the Co-op shortcut updates it)` (the lobby shows it in the game's language), in both directions, before any section message is sent. So the 0.1.0 guest
+  that rejects a SECTION outside Episode 1 (`ep1_only`) never gets one: nothing desyncs, a player simply updates. `CP_PROTO_VERSION` stays `3`: no message layout changed (RBM_SECTION / RBM_EPDONE are the 0.1.0 layouts; only which sections are allowed changed).
+- **Before publishing:** the checklist of the full release below (the 0.2.0 version of it: `lab\publish-0.2.0-checklist.md`), `notes\allep-live.md` (verdict table), `lab\release-notes-0.2.0-draft.txt` (what is verified, what is not, what to check by hand) and the owner's word.
 
 ## Full release (every player's shortcut installs it)
 

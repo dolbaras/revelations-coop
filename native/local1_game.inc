@@ -29,6 +29,11 @@ static volatile uint32_t wv_unit[2][WV_MAX], wv_entry[2][WV_MAX];
 static volatile uint8_t wv_keep[2][WV_MAX];   /* 1 = zkeep1.h rule 7 (the host simulates it): its zone-leave reset is skipped too; 0 = watch1.h rule 4 */
 #define wv_n (wv_cnt[wv_cur])
 #include "zkeep1.h"
+#include "fallres1.h"
+static volatile uint32_t pcls_persist[2];   /* LAB (Hunk probe): `world pcls persist <slot> <hexid>`: the player class id of that slot is re-written every pass (the engine rewrites cSystem_20 at the section start; FUN_0042B720 / FUN_0042A730 read it frames later) */
+static volatile int f_fallres = 0;     /* LAB (allep step 4, `world set fallres 1`): fallres1.h, an own human without ground for 1.5 s (not falling) is put next to the partner before the engine kills him at 5 s */
+static frs_t FRS;
+static volatile int f_fallguard = 0;   /* LAB (allep step 4, `world set fallguard 1`): the fall-out timer of the humans' move objects is held at 0 (FUN_006F16B0: no ground for 5 s -> FUN_006F0660 kills the OWN human; a human of another slot is exempt) */
 static volatile int f_zkeep = 1;       /* client: rule 7 of zkeep1.h; `world set zkeep 0` = the model before the fix (the m16a1 hide) */
 static volatile DWORD zk_pass_tid;     /* the engine thread inside FUN_00460250 (hook_zpass) */
 static struct { volatile LONG listed_units, lists, skipped, cleared; } ZK;
@@ -258,6 +263,41 @@ static void local_send(unsigned type, w1_key key, float hp, unsigned killer)
 
 static void local_pass(uint32_t now)
 {
+    for (unsigned s = 0; s < 2; s++) {   /* every pass: the persisted player class ids (Hunk probe) */
+        uint32_t obj = rd32(0x116A340u);
+        if (pcls_persist[s] && obj && rd32(obj + 0x24 + 4 * s) != pcls_persist[s]) {
+            uint32_t v = pcls_persist[s];
+            wr(obj + 0x24 + 4 * s, &v, 4);
+            wlog("pcls persist: the player class of slot %u was set to %08x again (the engine had written something else)", s, (unsigned)v);
+        }
+    }
+    if (f_fallres) {   /* every pass: the fall-out rescue of the OWN human (fallres1.h; a Hunk human has his own pass: hunk_local_pass in bag1_game.inc) */
+        uint32_t ou = 0, pu = 0;
+        if (wh_player_by_slot(&MEM, (unsigned)g_own, &ou) && ou) {
+            wh_player_by_slot(&MEM, (unsigned)(1 - g_own), &pu);
+            uint32_t mo = rd32(ou + 0xE88);
+            int ng = mo && rd8(mo + 0x2B5) == 1 && rd8(mo + 8) == 1;
+            if (frs_step(&FRS, ng, rdf(ou + WH_U_POS + 4), pu != 0, now ? now : 1)) {
+                float pp[3] = {rdf(pu + WH_U_POS), rdf(pu + WH_U_POS + 4), rdf(pu + WH_U_POS + 8)}, to[3];
+                uint32_t zero = 0;
+                frs_target(pp, to);
+                wr8(mo + 0x2B4, 1);   /* the move object's teleport byte (as op_update) */
+                wr(ou + WH_U_POS, to, 12);
+                wr(ou + 0x4C, &zero, 4);
+                wrf(mo + 0x2B8, 0.0f);
+                wlog("fallres: the own human (slot %d, unit %08x) had no ground for %u ms: put next to the partner at (%.0f,%.0f,%.0f) before the engine's fall-out (5 s) kills him (rescue #%u)", (int)g_own, (unsigned)ou, FRS_AFTER_MS, to[0], to[1], to[2], FRS.rescues);
+            }
+        }
+    }
+    if (f_fallguard) {   /* before the 250 ms throttle: every pass */
+        for (unsigned s = 0; s < 2; s++) {
+            uint32_t hu = 0;
+            if (wh_player_by_slot(&MEM, s, &hu) && hu) {
+                uint32_t mo = rd32(hu + 0xE88);
+                if (mo && rdf(mo + 0x2B8) > 0.0f) wrf(mo + 0x2B8, 0.0f);
+            }
+        }
+    }
     if ((int32_t)(now - ew_last_ms) < 250) return;
     ew_last_ms = now;
     {   /* rev1 live 12 (stage1.h): the stage part codes under this PC's active human go to the other PC on change */

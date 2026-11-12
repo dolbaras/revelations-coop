@@ -71,6 +71,21 @@ int testmode_pad_swap_base_get(void) { return g_swap_base; }
 void *steam_context(void) { return NULL; }
 const char *steam_persona_name(void) { return NULL; }   /* lobby-must: no Steam in the harness (the name falls back to "Player 1" / "Player 2") */
 unsigned rolebarrier_ep_block_ms(void) { return 0; }
+/* allep1: the solo / non-section block and the end kind as rolebarrier1_game.c reports them (the test sets them) */
+static unsigned g_t_secblock;
+static int g_t_secblock_solo, g_t_endkind;
+unsigned rolebarrier_sec_block(int *solo)
+{
+    if (solo) *solo = g_t_secblock ? g_t_secblock_solo : 0;
+    return g_t_secblock;
+}
+int rolebarrier_end_kind(void) { return g_t_endkind; }
+static int g_t_spec;
+int rolebarrier_spectating(unsigned *watched)
+{
+    if (watched) *watched = 0;
+    return g_t_spec;
+}
 int coopsave_rec_role1(void) { return 0; }   /* rev1 live 16: no co-op save in the harness */
 /* ep1-flow E5: the end of Episode 1 as rolebarrier1_game.c reports it (the test sets it) */
 static unsigned g_t_ep1, g_t_ep1_closed;
@@ -320,7 +335,7 @@ int main(void)
     frames(3);
     CHECK(g_orig_calls == 3);   /* the stock menu runs again */
     menu_present(NULL);
-    CHECK(g_drawn.kind == OV_HINT && strstr(g_drawn.hint, "Co-Op is ON") && strstr(g_drawn.hint, "Parker / Jill"));
+    CHECK(g_drawn.kind == OV_HINT && strstr(g_drawn.hint, "Co-op is ON") && strstr(g_drawn.hint, "Parker / Jill"));
 
     /* the gamepad BACK button opens it, B closes; layout and pad exchange by pad */
     g_pad[1] = 0x0020;
@@ -419,7 +434,7 @@ int main(void)
             static unsigned smain_ptr;
             static const struct { unsigned m; const char *label; const char *help; } lc[] = {
                 {10, "СОВМЕСТНАЯ ИГРА", "Два игрока: разделённый экран на одном ПК или по сети."}, {8, "协力游玩", NULL}, {7, "協力遊玩", NULL}, {21, "JOGO COOPERATIVO", NULL},
-                {9, "JOGO COOPERATIVO", NULL}, {11, "GRA KOOPERACYJNA", NULL}, {12, "CO-OP SPELEN", NULL}, {0, "協力プレイ", NULL}, {4, "Koop-Spiel", NULL},
+                {9, "JOGO COOPERATIVO", NULL}, {11, "TRYB WSPÓŁPRACY", NULL}, {12, "CO-OP SPELEN", NULL}, {0, "協力プレイ", NULL}, {4, "Koop-Spiel", NULL},
                 {6, "Co-Op Play", NULL}, {20, "Co-Op Play", NULL}, {1, "Co-Op Play", "Two players: split screen on one PC, or over the network."}};
             unsigned three = 3, before = g_add_calls;
             SetEnvironmentVariableA("REV1_LANG", NULL);
@@ -490,7 +505,7 @@ int main(void)
             CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);   /* hosting, nobody joined yet: held */
             frames(2);
             menu_present(NULL);
-            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Waiting for the other player to join...  F6 / Back button: Co-Op Play") && g_drawn.strip_kind == L1S_WARN);
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Waiting for the other player to join...  F6 / BACK button: Co-Op Play") && g_drawn.strip_kind == L1S_WARN);
             if (g_drawn.kind != OV_STRIP) printf("  (gate, host alone: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
             CHECK(menu_test_act(main_page, 1, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);   /* Back: stock */
             cur = 1; memcpy(main_page + 0x408, &cur, 4);
@@ -504,16 +519,16 @@ int main(void)
             CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);   /* the partner is in the room, nobody ready: held */
             frames(2);
             menu_present(NULL);
-            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Choose 'I am ready' when you are set.  F6 / BACK button: Co-Op Play"));
             lk_set_ready(jk, 1);   /* the partner marks ready: the strip follows while it shows */
             for (int i = 0; i < 60; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
             menu_present(NULL);
-            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Joiny is ready.  Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Joiny is ready.  Choose 'I am ready' when you are set.  F6 / BACK button: Co-Op Play"));
             if (!strstr(g_drawn.hint, "Joiny is ready")) printf("  (gate, partner ready: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
             lk_set_ready(jk, 0);   /* ... and un-ready */
             for (int i = 0; i < 60; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
             menu_present(NULL);
-            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Choose 'I am ready' when you are set.  F6 / BACK button: Co-Op Play"));
             net1_cmd("ready 1", st, sizeof st);   /* the host is ready, the partner not: still held */
             for (int i = 0; i < 60; i++) net1_frame(), lk_poll(jk), frames(1), Sleep(2);
             CHECK(!net1_session_active());
@@ -529,7 +544,7 @@ int main(void)
             CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 7 && g_act_orig_calls == a0 + 1);
             frames(2);
             menu_present(NULL);
-            CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Start Episode 1") != NULL);   /* the gate's line is gone: the host's "what now" */
+            CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Start the story") != NULL);   /* the gate's line is gone: the host's "what now" */
             menu_cmd("net", st, sizeof st);
             CHECK(strstr(st, "strip 0 ") != NULL);   /* the gate's event strip is cleared (the running HOST_GO line is drawn above) */
             if (!strstr(st, "strip 0 ")) printf("  (gate, after START: %s)\n", st);
@@ -546,7 +561,7 @@ int main(void)
             CHECK(hi.role == want && ji.role == was);   /* both links follow */
             menu_present(NULL);
             char wl[120];
-            snprintf(wl, sizeof wl, "Continue keeps the characters of the co-op save. Your character: %s.", want ? "Parker" : "Jill");
+            snprintf(wl, sizeof wl, "'Continue' keeps the characters of the co-op save. Your character: %s.", want ? "partner" : "lead character");
             CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, wl));
             if (!strstr(g_drawn.hint, "co-op save")) printf("  (role lock strip: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
             CHECK(lk_force_roles(jk, was) == -1 && lk_force_roles(net1_link_peek(), want) == 0);   /* the guest never; already so */
@@ -573,7 +588,7 @@ int main(void)
             CHECK(menu_test_act(main_page, 0, 0, fake_act_orig) == 1 && g_act_orig_calls == a0);
             frames(2);
             menu_present(NULL);
-            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Hosty is ready.  Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+            CHECK(g_drawn.kind == OV_STRIP && !strcmp(g_drawn.hint, "Hosty is ready.  Choose 'I am ready' when you are set.  F6 / BACK button: Co-Op Play"));
             if (!strstr(g_drawn.hint, "Hosty is ready")) printf("  (gate, guest: drawn kind %d: %s)\n", g_drawn.kind, g_drawn.hint);
             lk_stop(hk2);   /* the host closes the room: the link ends (ERROR), the gate with it */
             for (int i = 0; i < 100; i++) net1_frame(), frames(1), Sleep(2);
@@ -735,12 +750,12 @@ int main(void)
                 lk_stop(hk);
                 for (int i = 0; i < 60; i++) net1_frame(), frames(1), Sleep(2);
                 menu_cmd("net", st, sizeof st);
-                if (variant == 0) CHECK(strstr(st, "strip 11 ") && strstr(st, "quit at +0 ms"));
-                else CHECK(strstr(st, "strip 12 ") && !strstr(st, "quit at +0 ms"));
-                if (!strstr(st, variant ? "strip 12 " : "strip 11 ")) printf("  (menu net, variant %d: %s)\n", variant, st);
+                if (variant == 0) CHECK(strstr(st, "strip 13 ") && strstr(st, "quit at +0 ms"));
+                else CHECK(strstr(st, "strip 14 ") && !strstr(st, "quit at +0 ms"));
+                if (!strstr(st, variant ? "strip 14 " : "strip 13 ")) printf("  (menu net, variant %d: %s)\n", variant, st);
                 menu_present(NULL);
-                if (variant == 0) CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Episode 1 complete! The co-op session has ended") && g_drawn.strip_kind == L1S_INFO);
-                else CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Episode 1: the host has reached the end.") && strstr(g_drawn.hint, "Returning to the title screen") && g_drawn.strip_kind == L1S_WARN);
+                if (variant == 0) CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "Campaign complete! The co-op session has ended") && g_drawn.strip_kind == L1S_INFO);
+                else CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "The host has reached the end of the campaign.") && strstr(g_drawn.hint, "Returning to the title screen") && g_drawn.strip_kind == L1S_WARN);
                 fake_level(0);
                 st0 = 4;
                 memcpy(main_page + 0x3FC, &st0, 4);
@@ -752,14 +767,39 @@ int main(void)
             g_t_ep1 = GetTickCount() | 1, g_t_ep1_local = 1, g_t_ep1_closed = GetTickCount() | 1;
             frames(2);
             menu_cmd("net", st, sizeof st);
-            CHECK(strstr(st, "strip 11 ") != NULL);
+            CHECK(strstr(st, "strip 13 ") != NULL);
+            /* allep1: the strip of an end of co-op by its kind (the campaign over, the solo part, not a section); and the host's solo / non-section block */
+            {
+                static const struct { int kind, strip; const char *text; } sc[] = {{1, 13, "complete! The co-op session has ended"}, {3, 15, "not a story section"}};
+                for (unsigned i = 0; i < 2; i++) {
+                    g_t_endkind = sc[i].kind;
+                    Sleep(20);
+                    g_t_ep1 = GetTickCount() | 1, g_t_ep1_local = 1, g_t_ep1_closed = GetTickCount() | 1;
+                    frames(2);
+                    menu_cmd("net", st, sizeof st);
+                    char want[16];
+                    snprintf(want, sizeof want, "strip %d ", sc[i].strip);
+                    CHECK(strstr(st, want) != NULL);
+                    menu_present(NULL);
+                    CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, sc[i].text) && g_drawn.strip_kind == (sc[i].kind == 1 ? L1S_INFO : L1S_WARN));
+                    if (!strstr(g_drawn.hint, sc[i].text)) printf("  (allep strip %d: %s / %s)\n", sc[i].kind, st, g_drawn.hint);
+                }
+                g_t_endkind = 0, g_t_ep1 = 0, g_t_ep1_local = 0, g_t_ep1_closed = 0;
+                Sleep(20);
+                g_t_secblock = GetTickCount() | 1, g_t_secblock_solo = 0;
+                frames(2);
+                menu_cmd("net", st, sizeof st);
+                CHECK(strstr(st, "strip 15 ") != NULL);
+                g_t_secblock = 0, g_t_secblock_solo = 0;
+                frames(2);
+            }
             /* ep1-solo E3: the story switched this PC's character off: once per watch the strip names the character this PC watches (the lead's name
              * when the class cannot be read: "Jill"); the same watch does not show it again */
             g_t_ep1 = 0, g_t_ep1_local = 0, g_t_ep1_closed = 0;
             g_t_watch_on = 1, g_t_watch_unit = 0x4321u, g_t_watch_enters = 1;
             frames(2);
             menu_cmd("net", st, sizeof st);
-            CHECK(strstr(st, "strip 13 ") != NULL);
+            CHECK(strstr(st, "strip 10 ") != NULL);
             menu_present(NULL);
             CHECK(g_drawn.kind == OV_STRIP && strstr(g_drawn.hint, "For now Jill goes on without you: you are watching until you meet again."));
             if (!strstr(g_drawn.hint, "goes on without you")) printf("  (menu net, watch: %s / drawn kind %d: %s)\n", st, g_drawn.kind, g_drawn.hint);
@@ -784,6 +824,14 @@ int main(void)
                 for (int i = 0; i < 60; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
                 lk_get_info(gk, &gi);
                 CHECK(gi.set.flags == 7 && net1_session_flags() == 7);
+                net1_cmd("set flags 15", st, sizeof st);   /* allep1: bit 3 (the room option) travels in the same byte, the guest reads it from the session record */
+                for (int i = 0; i < 60; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
+                lk_get_info(gk, &gi);
+                CHECK(gi.set.flags == 15 && (gi.set.flags & 8) && net1_session_flags() == 15);
+                net1_cmd("set flags 7", st, sizeof st);
+                for (int i = 0; i < 60; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
+                lk_get_info(gk, &gi);
+                CHECK(gi.set.flags == 7 && net1_session_flags() == 7);
                 net1_cmd("ready 1", st, sizeof st);
                 lk_set_ready(gk, 1);
                 for (int i = 0; i < 100; i++) net1_frame(), lk_poll(gk), frames(1), Sleep(2);
@@ -798,8 +846,8 @@ int main(void)
                 lk_stop(gk);
                 for (int i = 0; i < 100; i++) net1_frame(), frames(1), Sleep(2);
                 menu_cmd("net", st, sizeof st);
-                CHECK(strstr(st, "strip 11 ") && !strstr(st, "strip 3 "));
-                if (!strstr(st, "strip 11 ")) printf("  (menu net, host: %s)\n", st);
+                CHECK(strstr(st, "strip 13 ") && !strstr(st, "strip 3 "));
+                if (!strstr(st, "strip 13 ")) printf("  (menu net, host: %s)\n", st);
                 fake_level(0);
                 st0 = 4;
                 memcpy(main_page + 0x3FC, &st0, 4);

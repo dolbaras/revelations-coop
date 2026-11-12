@@ -38,7 +38,6 @@ static int same_word_ok(int id, int lang)
     case L1T_PAD1: case L1T_PAD2: return lang == 3 || lang == 7 || lang == 8;   /* "Gamepad 1" */
     case L1T_LEG_OK: return lang != 5 && lang != 11 && lang != 12;          /* "OK": the game's own key legend says OK in these languages (Russian title menu: "(A) OK (B) Назад") */
     case L1T_SECS: return lang != 5 && lang != 6 && lang != 11 && lang != 12;   /* "%s s" */
-    case L1T_EPISODE1: return lang == 3 || lang == 5 || lang == 8;           /* the game's own campaign_<lang>.gmd episode_01 is "Episode 1" there */
     default: return 0;
     }
 }
@@ -140,6 +139,16 @@ static void test_persons(void)
     CHECK(!strcmp(l1_person_name(5, 0), "Quint"));
     l1_set_stock_names(NULL);
     CHECK(!strcmp(l1_person_name(0, 6), "Jill"));
+    /* allep1: Hunk (hunk1.h) has no stock name: built in, one per language, stock names do not touch him */
+    CHECK(l1_person_from_class("uPl< Hunk >") == 7 && l1_person_from_class("uPlHunk") == 7);
+    /* i18n1: the spelling is the game's own Raid list (Coop_<lang>.gmd char_name_11): HUNK (Latin languages and Japanese), ХАНК, 汉克, 漢克 */
+    CHECK(!strcmp(l1_person_name(7, 0), "HUNK") && !strcmp(l1_person_name(7, 1), "HUNK") && !strcmp(l1_person_name(7, 12 - 1), "\xE6\xB1\x89\xE5\x85\x8B"));
+    CHECK(!strcmp(l1_person_name(7, 5), "HUNK") && !strcmp(l1_person_name(7, 6), "\xD0\xA5\xD0\x90\xD0\x9D\xD0\x9A") && !strcmp(l1_person_name(7, 12), "\xE6\xBC\xA2\xE5\x85\x8B"));
+    CHECK(!strcmp(l1_person_name(7, -1), "HUNK") && !strcmp(l1_person_name(7, 99), "HUNK") && !strcmp(l1_person_name(8, 0), "?"));
+    for (int lg = 0; lg < L1_LANGS; lg++) CHECK(l1_person_name(7, lg)[0] && strlen(l1_person_name(7, lg)) < 12);
+    l1_set_stock_names((const char(*)[48])names);
+    CHECK(!strcmp(l1_person_name(7, 6), "\xD0\xA5\xD0\x90\xD0\x9D\xD0\x9A"));
+    l1_set_stock_names(NULL);
 }
 
 static l1_env mkenv(int lang, int pads)
@@ -300,10 +309,10 @@ static void test_views_all_languages(void)
     l1_env env = mkenv(0, 2);
     char h[300];
     l1_hint_text(&s, &env, h, sizeof h);
-    CHECK(strstr(h, "Co-Op is ON") && strstr(h, "Parker / Jill") && strstr(h, "F6"));
+    CHECK(strstr(h, "Co-op is ON") && strstr(h, "Parker / Jill") && strstr(h, "F6"));
     s.armed = 0;
     l1_hint_text(&s, &env, h, sizeof h);
-    CHECK(!strcmp(h, "F6 / Back button: Co-Op Play"));
+    CHECK(!strcmp(h, "F6 / BACK button: Co-Op Play"));
     l1_hint_text(&s, &env, h, 12);
     CHECK(strlen(h) == 11);   /* a short buffer truncates (the English hint is ASCII) */
 }
@@ -528,7 +537,7 @@ static void test_net_model(void)
     l1_view_get(l, &v);
     CHECK(!strcmp(v.rows[5].value, "< Direct IP >") && !strcmp(v.rows[2].label, "Your address"));
     CHECK(row_of(&v, "Remove partner") < 0);   /* nobody to remove */
-    CHECK(!strcmp(v.net_status, "Press Start: the other player joins with your address.") && !strcmp(v.status, v.net_status));
+    CHECK(!strcmp(v.net_status, "Press 'Start': the other player joins with your address.") && !strcmp(v.status, v.net_status));
     CHECK(v.cards_on && !strcmp(v.card[0].who, "PLAYER 1") && !strcmp(v.card[0].chr, "Jill") && !strcmp(v.card[1].chr, "Parker") && !strcmp(v.card[1].pad, "Waiting for other player."));
     CHECK(strstr(v.note, "keeps its own save on each PC: your solo campaign save is not changed") && !strcmp(v.note2, l1_text(L1T_RAID_NOTE, 0)));   /* rev1 live 15: the co-op save */
     l1_env e2 = env;
@@ -555,7 +564,7 @@ static void test_net_model(void)
     CHECK(!strcmp(v.rows[5].label, "Connection") && !strcmp(v.rows[7].label, "Done"));
     CHECK(!strcmp(v.rows[6].label, "Downed / revive") && !strcmp(v.rows[6].value, "-") && v.rows[6].kind == L1V_GREY);   /* ep1-flow: the guest sees the host's choice once connected */
     CHECK(!strcmp(v.rows[3].label, "You play") && v.rows[3].kind == L1V_GREY && !strcmp(v.rows[3].value, "-") && v.rows[4].kind == L1V_GREY);
-    CHECK(!strcmp(v.net_status, "Press Start to connect to the host.") && !strcmp(v.card[0].who, "PLAYER 2") && !strcmp(v.card[0].chr, "-"));
+    CHECK(!strcmp(v.net_status, "Press 'Start' to connect to the host.") && !strcmp(v.card[0].who, "PLAYER 2") && !strcmp(v.card[0].chr, "-"));
     type_str(l, "9");   /* the mode row is selected: nothing typed */
     l1_settings_get(l, &s);
     CHECK(s.join_addr[0] == 0);
@@ -618,11 +627,11 @@ static void test_net_model(void)
     l1_net_set_peer(l, "Lissa");
     l1_view_get(l, &v);
     CHECK(!strcmp(v.rows[3].value, "Parker (partner)") && v.rows[3].kind == L1V_INFO && v.rows[4].kind == L1V_NORMAL);
-    CHECK(!strcmp(v.net_status, "Joining as Parker (partner).  Mark yourself ready when you are set."));
+    CHECK(!strcmp(v.net_status, "Joining as Parker (partner).  Choose 'I am ready' when you are set."));
     CHECK(!strcmp(v.card[0].chr, "Parker") && !strcmp(v.card[1].chr, "Jill") && !strcmp(v.card[1].pad, "Lissa (network)") && !strcmp(v.card[1].who, "PLAYER 1"));
     l1_net_set_peer_ready(l, 1);
     l1_view_get(l, &v);
-    CHECK(!strcmp(v.net_status, "Joining as Parker (partner).  Lissa is ready.  Mark yourself ready when you are set."));
+    CHECK(!strcmp(v.net_status, "Joining as Parker (partner).  Lissa is ready.  Choose 'I am ready' when you are set."));
     hover(l, 4);
     ev(l, L1E_OK);
     CHECK(l1_net_ready(l) == 1);
@@ -657,7 +666,7 @@ static void test_net_model(void)
     l1_net_set_state(l, L1NS_CONNECTED);
     l1_net_set_peer(l, "Bob");
     l1_view_get(l, &v);
-    CHECK(!strcmp(v.net_status, "Bob has joined.  Mark yourself ready when you are set."));
+    CHECK(!strcmp(v.net_status, "Bob has joined.  Choose 'I am ready' when you are set."));
     int kr = row_of(&v, "Remove partner");
     CHECK(kr == 5 && v.nrows == 9 && v.rows[4].kind == L1V_NORMAL);
     hover(l, kr);
@@ -679,21 +688,25 @@ static void test_net_model(void)
     CHECK(l1_take_request(l) == L1R_NONE);
     l1_net_set_peer_ready(l, 1);
     l1_view_get(l, &v);
-    CHECK(!strcmp(v.net_status, "Bob has joined.  Bob is ready.  Mark yourself ready when you are set."));
+    CHECK(!strcmp(v.net_status, "Bob has joined.  Bob is ready.  Choose 'I am ready' when you are set."));
     l1_net_set_ready(l, 1);
     l1_net_set_started(l, 1);
     l1_view_get(l, &v);
-    CHECK(!strcmp(v.net_status, "Start Episode 1: Campaign > Continue or New Game. Bob follows you automatically.") && row_of(&v, "Remove partner") < 0);
+    CHECK(!strcmp(v.net_status, "Start the story: 'Campaign' > 'Continue' or 'New Game'. Bob follows you automatically.") && row_of(&v, "Remove partner") < 0);
     CHECK(v.rows[1].kind == L1V_GREY && v.rows[1].action == 0);   /* the roles are final */
     l1_net_set_state(l, L1NS_WAIT);
     l1_net_set_reason(l, L1RS_PARTNER_LEFT, "Bob", NULL);
     l1_view_get(l, &v);
     CHECK(v.net_status_kind == L1S_WARN && !strcmp(v.net_status, "Bob has left.  Waiting for the other player to join..."));
-    /* a save outside Episode 1: the host is told before the start */
+    /* a save in the solo part (16-2): the host is told before the start (a save in 3-1 is fine now) */
+    env.save_area = 0x91080400u;
+    l1_set_env(l, &env);
+    l1_view_get(l, &v);
+    CHECK(strstr(v.note2, "cannot share") && strstr(v.note2, "New Game") && strstr(v.note2, "Load Game"));
     env.save_area = 0x91030100u;
     l1_set_env(l, &env);
     l1_view_get(l, &v);
-    CHECK(strstr(v.note2, "Episode 1") && strstr(v.note2, "New Game") && strstr(v.note2, "Load Game"));
+    CHECK(!strstr(v.note2, "New Game"));
     env.save_area = 0x91010200u;
     l1_set_env(l, &env);
     l1_view_get(l, &v);
@@ -702,7 +715,7 @@ static void test_net_model(void)
     env.coop_role1 = 2;
     l1_set_env(l, &env);
     l1_view_get(l, &v);
-    CHECK(!strcmp(v.note2, "Continue of the co-op save keeps its characters: you play Parker, your partner Jill. New Game keeps the choice made here."));
+    CHECK(!strcmp(v.note2, "'Continue' of the co-op save keeps its characters: you play Parker, your partner Jill. 'New Game' keeps the choice made here."));
     env.coop_role1 = 1;
     l1_set_env(l, &env);
     l1_view_get(l, &v);
@@ -849,7 +862,7 @@ static void test_strips(void)
     CHECK(!strcmp(out, "Connection to the other player has been terminated.  Returning to the title screen..."));
     in.kind = L1G_CONT_ROLES, snprintf(in.name, sizeof in.name, "Parker");   /* rev1 live 16 */
     l1_strip_text(&in, 0, out, sizeof out, NULL);
-    CHECK(!strcmp(out, "Continue keeps the characters of the co-op save. Your character: Parker."));
+    CHECK(!strcmp(out, "'Continue' keeps the characters of the co-op save. Your character: Parker."));
     l1_strip_text(&in, 6, out, sizeof out, NULL);
     CHECK(strstr(out, "Parker") && strstr(out, "«") && !strchr(out, '$'));
     in.name[0] = 0;
@@ -880,7 +893,7 @@ static void test_strips(void)
             CHECKF(p && strstr(p + 2, "%s") && !strstr(strstr(p + 2, "%s") + 2, "%s"), "text %d lang %d: two %%s", two[i], lang);
         }
         CHECKF(strstr(l1_text(L1T_NET_ST_GO_HOST, lang), "$1") && strstr(l1_text(L1T_NET_ST_GO_HOST, lang), "$3") && strstr(l1_text(L1T_NET_ST_GO_HOST, lang), "$4"), "GO_HOST lang %d", lang);
-        CHECKF(strstr(l1_text(L1T_NET_EP_ONLY, lang), "$2") && strstr(l1_text(L1T_NET_EP_ONLY, lang), "$3"), "EP_ONLY lang %d", lang);
+        CHECKF(strstr(l1_text(L1T_NET_SEC_NOTE, lang), "$2") && strstr(l1_text(L1T_NET_SEC_NOTE, lang), "$3"), "SEC_NOTE lang %d", lang);
     }
 }
 
@@ -969,16 +982,16 @@ static void test_ready_cards(void)
     int kind = -1;
     l1_strip_in in = {L1G_READY_GATE, "Bob", 0, L1GF_HOST};
     l1_strip_text(&in, 0, out, sizeof out, &kind);
-    CHECK(!strcmp(out, "Waiting for the other player to join...  F6 / Back button: Co-Op Play") && kind == L1S_WARN);
+    CHECK(!strcmp(out, "Waiting for the other player to join...  F6 / BACK button: Co-Op Play") && kind == L1S_WARN);
     in.flags = 0;   /* a guest still connecting */
     l1_strip_text(&in, 0, out, sizeof out, NULL);
-    CHECK(!strcmp(out, "Connecting to the host...  F6 / Back button: Co-Op Play"));
+    CHECK(!strcmp(out, "Connecting to the host...  F6 / BACK button: Co-Op Play"));
     in.flags = L1GF_HOST | L1GF_CONNECTED;
     l1_strip_text(&in, 0, out, sizeof out, NULL);
-    CHECK(!strcmp(out, "Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+    CHECK(!strcmp(out, "Choose 'I am ready' when you are set.  F6 / BACK button: Co-Op Play"));
     in.flags = L1GF_CONNECTED | L1GF_PEER_READY;
     l1_strip_text(&in, 0, out, sizeof out, NULL);
-    CHECK(!strcmp(out, "Bob is ready.  Mark yourself ready when you are set.  F6 / Back button: Co-Op Play"));
+    CHECK(!strcmp(out, "Bob is ready.  Choose 'I am ready' when you are set.  F6 / BACK button: Co-Op Play"));
     in.flags = L1GF_HOST | L1GF_CONNECTED | L1GF_READY;
     l1_strip_text(&in, 0, out, sizeof out, NULL);
     CHECK(!strcmp(out, "You are ready. Waiting for the other player..."));
@@ -1104,7 +1117,7 @@ static void test_net_stub(void)
     CHECK(l1_take_request(l) == L1R_NET_START);
     l1_net_set_state(l, L1NS_IDLE);
     l1_view_get(l, &v);
-    CHECK(v.net_status_kind == L1S_INFO && !strcmp(v.net_status, "Press Start to connect to the host."));
+    CHECK(v.net_status_kind == L1S_INFO && !strcmp(v.net_status, "Press 'Start' to connect to the host."));
     /* the address stays after the error; the local screen is not touched by the stub */
     l1_settings_get(l, &s);
     CHECK(!strcmp(s.join_addr, "10.0.0.7:27015"));
@@ -1251,25 +1264,23 @@ static void test_downed_row(void)
     CHECK(l1_ini_load(path, &r, NULL) && r.downed == L1D_30);   /* no key: the value stays as it was */
     remove(path);
 
-    /* E5 strips: "Episode 1" is the game's own word when loaded, the language's built-in otherwise; the guest that was behind is told it goes back to the title */
+    /* allep1 strips: the campaign is over (this PC passed it / the guest was behind): no word to quote, the 13 texts are whole sentences */
     for (int lang = 0; lang < L1_LANGS; lang++) {
-        l1_strip_in in = {L1G_EP1_DONE, "Bob", 0};
+        l1_strip_in in = {L1G_CAMP_DONE, "Bob", 0};
         char o[400];
         int k = -1;
         l1_strip_text(&in, lang, o, sizeof o, &k);
-        CHECKF(strstr(o, l1_text(L1T_EPISODE1, lang)) && !strstr(o, "%s") && k == L1S_INFO, "ep1 done lang %d: %s", lang, o);
-        in.kind = L1G_EP1_BEHIND;
+        CHECKF(!strcmp(o, l1_text(L1T_END_DONE, lang)) && !strstr(o, "%s") && k == L1S_INFO, "campaign done lang %d: %s", lang, o);
+        in.kind = L1G_CAMP_BEHIND;
         l1_strip_text(&in, lang, o, sizeof o, &k);
-        CHECKF(strstr(o, l1_text(L1T_EPISODE1, lang)) && strstr(o, l1_text(L1T_TO_TITLE, lang)) && k == L1S_WARN, "ep1 behind lang %d: %s", lang, o);
+        CHECKF(strstr(o, l1_text(L1T_END_BEHIND, lang)) && strstr(o, l1_text(L1T_TO_TITLE, lang)) && !strstr(o, "%s") && k == L1S_WARN, "campaign behind lang %d: %s", lang, o);
     }
-    l1_set_stock_text(L1K_EPISODE1, "第1章");
-    l1_strip_in in = {L1G_EP1_DONE, "", 0};
-    char o[400];
-    l1_strip_text(&in, 0, o, sizeof o, NULL);
-    CHECK(!strcmp(o, "第1章 complete! The co-op session has ended; your game goes on alone."));
-    l1_set_stock_text(L1K_EPISODE1, NULL);
-    l1_strip_text(&in, 6, o, sizeof o, NULL);
-    CHECK(!strcmp(o, "Эпизод 1 пройден! Совместная сессия завершена, дальше вы играете один."));
+    l1_strip_in cin = {L1G_CAMP_DONE, "", 0};
+    char co[400];
+    l1_strip_text(&cin, 0, co, sizeof co, NULL);
+    CHECK(!strcmp(co, "Campaign complete! The co-op session has ended; your game goes on alone."));
+    l1_strip_text(&cin, 6, co, sizeof co, NULL);
+    CHECK(!strcmp(co, "Кампания пройдена! Кооперативная сессия завершена, дальше вы играете в одиночку."));
 }
 
 /* rel010: the friend row (Join + Steam friends): the Steam friends in the game with a lobby; left / right picks, OK / click joins the one shown with his SteamID as the
@@ -1340,6 +1351,75 @@ static void test_friend_row(void)
                "friend texts lang %d", lang);
 }
 
+/* allep1: no setting: the lobby has no extra row, the ini no key; the host's save warning and the texts of the parts that cannot be shared */
+static void test_sharing(void)
+{
+    l1_t *l = l1_new();
+    l1_settings s;
+    memset(&s, 0, sizeof s);
+    l1_env env = mkenv(0, 1);
+    env.net_rows = 1;
+    l1_open(l, &s, &env);
+    ev(l, L1E_RIGHT), ev(l, L1E_RIGHT);   /* Mode: Off -> Split screen -> Network: host */
+    l1_view v;
+    l1_view_get(l, &v);
+    CHECK(row_of(&v, "Experimental: all episodes") < 0 && v.nrows == 8 && !strstr(v.note2, "Episode 1 in this version"));
+    /* the save warning: a save in any paired section of any episode is fine; the solo part and the ids that are no section warn */
+    static const unsigned okid[] = {0x91100200u, 0x91010100u, 0x91010300u, 0x91020100u, 0x91030100u, 0x91050100u, 0x910C0300u, 0x91100100u};
+    for (unsigned i = 0; i < sizeof okid / sizeof okid[0]; i++) {
+        env.save_area = okid[i];
+        l1_set_env(l, &env);
+        l1_view_get(l, &v);
+        CHECKF(!strstr(v.note2, "cannot share"), "save %08x warns", okid[i]);
+    }
+    static const unsigned badid[] = {0x91080400u, 0x91000100u, 0x910F0100u};
+    for (unsigned i = 0; i < sizeof badid / sizeof badid[0]; i++) {
+        env.save_area = badid[i];
+        l1_set_env(l, &env);
+        l1_view_get(l, &v);
+        CHECKF(strstr(v.note2, "cannot share") && !strchr(v.note2, '$'), "save %08x does not warn: %s", badid[i], v.note2);
+    }
+    l1_free(l);
+
+    /* the ini has no key for it: the written file has no such line, a stray allepisodes=1 of an earlier build changes nothing */
+    const char *path = "test_lobby1_alleps.ini";
+    remove(path);
+    l1_settings w, r;
+    memset(&w, 0, sizeof w);
+    CHECK(l1_ini_save(path, &w, -1));
+    FILE *f = fopen(path, "rb");
+    char buf[1024] = "";
+    size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0;
+    if (f) fclose(f);
+    buf[n] = 0;
+    CHECK(n > 0 && !strstr(buf, "allepisodes"));
+    f = fopen(path, "wb");
+    if (f) fputs("armed=0\r\nallepisodes=1\r\n", f), fclose(f);
+    memset(&r, 0, sizeof r);
+    CHECK(l1_ini_load(path, &r, NULL) && r.armed == 0);
+    remove(path);
+
+    /* the texts: all 13 languages, none left English by accident (the English column is the fallback), the strips are well formed */
+    static const int ids[] = {L1T_SEC_BAD, L1T_NET_SEC_NOTE, L1T_END_DONE, L1T_END_BEHIND};
+    for (unsigned i = 0; i < sizeof ids / sizeof ids[0]; i++)
+        for (int lang = 1; lang < L1_LANGS; lang++) CHECKF(strcmp(l1_text(ids[i], lang), l1_text(ids[i], 0)) != 0 && l1_text(ids[i], lang)[0], "text %d lang %d is English or empty", ids[i], lang);
+    static const int kinds[] = {L1G_CAMP_DONE, L1G_CAMP_BEHIND, L1G_SEC_BAD};
+    for (int lang = 0; lang < L1_LANGS; lang++)
+        for (unsigned i = 0; i < 3; i++) {
+            l1_strip_in in = {kinds[i], "Bob", 0};
+            char o[800];
+            int k = -1;
+            l1_strip_text(&in, lang, o, sizeof o, &k);
+            CHECKF(o[0] && utf8_ok(o) && !strstr(o, "%s") && !strchr(o, '$') && k >= 0, "strip %d lang %d: %s", kinds[i], lang, o);
+        }
+    {
+        l1_strip_in in = {L1G_SEC_BAD, "", 0};
+        char o[400];
+        l1_strip_text(&in, 0, o, sizeof o, NULL);
+        CHECK(strstr(o, "not a story section"));
+    }
+}
+
 int main(void)
 {
     test_typed_queue();
@@ -1361,6 +1441,7 @@ int main(void)
     test_net_input();
     test_downed_row();
     test_friend_row();
+    test_sharing();
     printf("%d checks, %d failed\n", checks, fails);
     printf(fails ? "FAILED\n" : "ALL OK\n");
     return fails ? 1 : 0;

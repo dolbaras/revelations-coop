@@ -98,7 +98,6 @@ static int g_played;                       /* this PC has been in a level since 
 static int g_role_seen = -1;                /* rev1 live 16: this PC's role seen since the START (before its first level): a change = the co-op save's roles put back */
 static unsigned g_title_idle_since;        /* the title menu waits for input since (0 = not) */
 static int g_seen_ended = -1, g_seen_gone = -1;   /* the link's counters already shown */
-static unsigned g_ep_seen;
 static unsigned g_ep1_seen;                /* ep1-flow E5: the last close at the end of Episode 1 already shown */
 static int g_strip_kind;                   /* L1G_* shown now, until g_strip_until */
 static int g_strip_flags;                  /* L1GF_* of an L1G_READY_GATE strip (refreshed while it shows) */
@@ -823,6 +822,15 @@ static void strip_show(int kind, const char *name, unsigned ms)
 
 /* once per pass: what the network session means for the title menu and the levels: the guest hold, the strip, the automatic end at the title, the guest's
  * return to the title after the host is gone. Returns the strip to draw (L1G_NONE = none) in *st. */
+/* allep1: the strip at an end of co-op by RB_EK_* (rolebarrier1.h): 1 = the campaign is over, 3 = a part that is no section; local = this PC passed it too */
+static int end_strip(int kind, int local)
+{
+    switch (kind) {
+    case RB_EK_NOTSEC: return L1G_SEC_BAD;
+    default: return local ? L1G_CAMP_DONE : L1G_CAMP_BEHIND;   /* RB_EK_CAMPAIGN */
+    }
+}
+
 static void session_watch(int idle, l1_strip_in *st)
 {
     unsigned now = GetTickCount();
@@ -840,7 +848,7 @@ static void session_watch(int idle, l1_strip_in *st)
     /* rev1 live 16: the host's title Continue of a co-op save put the save's roles back (lk_force_roles): the line on both PCs, this PC's character named */
     if (started && !g_played && (in.role == 0 || in.role == 1)) {
         if (g_role_seen >= 0 && in.role != g_role_seen) {
-            const char *who = l1_person_name(in.role == 1 ? 2 : 0, detect_lang());   /* Episode 1: Jill / Parker (the game's own names) */
+            const char *who = l1_text(in.role == 1 ? L1T_PARTNER : L1T_LEAD, detect_lang());   /* allep1: the pair differs by section (Jill / Parker, Chris / Jessica, Keith / Quint ...): the role, not a name */
             strip_show(L1G_CONT_ROLES, who, 12000);
             r1_log("menu: strip: Continue keeps the characters of the co-op save: this PC plays the %s (%s) now (it was the %s)", in.role ? "partner" : "lead", who,
                    g_role_seen ? "partner" : "lead");
@@ -878,12 +886,13 @@ static void session_watch(int idle, l1_strip_in *st)
      * flow runs); a guest that was behind (the host completed it) goes back to the title like a guest whose host ended the session */
     int ep1_local = 0;
     unsigned ep1_closed = 0, ep1 = rolebarrier_ep1_end(&ep1_local, &ep1_closed);
+    int end_kind = rolebarrier_end_kind();   /* allep1: RB_EK_*: the campaign is over / the solo part / not a section */
     if (k && in.ended != g_seen_ended) {
         g_seen_ended = in.ended;
         if (ep1) {
-            strip_show(ep1_local ? L1G_EP1_DONE : L1G_EP1_BEHIND, in.last_peer, 12000);
+            strip_show(end_strip(end_kind, ep1_local), in.last_peer, 12000);
             if (!ep1_local && level_present() && g_quit_auto) g_quit_at = (now + 6000) | 1;
-            r1_log("menu: the session ended on this guest at the END OF EPISODE 1 (%s)%s", ep1_local ? "this PC passed it too: its own end flow goes on alone" : "this PC was behind the host",
+            r1_log("menu: the session ended on this guest at the END OF CO-OP (%s)%s", ep1_local ? "this PC passed it too: its own end flow goes on alone" : "this PC was behind the host",
                    g_quit_at ? ": back to the title in 6 s" : "");
         } else {
             int kind = in.ended_reason == L1RS_HOST_ENDED ? L1G_HOST_ENDED : in.ended_reason == L1RS_REMOVED ? L1G_REMOVED : L1G_HOST_LOST;
@@ -896,15 +905,15 @@ static void session_watch(int idle, l1_strip_in *st)
     if (k && in.peer_gone != g_seen_gone) {
         g_seen_gone = in.peer_gone;
         if (ep1 && ep1_local) {   /* the host passed the end too: its own end flow goes on alone */
-            strip_show(L1G_EP1_DONE, in.last_peer, 12000);
-            r1_log("menu: the partner closed the session at the END OF EPISODE 1 (this PC passed it too)");
+            strip_show(end_strip(end_kind, 1), in.last_peer, 12000);
+            r1_log("menu: the partner closed the session at the END OF CO-OP (this PC passed it too)");
         } else
             strip_show(in.peer_gone_kind == L1RS_PARTNER_LOST ? L1G_PARTNER_LOST : L1G_PARTNER_LEFT, in.last_peer, 8000);
     }
     if (ep1_closed && ep1_closed != g_ep1_seen) {   /* this PC closed the session itself after its stock end flow */
         g_ep1_seen = ep1_closed;
-        strip_show(L1G_EP1_DONE, in.last_peer, 12000);
-        r1_log("menu: strip: Episode 1 complete (this PC closed the session after its end flow)");
+        strip_show(end_strip(end_kind, 1), in.last_peer, 12000);
+        r1_log("menu: strip: the end of co-op (kind %d: this PC closed the session after its end flow)", end_kind);
     }
     {   /* ep1-solo E3: the story switched this PC's character off (1-3 solo part): once per watch, the strip names the character this PC watches now */
         static unsigned seen_enters;
@@ -918,8 +927,24 @@ static void session_watch(int idle, l1_strip_in *st)
             r1_log("menu: strip: this PC watches %s (%s) while the story goes on without its own character", who, cn[0] ? cn : "?");
         }
     }
-    unsigned eb = rolebarrier_ep_block_ms();
-    if (eb && eb != g_ep_seen) g_ep_seen = eb, strip_show(L1G_EP_ENDED, "", 10000);
+    {   /* allep1: the solo part of the extra episode (16-2): this PC has no character there and watches the other human: the same strip as the 1-3 solo part, naming the watched character */
+        static int sp_seen;
+        unsigned wu = 0;
+        int sp = rolebarrier_spectating(&wu);
+        if (sp && !sp_seen) {
+            char cn[96] = "";
+            int person = wu && classes_object_name(wu, cn, sizeof cn) ? l1_person_from_class(cn) : -1;
+            strip_show(L1G_SOLO_WATCH, l1_person_name(person < 0 ? 2 : person, detect_lang()), 12000);
+            r1_log("menu: strip: this PC spectates the solo part (%s)", cn[0] ? cn : "?");
+        }
+        sp_seen = sp;
+    }
+    {   /* allep1: this PC (host) started the solo 16-2 / a non-section id with the option on: the session was closed */
+        int sb_solo = 0;
+        unsigned sb = rolebarrier_sec_block(&sb_solo);
+        static unsigned sb_seen;
+        if (sb && sb != sb_seen) sb_seen = sb, strip_show(L1G_SEC_BAD, "", 10000); (void)sb_solo;
+    }
     if (g_quit_at && (int)(now - g_quit_at) >= 0) {
         g_quit_at = 0;
         if (level_present()) quit_to_title("the host is gone");
@@ -1240,7 +1265,7 @@ void menu_cmd(const char *arg, char *out, int size)
         char nm[40] = "";
         sscanf(rest, "%d %39s %d", &kind, nm, &secs);
         if (kind <= L1G_NONE || kind >= L1G_COUNT) {
-            snprintf(out, (size_t)size, "menu strip <1..%d> [name] [seconds]: 1 wait load, 2 silent, 3 partner left, 4 partner lost, 5 host ended, 6 host lost, 7 removed, 8 guest hold, 9 host go, 10 Episode 1 gate, 11 Episode 1 done, 12 Episode 1 behind, 13 solo watch",
+            snprintf(out, (size_t)size, "menu strip <1..%d> [name] [seconds]: 1 wait load, 2 silent, 3 partner left, 4 partner lost, 5 host ended, 6 host lost, 7 removed, 8 guest hold, 9 host go, 10 solo watch, 11 ready gate, 12 continue roles, 13 campaign done, 14 campaign behind, 15 solo part, 16 not a section",
                      L1G_COUNT - 1);
             return;
         }

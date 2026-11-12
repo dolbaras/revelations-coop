@@ -4,7 +4,7 @@
 #                                                            shortcut, coop\coop-installer.ps1 + coop-texts.ps1 for the uninstaller, coop\version.txt,
 #                                                            coop\collect-logs.ps1 + coop\log-profiles\*.psd1 + coop\Collect logs.bat: the bug-report
 #                                                            collector every co-op mod of the workspace shares, <workspace>\tools\log-collector)
-#   README-COOP.txt, LICENSE.txt                           (docs\release-readme.txt with @VERSION@ filled in)
+#   README-COOP.txt, LICENSE.txt, ENET-LICENSE.txt         (docs\release-readme.txt with @VERSION@ filled in; docs\enet-license.txt = ENet's MIT notice, the build links ENet 1.3.18)
 # Run native\build.sh first. The developer tools (console, test hooks) are inside the DLL but do nothing without their environment variables. The package sets no
 # environment variable of its own and the shortcut's launcher sets none (REV1_ACHBLOCK and the other lab switches stay unset).
 # Usage: package.ps1 -Version 0.1.0 [-Exe] [-Dist <folder>] [-Dll <dinput8.dll>] [-LogCollector <folder>] [-AnyDllVersion]
@@ -78,6 +78,7 @@ Set-Content -Path (Join-Path $stage "Install Co-op.bat") -Encoding ASCII `
     -Value '@start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0coop-installer.ps1" %*'
 Set-Content -Path (Join-Path $stage "README-COOP.txt") -Value $readme -Encoding ASCII -NoNewline
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
+Copy-Item (Join-Path $root "docs\enet-license.txt") (Join-Path $stage "ENET-LICENSE.txt")   # ENet 1.3.18 is compiled into dinput8.dll: its MIT notice travels with every copy
 $zip = Join-Path $dist "revelations-coop-$Version.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue
 # The archive is written by .NET's ZipArchive with entry names built here, every one with "/" (the zip format's separator). Compress-Archive of Windows PowerShell 5.1

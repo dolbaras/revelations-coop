@@ -23,6 +23,7 @@
 #include "capture.h"
 #include "capkeep1.h"
 #include "kbskip1.h"
+#include "aimgate1.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -115,6 +116,7 @@ typedef struct {
     int flip;   /* 1 = the character was taken over (fields changed, given back on release); 0 = passive: only wrapped with its pad slot (the other character is bound) */
     unsigned swaps;
     int lost;   /* the game took him back (setKind != 1 allowed with `cap keep 0`, or the fields changed and were not written back): his blows are an AI's */
+    int aim_ok; /* aimgate1.h: may he aim now (FUN_006AD740 in his own phase), AG1_UNKNOWN before that */
 } capu_t;
 static capu_t caps[MAXCAP];
 
@@ -148,6 +150,11 @@ static volatile int kind_last_v = -1;
  * kept pads (kbskip_mask, default pad slot 1 = the partner's) is saved before it and put back after it = only that pad's wipe is undone; the keyboard still fills the current slot (menus, pause).
  * The first version skipped the whole function: no keyboard input at all (duo7: title never left; duo6-9: Esc opened the pause menu, nothing closed it). */
 static hk_t hk_kb;
+/* aimgate1.h: the second human's own "aim allowed" byte inside his swapped sections (default on; `cap aimgate 0` = stock, lab A/B). can_aim = FUN_006AD740, set when its bytes match. */
+static volatile int aimgate_on = 1;
+static unsigned char (__attribute__((thiscall)) *can_aim)(void *unit, int arg);
+static volatile LONG ag_sections, ag_allowed;
+static volatile int ag_last[2] = {AG1_UNKNOWN, AG1_UNKNOWN};   /* per role: the last value written */
 static volatile int kbskip_req;
 static volatile unsigned kbskip_mask = KB1_DEFAULT_MASK;
 static kb1_stats kb_st;   /* written by the game's pad update only */
@@ -230,6 +237,7 @@ static capu_t *cap_take(unsigned unit, int role)
             memset(c, 0, sizeof *c);
             c->unit = unit, c->ctl_obj = co, c->role = role, c->flip = roles[role].en, c->pad = roles[role].en ? roles[role].pad : 0, c->mgr = rd32(unit + 0xE80), c->mgr2 = unit + 0xF6C;
             c->think_obj = rd32(unit + 0xFA4);
+            c->aim_ok = AG1_UNKNOWN;
             if (!c->flip) {   /* passive: the character is not bound, nothing of it is changed; it only runs under its default pad slot, inside the lock */
                 c->active = 1;
                 if (swap_cs_ready)
@@ -316,7 +324,28 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
         vold = *(volatile unsigned *)AD.view_idx_ptr;
         *(volatile unsigned *)AD.view_idx_ptr = vwant;
     }
+    /* aimgate1.h: the "aim allowed" byte is the OWN human's; a captured human who is not the own one gets his own value for his sections (his character phases on the logic
+     * thread ask FUN_006AD740 about him; his weapon / state-machine sections use that answer) */
+    int ag_set = 0;
+    unsigned char ag_old = 0;
+    if (can_aim && ag1_applies(aimgate_on, c->flip && !c->lost, rd32(c->unit + 0xE2C), capture_own_effective())) {
+        int mine = unit == c->unit, bag = mine && rd32(c->unit + AG1_BAG_OFF) != 0;
+        int v = ag1_value(mine, bag, bag ? can_aim((void *)c->unit, 0) : 0, &c->aim_ok);
+        if (v != AG1_UNKNOWN) {
+            volatile unsigned char *f = (volatile unsigned char *)(g + AG1_FLAG_OFF);
+            ag_old = *f;
+            *f = (unsigned char)v;
+            ag_set = 1;
+            InterlockedIncrement(&ag_sections);
+            if (v && ag_old != (unsigned char)v)
+                InterlockedIncrement(&ag_allowed);
+            if ((unsigned)c->role < 2)
+                ag_last[c->role] = v;
+        }
+    }
     fn(unit);
+    if (ag_set)
+        *(volatile unsigned char *)(g + AG1_FLAG_OFF) = ag_old;
     if (vwant)
         *(volatile unsigned *)AD.view_idx_ptr = vold;
     *(volatile unsigned *)(g + 0x870) = old;
@@ -450,6 +479,14 @@ static int hooks_install(void)
     orig_v10 = (void (FC *)(unsigned))hk_v10.tramp;
     orig_think = (void (FC *)(unsigned))hk_think.tramp;
     orig_own = (unsigned (FC *)(unsigned))hk_own.tramp;
+    {   /* the aim gate's question (aimgate1.h), called, not hooked: only when its bytes are the supported build's */
+        static const unsigned char b_aim[] = {0x83, 0xEC, 0x0C, 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x86};
+        unsigned char cur[sizeof b_aim];
+        if (!can_aim && r1_safe_read((void *)AG1_CANAIM_FN, cur, sizeof cur) && !memcmp(cur, b_aim, sizeof b_aim))
+            can_aim = (unsigned char (__attribute__((thiscall)) *)(void *, int))AG1_CANAIM_FN;
+        if (!can_aim)
+            r1_log("capture: 0x%X differs from the supported build: the second human's aim gate stays the own human's (stock)", AG1_CANAIM_FN);
+    }
     {   /* optional: without it the capture works as before (only the game's setKind is not seen) */
         static const unsigned char b_kind[] = {0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C};
         if (hook_install(&hk_kind, 0x6A7B40u, b_kind, 6, (void *)hook_setkind))
@@ -974,6 +1011,10 @@ void capture_status_text(char *out, int size)
                       pd ? rd32(pd + 0x15C) : 0);
     }
     if (o > 0 && o < size)
+        o += snprintf(out + o, size - o, "aim gate %s%s: sections %ld, allowed against the own human's value %ld, last per role %d / %d; the game's byte now: enabled %u aim allowed %u\n",
+                      aimgate_on ? "on" : "OFF (stock)", can_aim ? "" : " (FUN_006AD740 not matched: inactive)", (long)ag_sections, (long)ag_allowed, ag_last[0], ag_last[1],
+                      g ? *(volatile unsigned char *)(g + AG1_EN_OFF) : 0, g ? *(volatile unsigned char *)(g + AG1_FLAG_OFF) : 0);
+    if (o > 0 && o < size)
         o += snprintf(out + o, size - o, "kbskip %d (state %d: 0 off, 1 wanted, 2 hooked, 3 unhooking): ", kbskip_req, capture_kbskip_state());
     if (o > 0 && o < size)
         capture_kbskip_text(out + o, size - o);
@@ -1068,6 +1109,11 @@ void capture_cmd(const char *arg, char *out, int size)
         int o = snprintf(out, size, "kbskip %d requested (state %d: 0 off, 1 wanted, 2 hooked, 3 unhooking); ", kbskip_req, capture_kbskip_state());
         if (o > 0 && o < size)
             capture_kbskip_text(out + o, size - o);
+    } else if (!strcmp(sub, "aimgate")) {   /* aimgate 1|0: the second human's own "aim allowed" byte in his sections (aimgate1.h, default 1); 0 = stock (lab A/B) */
+        if (a[0])
+            aimgate_on = atoi(a) != 0;
+        snprintf(out, size, "aim gate %s (%s); sections %ld, allowed against the own human's value %ld", aimgate_on ? "on" : "OFF (stock: the own human's value for everybody)",
+                 can_aim ? "FUN_006AD740 matched" : "FUN_006AD740 not matched or hooks not installed yet", (long)ag_sections, (long)ag_allowed);
     } else if (!strcmp(sub, "keep")) {   /* keep 0|1: a setKind(!= 1) on a captured human is turned into 1 (default) / allowed (lab A/B) */
         if (a[0]) keep_capture = atoi(a) != 0;
         snprintf(out, size, "keep capture %d (setKind hook %s): setKind calls on slots 0/1 seen %ld, kept %ld, allowed %ld, field fixes %ld; last reset: unit %08x kind %d caller %08x at %lu (now %lu)",

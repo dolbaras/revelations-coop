@@ -20,6 +20,14 @@ mkdir -p build
 # pickups whose world item leaves the list after AddItem returned (pickpend1.h, wp9 live: the herb 8/12): watched, sent once when gone; + the glue wiring
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_pickpend1.exe test_pickpend1.c
 ./build/test_pickpend1.exe
+# give1: the RE5-style "give to partner" from the item screen (give1.h: cells, reach, downed partner, split plan, the network GIVE / ACK / CANCEL on a delayed line with
+# timeouts, repeats, reloads and section changes; the 13-language texts and the game's glyphs; the stock bytes of give1.c in the image; the glue wiring)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_give1.exe test_give1.c
+./build/test_give1.exe
+# scan1: the Genesis for the second player (scan1.h: who gets one, the split exchange of the second human, his own rate and herb latch, the hidden-item REVEAL
+# on a delayed line with loads; the stock bytes, vtable slots and rets of scan1.c in the image; the wiring in probe.c / split.c / story1_game.inc)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_scan1.exe test_scan1.c
+./build/test_scan1.exe
 # the downed pose (downed1_pose.h: the Raid agony subset driven offline; plans against a fake engine + the build facts in the image), 64- and 32-bit
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_downed_pose.exe test_downed_pose.c
 ./build/test_downed_pose.exe
@@ -98,6 +106,12 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 # the guest's human crossed a zone border mid-fight, its engine slept the host's Ooze and every shot went through); the model before the fix must fail
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_zkeep1.exe test_zkeep1.c
 ./build/test_zkeep1.exe
+# allep step 4: the fall-out rescue of the own human (native/fallres1.h)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_fallres1.exe test_fallres1.c
+./build/test_fallres1.exe
+# allep step 4: Hunk as the second human of the solo part (native/hunk1.h)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_hunk1.exe test_hunk1.c
+./build/test_hunk1.exe
 # rev1 live 14 (hitx1.h + local1.h's dead guard): the client's kills die by the game's own death on both PCs (the real HitInfo through the Raid applier on the
 # host, the replica's own update on the client), local1 never takes a replica the host's DEATH came for, the finish of a dead enemy no death state reached;
 # on a model of the engine's hit queue / death request / DeadState chain: the model before the fix must fail (the m13f defect)
@@ -148,6 +162,9 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 # the puppet logic (puppet1.c: pad sender / receiver, holds, dead-man, position correction) and the wire protocol with CP_PAD; no game, no network
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_puppet1.exe test_puppet1.c ../native/puppet1.c ../native/coop_proto.c -lm
 ./build/test_puppet1.exe
+# the second human's aim gate (aimgate1.h: sGamePad+0x883 is the OWN human's "may aim"; a model of the frame, stock vs gate, and the build facts in the image)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_aimgate1.exe test_aimgate1.c
+./build/test_aimgate1.exe
 # the narrow keyboard-mode fix (kbskip1.h: the partner's pad kept through FUN_0088CB10, the keyboard still on the current slot; a model of the engine's pad frame + the build facts in the image), 64- and 32-bit
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -o build/test_kbskip1.exe test_kbskip1.c
 ./build/test_kbskip1.exe

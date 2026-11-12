@@ -1,31 +1,107 @@
-# Resident Evil Revelations co-op
+# Resident Evil Revelations Co-op
 
-Network co-op and split screen for the story campaign of Resident Evil: Revelations (2013 PC, Steam build 13298487, `rerev.exe`, 32-bit).
-Status: **version 0.1.0**, the first full release (GitHub "latest": the shortcut's launcher of every installed copy updates to it). Split screen on one PC covers the whole campaign; network co-op (two PCs, one person each, by Steam friends or by IP address on UDP 28410) covers Episode 1. What a player gets, the limits and how to report a problem: `docs/release-readme.txt` (shipped as `README-COOP.txt`).
-The proxy gates on the exe SHA-256 (other builds: it only forwards `DirectInput8Create`), works on the live game and never touches Raid (every module stops and removes its hooks while a Raid scene / session is active). Nothing here modifies game files or the Steam stub.
+[![Latest release](https://img.shields.io/github/v/release/dolbaras/revelations-coop?label=latest%20release)](https://github.com/dolbaras/revelations-coop/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Version scheme.** Pre-releases were 0.0.1 and 0.0.2 (tag `v0.0.N`, marked "pre-release" on GitHub, never installed automatically); full releases are 0.1.0 and up. The launcher parses the tag as a .NET `[version]` and only follows `releases/latest`, so a full release updates every pre-release install and a pre-release is never pushed to anybody who did not install it by hand. The protocol every release keeps: `docs/releasing.md`.
+Two-player co-op for the story campaign of **Resident Evil Revelations** (2013, PC, Steam build 13298487): split screen on one PC with two gamepads, or network co-op on two PCs (one person each, Steam friends or IP address). The campaign's AI partner is played by the second player, with an own camera, HUD and pause / item menu.
 
-What works on the real game (test copies, main PC and a second PC):
+## Status
 
+**Version 0.2.0** ([release notes](https://github.com/dolbaras/revelations-coop/releases/latest)): network co-op now follows the story section by section, from Episode 1 to the end of the campaign, with whichever pair the story gives (Jill and Parker, Chris and Jessica, Keith and Quint ...); where the story has only one playable character, the second player watches that character until the two meet again. Split screen on one PC works in every part of the story with two playable characters. 0.1.0 and 0.2.0 do not play together: the lobby refuses the other version and says so.
 
-- **Second human on one PC** (`native/capture.c`, console `cap ...`): the AI partner of the campaign is taken over by a second pad (aim, fire, reload, melee, weapon change,
-  menus), by a remote input record (network layer API) or by a script; the own slot decides who the engine creates as the human.
-- **Split screen** (`native/split.c`, console `split ...`): two local humans, each with an own camera, own HUD (ammo / weapon / reticle of the own character), the second
-  human's pause and item menu on his own pad, cutscenes / pause / game over in whole view, checkpoint reloads and the game's own Exit survive. Side by side or top / bottom.
-  The engine already renders several viewports natively; the module switches viewport 2 on with the second camera manager and builds a second cockpit unit set with the engine's own
-  calls. API for a lobby: `capture_bind`, `capture_set_own`, `split_set_layout`, `split_enable` (see `split.h`).
-- **Co-Op Play entry and lobby** (stage 6, `native/menu.c`, `lobby1.c`, `overlay.c`; offline tests + live sessions on the main PC: the native row, the lobby, the settings and co-op starts work; the mouse on the new row is not checked yet): the main menu has a fourth row "Co-Op Play" in the game's own style (it fills the dead 3DS slot "menu_gamestart" / "memo_gamestart" with the lobby's text in the game's 13 languages, appended with the page's own AddItem; its decide opens the co-op screen); a hint line under the menu and F6 / the gamepad BACK button stay as a second way. The screen sets: co-op on / off, which character player 1 plays (lead character or partner; player 2 takes the other), side by side or top / bottom, which gamepad is player 1's. Texts in the game's 13 languages (own strings; character names and the menu words come from the game's own message files). Settings: `rev1_coop.ini` in the game's config folder. The story is then started with the stock Continue / Load Game / New Game. Console: `menu status | open | close | view | set ... | gm`.
-- **Network co-op, Episode 1** (`native/lobby_link.c`, `net1.c`, `coop_session.c` / `coop_proto.c` / `coop_net.c` over ENet, `coop_steam.c` / `coop_steam_real.c` for the Steam way, `puppet1.c`, `rolebarrier1.c`, `world1*.c`, `sf1.c`, `downed1.c`; offline tests `tests/build.sh`, a headless bot `tests/coop_bot.c`): one person per PC; the lobby's network rows host or join by Steam friend (lobby, friends-list "Join Game", invite; Steam's own P2P, no port) or by IP address (UDP 28410); the hello carries the mod version and the first 8 bytes of the exe's SHA-256, so another version or build is refused with a reason. The guest's character is driven from the network (pad record + position correction), both PCs wait for each other at every load and cutscene end, the host runs the enemies, doors / key items / pickups / story flags are mirrored, a game over and Continue are shared, the sections of Episode 1 follow each other and the session closes at its end; downed / revive is the host's lobby choice. Each PC's Steam achievements are its own player's.
-- **Other mods' dinput8.dll** (`tools/installer.ps1`, `native/chain_logic.h`, tests `tests/test_installer.ps1`, `tests/test_chain.c`, `tests/ual_test.sh`): an Ultimate ASI Loader the player had as `dinput8.dll` is kept in `coop-backup` and runs on as `winmm.dll` (its plugins stay on); a dinput8.dll another mod puts over the co-op one later is kept as the original by the next install / update and left in place by the uninstaller; the proxy never loads a loader (or a copy of itself) as `dinput8_real.dll`.
-- **Installer, uninstaller, launcher** (stage 6b, `tools/installer.ps1`, `tools/launcher.ps1`, `tools/coop-texts.ps1` in the game's 13 languages, `tools/package.ps1`, `docs/releasing.md`, offline tests `tests/test_installer.ps1`): finds the Steam copy, accepts only the Steam build 13298487, backs up a foreign `dinput8.dll`, makes the "Resident Evil Revelations Co-op" shortcut and updates the mod from the GitHub releases at the start (protocol in `docs/releasing.md`). Nothing is published from the workspace without the owner. A single-file `setup.exe` and a zip are built by `tools/package.ps1` (window, uninstaller and install on a test copy were shown on a second monitor; not published).
-- **Gamepads** (stage 6c pad audit, `native/padmap.h`, `native/testmode.c`, offline tests `tests/test_padmap.c`): one routing rule maps the game's XInput users to the physical pads for the game's state, capabilities and rumble calls and for the mod's own reading (lobby, BACK / START of the second human): the connected pads are numbered compactly (pads on XInput users 0 and 2 are the game's users 0 and 1, so a virtual pad or an unplugged pad leaves no gap), "player 1 uses gamepad 2" exchanges the first two game users everywhere (state, peek, rumble), a pad that Windows shows twice (identical states while a stick is deflected, e.g. a Steam Input copy next to the physical pad) is hidden so it does not become two players (`REV1_PADDEDUP=0` switches that off), and the mod reads a real pad only while the game window is in front. The sticks are not touched by the mod (the engine's own dead zones and diagonal handling apply). The game's main window is found by its window procedure also in a start without test variables (F6, the mouse and F11 depend on it).
-- **Developer tools** (do nothing in a player's game): `ulist [g<k>|name]` lists every group of the unit table (enemies are in group 13, `units` shows only group 10), `tp <jill|parker|hexunit> x y z` teleports in one frame like the story's own set-position op, `split fov <degrees>` (experiment), `warp <91EESS00>` (`native/warp.c`) starts any story section through the stock Continue (Episode 2 section 1 with Chris and Jessica ran in split screen on the lab PC); `REV1_PADS=1` lets virtual test pads reach a background test instance (a private copy of XInput bypasses the Steam overlay's Steam Input hook).
-- `native/steam.c`: logs the game's Steam calls; `REV1_ACHBLOCK=1` (set by the lab scripts) blocks achievement / stat writes in test runs.
+How it is tested: on the author's test PCs, two copies of the game (one per PC) in one co-op session; the arrival, the characters and the movement of each network section were checked on two PCs; parts of the routes were driven by test aids (teleports, scripted walking), not by people. This version was not played by people before its release, and not yet tried between two different networks (Steam relay): please report what you find. Both players need the same version of the mod.
 
-Layout: `native/` proxy (C, 32-bit, built with Zig: `sh native/build.sh`; hot-loadable experiment plug-ins `plug_*.c`: `build_plug.sh`, `build_split.sh`), `tools/r1console.py` console client.
+## What works
 
-Variables: `REV1_LOG=<file>`, `REV1_CONSOLE=<port>` (UDP on 127.0.0.1), `REV1_ANYEXE=1` (lab only), `REV1_SPLIT=v|h` (start with the split screen requested, side by side / top-bottom), `REV1_MENU=0` (switch the Co-Op Play entry off), `REV1_PADDEDUP=0` (no duplicate-pad detection), `REV1_NATIVEROW=0` (no fourth row in the main menu: hint + F6 / BACK only), `REV1_LANG=<code>` (language of the lobby texts), `REV1_COOP_INI=<file>` (settings file),
-test-window variables of the lab (`REV1_WINPOS`, `REV1_WINSIZE`, `REV1_BACKGROUND`, `REV1_MUTE`, `REV1_ADAPTER`).
-Console words (UDP): `menu status | open | close | view | set | gm`, `split status | on [v|h] | off | lay v|h | hud | menu | view | probe`, `splitkill` (emergency off from any thread), `cap status | bind | own | src | ...`.
-Licence: MIT.
+✅ checked in the game on test PCs · 🟨 partly checked (the row says what is missing) · ⬜ not tested · — not in this version
+
+| Area | Status |
+|---|---|
+| "Co-Op Play" row in the main menu (the fourth entry, in the game's own style; F6 or a gamepad's BACK open it too) and the co-op lobby: co-op on / off, which character player 1 plays, screen layout, player 1's gamepad, Host / Join, Steam friends or Direct IP | ✅ the mouse on the new row is not checked |
+| Split screen on one PC with two gamepads: own camera, HUD (ammunition, weapon, reticle) and pause / item menu for each player; side by side or top / bottom; cutscenes, pause and game over in whole view; every part of the story with two playable characters | ✅ |
+| Network co-op, Episode 1 (Jill and Parker), both role orders: lobby -> New Game -> 1-1 -> 1-2 -> 1-3 -> the end of the episode on both PCs; game over and Continue shared | 🟨 the gameplay of 1-2 itself was skipped by a test command, not played in a co-op session |
+| Network co-op, Episode 2 to the end of the campaign, section by section: arrival, characters and movement of each section on two PCs | 🟨 not verified: the last boss fight played through; section 12-3 was only started directly |
+| Join through Steam friends ("Join Game" in the friends list, the host's invite; no port forwarding) or by IP address (UDP 28410); another mod version or game build is refused with a reason | ✅ on two PCs of one network |
+| The host runs the enemies, the guest's shots count; doors, key items, pickups and story flags kept in step; both PCs wait for each other at every load and cutscene end | ✅ |
+| Downed / revive in a network game (the host's choice: off, 30, 60, 120 seconds or no limit; 60 by default) | ✅ |
+| The Genesis scanner for the second player too: both get it when one has it; network: each scans on the own PC, an item a scan reveals shows on both PCs; split screen: the second player's scan in full screen (one scanner at a time); own analysis rate and herbs per player (part 2 of Episode 1: the team's rate) | 🟨 network checked (both get it, the team rate in 1-2, own rates after it, a revealed item on the other PC); split screen: the full-screen view, the wait while the first player scans, the own rate and herb checked (the rate set by a test command); a real scan of a target by the second player in split screen not reached; the revealed item on the other PC checked with a test command |
+| Give to partner (as in Resident Evil 5): in the game's item screen (BACK) a herb or a grenade (one per press) or half of an ammunition type goes to the partner standing within about 3 m who is not down; the partner takes what fits, the rest stays with you | ✅ split screen and network; keyboard and mouse checked in a network game; the game itself was run in Russian only |
+| A co-op save of its own: a co-op game never writes your solo save (DATA0.DAT); Continue keeps the save's characters on both PCs | ✅ |
+| The partner on the minimap and on the map screen (network and each half of the split screen) | ✅ |
+| Steam achievements: not blocked; each PC credits only what its own player did | ✅ |
+| Other mods: an Ultimate ASI Loader in `dinput8.dll` keeps running as `winmm.dll`; another mod's `dinput8.dll` put over co-op's later is kept as your original | ✅ |
+| Installer, uninstaller and the self-updating "Resident Evil Revelations Co-op" shortcut (SHA-256 checked) | ✅ |
+| Gamepads: compact numbering, "player 1 uses gamepad 2", a pad that Windows shows twice counted once | ✅ |
+| Play between two different networks (Steam relay) | ⬜ |
+| Played through by people (this version was released without a play session by people) | ⬜ |
+| HUNK as the second player in the Guest Cabin part of Episode 2, where the story locks the partner away (network and split screen) | 🟨 appears, walks and shoots on two PCs and in split screen; the end of the part leads both PCs into Episode 3 (reached with test help); the part's own story not played through with HUNK |
+| Raid mode and the game's own online play | — never touched |
+
+## Download and install
+
+1. Download from [Releases](https://github.com/dolbaras/revelations-coop/releases/latest): `revelations-coop-setup-<version>.exe` (one file, nothing to extract) or `revelations-coop-<version>.zip` (extract it anywhere and run `Install Co-op.bat`; the same installer). For network play install it on BOTH PCs.
+2. The installer finds your Steam copy (or asks for the folder that holds `rerev.exe`), keeps a `dinput8.dll` of someone else's in `coop-backup`, adds the mod and makes the "Resident Evil Revelations Co-op" shortcut (desktop, Start menu). It is in the game's 13 languages.
+3. Start the game with that shortcut (it starts the game through Steam): before the game starts it installs a newer release from GitHub by itself (the download is checked against the SHA-256 GitHub gives for it); offline the game starts as it is. In the main menu choose **Co-Op Play**.
+
+The setup exe is not code-signed, so Windows SmartScreen may warn ("More info" -> "Run anyway"); the zip with `Install Co-op.bat` does the same. To remove the mod run `Uninstall Co-op.bat` in the game folder (or the installer again, "Remove co-op"): it puts the backed-up files back; your saves are not touched. Details, network ports and the limits are in `README-COOP.txt` inside the zip (source `docs/release-readme.txt`).
+
+## Requirements
+
+- The Steam version of Resident Evil Revelations, build 13298487 (the installer checks `rerev.exe` and refuses any other one). The mod changes no game file other than adding `dinput8.dll`; it does not touch the Steam stub.
+- Windows 10 or 11, PowerShell 5.1 (part of Windows).
+- Split screen: two XInput (Xbox-compatible) gamepads.
+- Network by IP address: the host's game listens on UDP 28410 (allow the game in Windows Firewall; over the internet the host forwards UDP 28410). Steam friends need no port.
+
+## How to play
+
+- Main menu -> **Co-Op Play** (or F6 / a gamepad's BACK) opens the lobby: switch co-op on, choose which character player 1 plays (player 2 takes the other), the layout and player 1's gamepad.
+- **Split screen:** with co-op on, start the story with the game's own New Game, Continue or Load Game; the second player uses the second gamepad.
+- **Network:** one player chooses "Host", the other "Join" through "Steam friends" ("Join Game" in the Steam friends list or the host's invite) or "Direct IP" (the "Host address" row); when both are ready, the host starts the story with the game's own New Game or Continue and the guest's game follows.
+- While co-op is on, the title's Continue continues the co-op save (`%LOCALAPPDATA%\CAPCOM\RESIDENT EVIL REVELATIONS\rev1_coop_save`); with co-op off your solo Continue loads your solo progress as before.
+
+### Controls
+
+| Key / pad | What it does |
+|---|---|
+| F6 / gamepad BACK | opens the co-op lobby (besides the Co-Op Play row) |
+| Second gamepad | the second player in split screen |
+
+## Languages
+
+The lobby, the installer and the shortcut's messages are in the game's 13 languages; character names and the menu words come from the game's own message files.
+
+## Known limits / not verified
+
+- Network play is for one person per PC; split screen and network are not used together. In the Guest Cabin part of Episode 2 the second player plays HUNK instead of the partner the story locks away: HUNK appears, walks and shoots there (on two PCs and in split screen) and the end of the part leads both PCs into Episode 3, but the part's own story (its scenes, doors and enemies) was not played through with HUNK.
+- Not verified with two real PCs in this version: the last boss fight of the campaign played through (its end flow after it is verified), and the section 12-3, which could only be started directly.
+- Genesis in split screen: while the second player scans, the screen shows his scanner view in full (the game has one scanner view, so one player scans at a time: the first to start, the other waits); his analysis rate is kept only while the game runs (it starts at 0 again after the game is restarted).
+- Give to partner: an item that is on its way to the partner at the very moment a new section starts is not in that section's first checkpoint, so loading that checkpoint again (a game over before the next one) takes it back, like everything else since. Where the story changes the characters with the section (Episode 9 to 10), an item still on its way lands with the new character on that PC; it is not lost.
+- Joining a running network game is not possible: if one player's game closes or the connection is lost, start a new co-op game from the lobby (Continue picks up the checkpoint).
+- An enemy that chases the guest into another area is driven by the guest's PC. The host sees it asleep there, and if the host comes back before it dies, the guest's damage to it is lost (known since 0.1.0).
+- While co-op is on, the Campaign page's save panel (play time, chapter) can still show your solo save's values; Continue loads the co-op save.
+- In a network game the partner's character on your screen can hold other guns than the partner really carries (the DLC pistols are never shown on it); what the partner shoots and hits is always done with the partner's own weapon on the partner's PC.
+- The installer and the setup exe are not code-signed (see above).
+
+## Reporting a bug
+
+Open an [issue](https://github.com/dolbaras/revelations-coop/issues) with a short description (which part of the story, what you did, what happened, about when, which gamepads) and the zip that `coop\Collect logs.bat` in the game folder puts on your desktop (for a network game: of BOTH PCs; double-click it right after the problem, before you start the game again). It holds the mod's logs, settings, the install record and a system summary, with your user, computer and player names, Steam names and IDs, paths, e-mail, MAC and public IP addresses removed. Nothing is uploaded; open the zip to check it before you attach it.
+
+## For developers
+
+- `native/` — the proxy `dinput8.dll` (C, 32-bit, built with Zig: `sh native/build.sh`; the ENet 1.3.18 sources are downloaded separately). It gates on the exe's SHA-256 (another build: it only forwards `DirectInput8Create`), works on the live game and never touches Raid (every module stops and removes its hooks while a Raid scene or session is active).
+- `tools/` — installer, launcher, texts in 13 languages, packaging, the test console client `r1console.py`; `tests/` — offline tests (`sh tests/build.sh`, `tests/test_installer.ps1`), a headless bot (`tests/coop_bot.c`).
+- `docs/` — `releasing.md` (the release protocol the self-update relies on), `downed-revive.md`, `development.md` (test variables, console words, module notes).
+- Version scheme: pre-releases 0.0.1 and 0.0.2 (marked "pre-release", never installed by the shortcut), full releases from 0.1.0; the shortcut follows only `releases/latest`.
+
+## Credits and third-party
+
+- ENet 1.3.18 (MIT) for the network transport; notice in `docs/enet-license.txt`, shipped as `ENET-LICENSE.txt` in the zip.
+- Ultimate ASI Loader (ThirteenAG): kept running next to the mod as `winmm.dll` when you had it; not shipped.
+
+## License
+
+MIT (see `LICENSE`). No game files are in this repository or in the releases; you need your own Steam copy of the game. Resident Evil Revelations is a trademark of Capcom; this project is not affiliated with Capcom.
+
+## По-русски
+
+Resident Evil Revelations Co-op — кооператив вдвоём для сюжетной кампании Resident Evil Revelations (2013, PC, Steam): разделённый экран на одном ПК с двумя геймпадами или игра по сети на двух ПК (друзья Steam или IP-адрес). Скачайте `revelations-coop-setup-<версия>.exe` или zip со страницы [выпусков](https://github.com/dolbaras/revelations-coop/releases/latest) и запустите установщик (для игры по сети — на обоих ПК); дальше запускайте игру ярлыком «Resident Evil Revelations Co-op»: он сам ставит новые версии. В главном меню — пункт **Co-Op Play**. Предметы можно передавать партнёру, как в Resident Evil 5: в экране предметов игры (кнопка BACK) на траве, гранате или патронах появляется «Отдать партнёру», если партнёр рядом (до 3 м) и не лежит без сил. Сканер Genesis есть у обоих игроков: на разделённом экране сканирование второго игрока идёт на весь экран. Описание каждого выпуска есть и на русском.

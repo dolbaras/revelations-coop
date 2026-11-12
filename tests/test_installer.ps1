@@ -2,7 +2,7 @@
 # A stand-in game folder (a tiny fake rerev.exe, -AnyExe) is made under %TEMP%; the supported exe's hash check is tested on a fake exe (refusal) and,
 # when -RealGame <folder> is given, on a COPY of the real rerev.exe (the folder must be a throw-away one that holds only that copy: the test refuses a Steam
 # library folder and anything named game; it never writes there, it copies the exe into its own temp folder).
-# -OldZip <released zip>: also the update from that release (its own launcher) to a 0.1.0 package of this tree (section 4b): the published pre-release
+# -OldZip <released zip>: also the update from that release (its own launcher) to the current package ($cur) of this tree (section 4b): the published pre-release
 #   work\dist-pre2c\revelations-coop-0.0.2.zip (= GitHub's v0.0.2 asset, sha256 f2139927...0192).
 # -Online: also reads the real GitHub (read only) and downloads the published v0.0.2 zip once through this tree's launcher (section 4c).
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tests\test_installer.ps1 [-RealGame <folder with a copy of the real rerev.exe>] [-OldZip <zip>] [-Online] [-Keep]
@@ -16,6 +16,7 @@ $tools = Join-Path $root "tools"
 $base = Join-Path ([IO.Path]::GetTempPath()) ("re1-installer-test-" + $PID)
 Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $base | Out-Null
+$cur = "0.2.0"   # the version of THIS tree (native\r1.h); the older releases below are the published ones
 $script:fails = 0; $script:checks = 0
 function Check($cond, $name) { $script:checks++; if ($cond) { Write-Host "ok   $name" } else { Write-Host "FAIL $name"; $script:fails++ } }
 function Sha($p) { $fs = [IO.File]::OpenRead($p); try { [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)) -replace "-", "" } finally { $fs.Close() } }
@@ -57,7 +58,7 @@ for ($d = Split-Path $root -Parent; $d -and -not $logCollector; $d = Split-Path 
 if (-not $logCollector) { throw "tools\log-collector not found above $root" }
 # (-AnyDllVersion: the stand-in DLL, or the real build, is packaged under the test versions 0.0.1 / 0.0.2; the version check itself is tested below)
 function Package($v, $out = $dist) { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkgRoot "tools\package.ps1") -Version $v -Dist $out -LogCollector $logCollector -AnyDllVersion | Out-Null; if ($LASTEXITCODE) { throw "package.ps1 failed" } }
-Package "0.0.1"; Package "0.0.2"; Package "0.1.0"
+Package "0.0.1"; Package "0.0.2"; Package $cur
 # package.ps1 refuses a DLL whose R1_VERSION is not -Version (the DLL holds it as a string of its own: "\0<version>\0")
 $vdll = Join-Path $base "vdll\dinput8.dll"; New-Item -ItemType Directory -Force (Split-Path $vdll) | Out-Null
 [IO.File]::WriteAllBytes($vdll, [Text.Encoding]::ASCII.GetBytes("MZ stand-in RE Revelations co-op proxy %s loaded`0" + "0.0.3`0"))
@@ -66,7 +67,7 @@ Run-PS (Join-Path $pkgRoot "tools\package.ps1") @("-Version", "0.0.4", "-Dist", 
 Check ($script:exit -ne 0 -and $script:out -match "is not version 0\.0\.4" -and -not (Test-Path (Join-Path $vdist "revelations-coop-0.0.4.zip"))) "package.ps1 refuses a DLL of another version (0.0.3 packaged as 0.0.4)"
 Run-PS (Join-Path $pkgRoot "tools\package.ps1") @("-Version", "0.0.3", "-Dist", "`"$vdist`"", "-Dll", "`"$vdll`"", "-LogCollector", "`"$logCollector`"")
 Check ($script:exit -eq 0 -and (Test-Path (Join-Path $vdist "revelations-coop-0.0.3.zip"))) "package.ps1 takes the DLL of the same version (0.0.3)"
-$zip1 = Join-Path $dist "revelations-coop-0.0.1.zip"; $zip2 = Join-Path $dist "revelations-coop-0.0.2.zip"; $zip3 = Join-Path $dist "revelations-coop-0.1.0.zip"
+$zip1 = Join-Path $dist "revelations-coop-0.0.1.zip"; $zip2 = Join-Path $dist "revelations-coop-0.0.2.zip"; $zip3 = Join-Path $dist "revelations-coop-$cur.zip"
 Check ((Test-Path $zip1) -and (Test-Path $zip2)) "package.ps1 builds revelations-coop-<version>.zip"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 # (rel010) every entry name uses "/": Compress-Archive of Windows PowerShell 5.1 wrote "files\coop\..." (the published 0.0.1 zip), `unzip` then warned and exited 1
@@ -77,19 +78,20 @@ Check ($en.Count -ge 18 -and $bs.Count -eq 0 -and ($en -contains "files/coop/coo
 $x1 = Join-Path $base "x1"; $x2 = Join-Path $base "x2"; $x3 = Join-Path $base "x3"
 [IO.Compression.ZipFile]::ExtractToDirectory($zip1, $x1); [IO.Compression.ZipFile]::ExtractToDirectory($zip2, $x2); [IO.Compression.ZipFile]::ExtractToDirectory($zip3, $x3)
 $names = (Get-ChildItem $x1 -File | ForEach-Object Name) -join ","
-Check ($names -eq "coop-installer.ps1,coop-texts.ps1,Install Co-op.bat,LICENSE.txt,README-COOP.txt") "the zip root: $names"
+Check ($names -eq "coop-installer.ps1,coop-texts.ps1,ENET-LICENSE.txt,Install Co-op.bat,LICENSE.txt,README-COOP.txt") "the zip root: $names"
 $payload1 = @(Get-Content (Join-Path $x1 "files\coop\payload.txt"))
 Check ((($payload1 -contains "dinput8.dll") -and ($payload1 -contains "coop\coop-launcher.ps1") -and ($payload1 -contains "coop\coop-installer.ps1") -and ($payload1 -contains "coop\coop-texts.ps1") -and ($payload1 -contains "coop\version.txt"))) "payload list names the DLL, launcher, installer, texts and version"
 Check ((($payload1 -contains "coop\collect-logs.ps1") -and ($payload1 -contains "coop\Collect logs.bat") -and ($payload1 -contains "coop\log-profiles\revelations1.psd1"))) "payload list names the log collector, its .bat and the profile"
 Check ((Get-Content -LiteralPath (Join-Path $x1 "files\coop\Collect logs.bat") -Raw) -like '*collect-logs.ps1" -Mod revelations1*') "Collect logs.bat runs collect-logs.ps1 -Mod revelations1"
 Check ((Get-Content (Join-Path $x2 "files\coop\version.txt") -TotalCount 1) -eq "0.0.2") "version.txt of the 0.0.2 package"
 
-# 0. the 0.1.0 package: version, readme (names its own version, port and firewall, no list of known problems), the DLL's version, the release procedure
-Check ((Get-Content (Join-Path $x3 "files\coop\version.txt") -TotalCount 1) -eq "0.1.0") "version.txt of the 0.1.0 package"
+# 0. the current package ($cur): version, readme (names its own version, port and firewall, no list of known problems), the DLL's version, the release procedure
+Check ((Get-Content (Join-Path $x3 "files\coop\version.txt") -TotalCount 1) -eq $cur) "version.txt of the $cur package"
 $rd1 = Get-Content (Join-Path $x1 "README-COOP.txt") -Raw; $rd3 = Get-Content (Join-Path $x3 "README-COOP.txt") -Raw
-Check ($rd3 -match "version 0\.1\.0" -and $rd1 -match "version 0\.0\.1" -and $rd3 -notmatch "@VERSION@") "README-COOP.txt names the version of its own package (0.1.0 / 0.0.1), no placeholder left"
+Check ($rd3 -match ("version " + [regex]::Escape($cur)) -and $rd1 -match "version 0\.0\.1" -and $rd3 -notmatch "@VERSION@") "README-COOP.txt names the version of its own package ($cur / 0.0.1), no placeholder left"
 Check ((Get-Content (Join-Path $x3 "files\coop\README.txt") -Raw) -eq $rd3) "coop\README.txt is the same text as README-COOP.txt"
-Check ($rd3 -match "28410" -and $rd3 -match "(?i)firewall" -and $rd3 -match "(?i)Episode 1") "the readme names UDP 28410, the firewall and the Episode 1 scope"
+Check ($rd3 -match "28410" -and $rd3 -match "(?i)firewall" -and $rd3 -match "(?i)section by section" -and $rd3 -notmatch "(?i)covers the whole campaign") "the readme names UDP 28410, the firewall and the section-by-section scope (no claim that network play covers the whole campaign)"
+Check ($rd3 -match "(?i)not verified" -and $rd3 -match "0\.1\.0" -and $rd3 -match "(?i)do not play together") "the readme lists what is not verified and says that 0.1.0 and the new version do not play together"
 Check ($rd3 -notmatch "(?i)known problems" -and $rd3 -notmatch "(?i)pre-release (\d|for testing)|this pre-release|Pre-release \d" -and $rd3 -notmatch "(?i)release\scandidate|\bRC\b") "the readme has no 'known problems' list and no pre-release / RC wording"
 $r1h = Get-Content (Join-Path $root "native\r1.h") -Raw
 Check ($r1h -match '#define R1_VERSION "(\d+\.\d+\.\d+)"') "R1_VERSION is a plain major.minor.patch ($($Matches[1]))"
@@ -462,7 +464,7 @@ try {
     Check ($script:exit -eq 0 -and $script:llog -match "installed 0\.0\.2, latest v0\.0\.2" -and -not ($script:reqs -match "\.zip")) "launcher with nothing new: exit 0, nothing downloaded"
 
     # 4b. -OldZip <a released zip, e.g. work\dist-pre2c\revelations-coop-0.0.2.zip>: that release installed into its own stand-in game, then ITS launcher (the one the
-    #     players have) updates it to a 0.1.0 package of this tree through the local feed; the record, the collector files and the uninstall of the result.
+    #     players have) updates it to the current ($cur) package of this tree through the local feed; the record, the collector files and the uninstall of the result.
     if ($OldZip) {
         $ox = Join-Path $base "old"; [IO.Compression.ZipFile]::ExtractToDirectory($OldZip, $ox)
         $oldVer = Get-Content (Join-Path $ox "files\coop\version.txt") -TotalCount 1
@@ -470,17 +472,17 @@ try {
         $cleanO = Snap $go
         Run-PS (Join-Path $ox "coop-installer.ps1") @("-Quiet", "-Game", "`"$go`"", "-ShortcutDir", "`"$(Join-Path $base 'links old')`"")
         Check ($script:exit -eq 0 -and (Ver $go) -eq $oldVer) "old release $oldVer installed from $([IO.Path]::GetFileName($OldZip))"
-        $distN = Join-Path $base "dist-next"; Package "0.1.0" $distN
-        $zipN = Join-Path $distN "revelations-coop-0.1.0.zip"; Copy-Item $zipN $feedDir
-        Write-Feed "next.json" "$u/redirect/revelations-coop-0.1.0.zip" ("sha256:" + (Sha $zipN)) -tag "v0.1.0"
+        $distN = Join-Path $base "dist-next"; Package $cur $distN
+        $zipN = Join-Path $distN "revelations-coop-$cur.zip"; Copy-Item $zipN $feedDir
+        Write-Feed "next.json" "$u/redirect/revelations-coop-$cur.zip" ("sha256:" + (Sha $zipN)) -tag "v$cur"
         Run-PS (Join-Path $go "coop\coop-launcher.ps1") @("-NoStart", "-NoWindow", "-Feed", "$u/next.json")
         $orec = Get-Content (Join-Path $go "coop\install.txt")
         $olog = (Get-Content (Join-Path $go "coop\launcher-log.txt") -Encoding UTF8) -join " | "
-        Check ((Ver $go) -eq "0.1.0" -and ($orec -contains "version=0.1.0") -and ($orec -contains "file=coop\collect-logs.ps1")) "the $oldVer launcher updates to 0.1.0: record and the collector files ($olog)"
-        Check ((Sha (Join-Path $go "coop\coop-launcher.ps1")) -eq (Sha (Join-Path $tools "launcher.ps1"))) "after the $oldVer -> 0.1.0 update the game folder has this tree's launcher"
-        Check ((Get-Content (Join-Path $go "coop-backup\dinput8.dll") -Raw) -eq "ASI LOADER of somebody else") "the $oldVer -> 0.1.0 update keeps the foreign DLL as the backup"
+        Check ((Ver $go) -eq $cur -and ($orec -contains "version=$cur") -and ($orec -contains "file=coop\collect-logs.ps1")) "the $oldVer launcher updates to ${cur}: record and the collector files ($olog)"
+        Check ((Sha (Join-Path $go "coop\coop-launcher.ps1")) -eq (Sha (Join-Path $tools "launcher.ps1"))) "after the $oldVer -> $cur update the game folder has this tree's launcher"
+        Check ((Get-Content (Join-Path $go "coop-backup\dinput8.dll") -Raw) -eq "ASI LOADER of somebody else") "the $oldVer -> $cur update keeps the foreign DLL as the backup"
         Run-PS (Join-Path $go "coop\coop-installer.ps1") @("-Quiet", "-Uninstall", "-Game", "`"$go`"")
-        Check ($script:exit -eq 0 -and (Same $cleanO (Snap $go))) "uninstall after the $oldVer -> 0.1.0 update: the game folder is the clean one"
+        Check ($script:exit -eq 0 -and (Same $cleanO (Snap $go))) "uninstall after the $oldVer -> $cur update: the game folder is the clean one"
         # a player of the old release with an Ultimate ASI Loader (kept off in coop-backup by that release): the update by the shortcut makes it run on as winmm.dll
         $goa = New-UalGame "old release asi"
         $cleanOA = Snap $goa
@@ -490,7 +492,7 @@ try {
         Check ($script:exit -eq 0 -and (Test-Path -LiteralPath (Join-Path $goa "winmm.dll")) -eq $oldChains -and (Sha (Join-Path $goa "coop-backup\dinput8.dll")) -eq $cleanOA["dinput8.dll"]) "old release $oldVer over an ASI loader: kept in coop-backup, winmm.dll made: $oldChains (as released)"
         Run-PS (Join-Path $goa "coop\coop-launcher.ps1") @("-NoStart", "-NoWindow", "-Feed", "$u/next.json")
         $oarec = @(Get-Content (Join-Path $goa "coop\install.txt"))
-        Check ((Ver $goa) -eq "0.1.0" -and (Sha (Join-Path $goa "winmm.dll")) -eq $cleanOA["dinput8.dll"] -and ($oarec -contains "chain=winmm.dll") -and ($oarec -contains "file=winmm.dll")) "the $oldVer launcher's update to 0.1.0 makes the kept ASI loader run on as winmm.dll"
+        Check ((Ver $goa) -eq $cur -and (Sha (Join-Path $goa "winmm.dll")) -eq $cleanOA["dinput8.dll"] -and ($oarec -contains "chain=winmm.dll") -and ($oarec -contains "file=winmm.dll")) "the $oldVer launcher's update to $cur makes the kept ASI loader run on as winmm.dll"
         Run-PS (Join-Path $goa "coop\coop-installer.ps1") @("-Quiet", "-Uninstall", "-Game", "`"$goa`"")
         Check ($script:exit -eq 0 -and (Same $cleanOA (Snap $goa))) "uninstall after that update: the folder is byte for byte the one with the loader as dinput8.dll"
     }
@@ -625,6 +627,15 @@ Check ($st["ja|ui good"][3] -match "rerev|Resident Evil") "ui ja : the info text
 foreach ($lg in $script:LANGS.Keys) { Check ($st["$lg|ui good"][3] -match "28410") "ui $lg : the window text names the network port 28410" }
 
 # 9. texts: 13 languages, the same keys and placeholders as English, nothing empty, translated
+# (i18n1) PowerShell takes U+2018 U+2019 U+201A U+201B as single quotes and U+201C U+201D U+201E as double ones: a typographic quote in a text can end its string and break the whole file
+foreach ($ps in "coop-texts.ps1", "installer.ps1", "launcher.ps1") {
+    $perr = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $tools $ps), [ref]$null, [ref]$perr)
+    Check (@($perr).Count -eq 0) "$ps parses ($(@($perr | ForEach-Object { $_.Message }) -join '; '))"
+}
+$ctRaw = [IO.File]::ReadAllText((Join-Path $tools "coop-texts.ps1"))
+$sq = ([string][char]0x2018 + [char]0x2019 + [char]0x201A + [char]0x201B).ToCharArray()
+Check ($ctRaw.IndexOfAny($sq) -lt 0) "coop-texts.ps1: no typographic single quote (PowerShell would end the string there)"
 . (Join-Path $tools "coop-texts.ps1")
 $en = $script:TEXTS["en"]
 function Ph($x) { (([regex]::Matches($x, "\{\d\}") | ForEach-Object { $_.Value } | Sort-Object) -join "") }
@@ -641,6 +652,26 @@ foreach ($lg in $script:LANGS.Keys) {
         Check ($same.Count -eq 0) "texts $lg : translated ($($same -join ','))"
     }
 }
+# (i18n1, as Rev2 lang2) the launcher's "update could not be installed" box gives the reason in the window's language (Shown-Reason), never the English exception text
+$laAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $tools "launcher.ps1"), [ref]$null, [ref]$null)
+$srAst = $laAst.Find({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq "Shown-Reason" }, $true)
+Check ($null -ne $srAst) "launcher: Shown-Reason is there"
+if ($srAst) {
+    . ([scriptblock]::Create($srAst.Extent.Text))
+    function Lt($k) { L ("l_" + $k) }
+    $langWas = $script:lang
+    foreach ($lg in $script:LANGS.Keys) {
+        $script:lang = $lg
+        $cases = @(@("coop-installer.ps1 missing in revelations-coop-0.2.0.zip", (L "l_why_noinst")), @("installer exit 5", ((L "l_why_exit") -f 5)),
+                   @("the download broke off (10 of 20 bytes)", (L "l_why_net")), @("the feed did not answer in 6 seconds", (L "l_why_net")),
+                   @("the feed is too slow or too big", (L "l_why_net")), @((L "l_bad"), (L "l_bad")), @("Access to the path is denied.", (L "l_why_other")))
+        $wrong = @($cases | Where-Object { (Shown-Reason (New-Object Exception($_[0]))) -ne $_[1] } | ForEach-Object { $_[0] })
+        Check ($wrong.Count -eq 0) "launcher: the failure reasons in $lg ($($wrong -join '; '))"
+    }
+    $script:lang = $langWas
+    Check ((Get-Content -LiteralPath (Join-Path $tools "launcher.ps1") -Raw) -match '\(Lt "failed"\) -f \$shown,') "launcher: the failure box shows Shown-Reason's text"
+}
+Check ((Get-Content -LiteralPath (Join-Path $tools "installer.ps1") -Raw) -match '\(L "err"\) \+ \$_\.Exception\.Message') "installer: the error box starts with the window's own word for Error"
 # the result page's text with the note about another mod's dinput8.dll fits its label (540 x 160 at 96 DPI, Segoe UI 10.5; measured without a window)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $resFont = New-Object Drawing.Font("Segoe UI", 10.5)
@@ -657,6 +688,26 @@ foreach ($lg in $script:LANGS.Keys) {
     if ($hgt -gt 160) { $tall += "$lg/leftnote $hgt px" }
 }
 Check ($tall.Count -eq 0) "the result text with the dinput8.dll note fits its 160-px label in every language ($($tall -join ', '))"
+# (i18n1) page 1 and the launcher's window in every language, measured the same way: the info text (found, have, what, need, net) in its 604 x 286 label, the
+# buttons (220 / 120 / 160 px), the launcher's update line (found + net) in its 424 x 62 label
+$f10 = New-Object Drawing.Font("Segoe UI", 10); $f10b = New-Object Drawing.Font("Segoe UI", 10, [Drawing.FontStyle]::Bold)
+$wbf = [Windows.Forms.TextFormatFlags]::WordBreak
+$big = @()
+foreach ($lg in $script:LANGS.Keys) {
+    $tx = $script:TEXTS[$lg]
+    $info = @(([string][char]0x2714 + "  " + $tx["found"]), ([string][char]0x2022 + "  " + ($tx["have"] -f "0.2.10", "0.3.10")), "", $tx["what"], "", $tx["need"])
+    if ($tx.ContainsKey("net")) { $info += ""; $info += $tx["net"] }
+    $hgt = [Windows.Forms.TextRenderer]::MeasureText(($info -join "`n"), $resFont, (New-Object Drawing.Size(604, 2000)), $wbf).Height
+    if ($hgt -gt 286) { $big += "$lg info $hgt px" }
+    foreach ($b in @(@("remove", 220, $f10), @("cancel", 120, $f10), @("browse", 120, $f10), @("install", 160, $f10b), @("update", 160, $f10b), @("reinstall", 160, $f10b))) {
+        $w = [Windows.Forms.TextRenderer]::MeasureText($tx[$b[0]], $b[2]).Width + 12
+        if ($w -gt $b[1]) { $big += "$lg $($b[0]) $w px" }
+    }
+    $upd = ($tx["l_found"] -f "0.3.10", "0.2.10"); if ($tx.ContainsKey("l_net")) { $upd += "`n" + $tx["l_net"] }
+    $hgt = [Windows.Forms.TextRenderer]::MeasureText($upd, $f10, (New-Object Drawing.Size(424, 2000)), $wbf).Height
+    if ($hgt -gt 62) { $big += "$lg launcher $hgt px" }
+}
+Check ($big.Count -eq 0) "page 1, its buttons and the launcher's update line fit in every language ($($big -join ', '))"
 foreach ($pair in @(@("ru-RU", "ru"), @("de-DE", "de"), @("pt-BR", "pt-br"), @("pt-PT", "pt"), @("zh-CN", "zh-cn"), @("zh-Hans-CN", "zh-cn"), @("zh-TW", "zh-tw"), @("zh-HK", "zh-tw"), @("ja-JP", "ja"),
                     @("nl-BE", "nl"), @("pl-PL", "pl"), @("es-MX", "es"), @("it-IT", "it"), @("fr-CA", "fr"), @("en-GB", "en"), @("sv-SE", "en"), @("ptB", "pt-br"), @("chT", "zh-tw"), @("jpn", "ja"))) {
     Check ((Pick-Lang $pair[0]) -eq $pair[1]) "Pick-Lang $($pair[0]) -> $($pair[1])"

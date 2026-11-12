@@ -48,7 +48,7 @@ typedef struct {
 
 typedef struct {
     lr_ent e[LR_MAX];
-    unsigned took, gave_back, reports, made_replica;
+    unsigned took, gave_back, reports, made_replica, stale_local;
     unsigned dead_refused;   /* rev1 live 14: replicas not taken because the host's DEATH came for them */
     int no_dead_guard;       /* rev1 live 14 LAB (`world set deadguard 0`): 1 = the rule before the fix (a replica the host's model killed may still be taken) */
 } lr_t;
@@ -136,6 +136,10 @@ static inline int lr_step(lr_t *t, uint16_t key, uint32_t unit, unsigned kind, i
         return LR_NONE;
     }
     if (kind == 3) {   /* a replica */
+        if (e->local) {   /* allep step 4 (3-2 / 8-3, run allep3c): the host's SPAWN made the unit a replica again (make_replica, kind 2 -> 3) without a HAND_BACK: the
+                           * stale "local" flag made the host's DEATH "left alone" for ever, the replica stayed at hp 1000 on this PC. A kind 3 unit is not on this PC's AI. */
+            e->local = 0, e->cond_since_ms = 0, t->stale_local++;
+        }
         if (e->reported && !t->no_dead_guard) {   /* rev1 live 14 (m13f): the host's DEATH came for it (lr_on_death): never taken, whatever its hp says here (the
                                                       later rounds of a burst put a replica back to hp 1; local1 then took the hp-1 Ooze and it bit the guest's Parker) */
             if (e->cond_since_ms) e->cond_since_ms = 0;

@@ -14,6 +14,7 @@
 
 #define WH_CSYSTEM_PTR 0x116A84Cu   /* [..] = cSystem; +0x74 = mEp12SearchRate (getter 0x7832C0) */
 #define WH_RATE_OFF 0x74u
+int scan1_rate_shared_now(void);   /* scan1.c (notes/scan1.md 2.3): 1 = one team rate here (1-2), 0 = each PC keeps its own human's rate */
 
 typedef unsigned (TC *flagget_fn)(void *self, unsigned id);
 static sf1_t SF;
@@ -381,6 +382,7 @@ static void op_ext(void *u, unsigned sub, const uint8_t *b, unsigned len)
             SS.rate_unreadable++;
             return;
         }
+        if (!scan1_rate_shared_now()) return;   /* scan1: outside 1-2 each player has his own rate */
         if (sf1_dec_rate(b, len, &kind, &v) && sf1_rate_remote(&SF, kind, v, cur, &o, &send)) {
             int ok = rate_write(o);
             SS.rate_written += ok;
@@ -400,7 +402,7 @@ static void story_pre_drain(void)
 {
     if (!story_on() || !SF.epoch_valid) return;
     int cur = rate_read(), kind, v;
-    if (cur >= 0 && sf1_rate_poll(&SF, cur, &kind, &v)) story_send_rate(kind, v);
+    if (cur >= 0 && sf1_rate_poll(&SF, cur, &kind, &v) && scan1_rate_shared_now()) story_send_rate(kind, v);   /* polled always (the baseline follows), sent only where shared */
 }
 
 /* ---- set pieces */
@@ -535,7 +537,7 @@ static void story_pass(uint32_t now)
         wlog("story: digest after the quiet window %s (%u mirrored flags set here)%s", n ? "sent" : "NOT sent (the flag getter is not verified)", set, "");
         sv_note("the digest this host sent");
         int rv = sf1_rate_value(&SF);
-        if (rv >= 0) story_send_rate(SF1_RATE_ABS, rv);
+        if (rv >= 0 && scan1_rate_shared_now()) story_send_rate(SF1_RATE_ABS, rv);
     }
     if (SF.role == SF1_GUEST) {
         unsigned set0 = SF.st.digest_set, clr0 = SF.st.digest_clear, prop0 = SF.st.digest_prop;

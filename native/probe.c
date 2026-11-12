@@ -31,6 +31,8 @@
 #include "world1_game.h"
 #include "packcopy1.h"
 #include "ach1_game.h"
+#include "give1_game.h"   /* give1: RE5-style give to partner from the item screen */
+#include "scan1_game.h"   /* scan1: the Genesis scanner for the second player */
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -571,6 +573,8 @@ void probe_install(void)
     mapptn_init();   /* the co-op partner on the HUD minimap (mapptn1_game.c): patched only while a split screen or a network session runs */
     rolebarrier_init();
     coopsave_install();   /* rev1 live 15, task 5: the co-op game's own save (coopsave1.h) */
+    give1_init();   /* give1: the item screen's "give to partner" (a co-op session only; REV1_GIVE=0 = off) */
+    scan1_init();   /* scan1: a Genesis for the second player, his split-screen scans, hidden items on both PCs (REV1_SCAN=0 = off) */
     rolebarrier_on_restart(packcopy_before_reload);   /* LAB packcopy: undone before any reload through the restart hook */
     world_init();
     ach1_game_init();   /* B10: only this PC's human moves its achievement counters in a network game */
@@ -581,7 +585,7 @@ void probe_install(void)
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "tp", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", "net", "guards", "mapptn", "barrier", "world", "packcopy", "bag", "r32", "downed", "ach", "coopsave", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "tp", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", "net", "guards", "mapptn", "barrier", "world", "packcopy", "bag", "r32", "downed", "ach", "coopsave", "scan", "give", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -638,6 +642,10 @@ void probe_run(const char *cmd, char *out, int size)
         guards_cmd(arg, out, size);
     } else if (!strcmp(name, "mapptn")) {   /* the co-op partner on the HUD minimap (mapptn1_game.c): mapptn status | apply | revert | auto | log 0|1 */
         mapptn_cmd(arg, out, size);
+    } else if (!strcmp(name, "give")) {   /* give1: give [status] | on | off | gui | bag [slot] | lab | fill | set reach | sound */
+        give_cmd(arg, out, size);
+    } else if (!strcmp(name, "scan")) {   /* scan1: scan [status] | who | items | on | off | x 0|1 | give | p2rate | reveal */
+        scan_cmd(arg, out, size);
     } else if (!strcmp(name, "coopsave")) {   /* rev1 live 15: the co-op save (coopsave1_game.c): coopsave status | delete | force on|off|auto */
         coopsave_cmd(arg, out, size);
     } else if (!strcmp(name, "barrier")) {   /* role / load + cutscene barrier / Retry-Continue triple (rolebarrier1_game.c): barrier status | apply | revert | auto | restart | set */

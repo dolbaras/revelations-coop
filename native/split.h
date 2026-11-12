@@ -62,6 +62,11 @@ void split_set_hud(int on);            /* second HUD set on / off (default on); 
 void split_get_state(split_state_t *st);
 int split_is_active(void);
 unsigned split_second_minimap(void);  /* the second HUD set's uMiniMapManager, 0 = none */
+/* scan1 (notes/scan1.md 2.2): the second human's Genesis use runs in the menu exchange as kind 3 (pads, roles and own slot swapped, whole view). The hook is
+ * called on the game thread from the split pass: WANT_ENTER (no exchange running, gameplay) and WANT_LEAVE (kind 3 running) return 1 to start / end it;
+ * BEGIN / END tell that it started / ended (END also after a teardown). */
+enum { SPLIT_XG_WANT_ENTER = 0, SPLIT_XG_BEGIN = 1, SPLIT_XG_WANT_LEAVE = 2, SPLIT_XG_END = 3 };
+void split_set_genesis_hook(int (*hook)(int op));
 
 /* console: "split <sub> ..." on the game thread */
 void split_cmd(const char *arg, char *out, int size);

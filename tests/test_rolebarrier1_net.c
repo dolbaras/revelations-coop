@@ -185,7 +185,7 @@ int main(void)
     }
 
     /* ---- ep1-flow E4 / E5 over the real session: the host's section change (no rendezvous: the client did not reach the end) sends the next section, the client
-     * follows it once with the start triple; the end of 1-3 on the host tells the client (EPDONE), which then follows nothing */
+     * follows it once with the start triple; the end of the campaign (12-3) on the host tells the client (EPDONE), which then follows nothing */
     {
         rb_triple s12 = {0x91010200u, 512, 0}, out;
         P[0].b.pt[RB_SECTION].st = 0, P[1].b.pt[RB_SECTION].st = 0;
@@ -198,14 +198,14 @@ int main(void)
         CHECK(rb_restart_follow_at(&P[1].b, &out, 0) == RB_FOL_SECEND && P[1].b.sec_stock_count == 1);   /* (rev1 live 10) its level (1-1) is the section the host left: its own stock end */
         CHECK(rb_section_change(&P[1].b, 0x91010100u, 0x91010200u, &s12) == RB_SC_NOTED && !P[1].b.sec_pending && P[1].b.sec_consumed == 1);   /* that change consumes the triple */
         CHECK(rb_restart_follow_at(&P[1].b, &out, 0) == 0 && P[1].b.sec_followed == 0);
-        CHECK(rb_section_change(&P[0].b, 0x91010300u, 0x91020100u, NULL) == RB_SC_EPEND && P[0].b.ep_local);
+        CHECK(rb_section_change(&P[0].b, 0x910C0300u, 0x91FF0000u, NULL) == RB_SC_EPEND && P[0].b.ep_local);
         pump(60);
         int loc = -1;
         CHECK(P[1].b.ep_peer && rb_ep_known(&P[1].b, &loc) == 1 && loc == 0 && P[1].b.ep_got == 1);
         rb_triple h = {0x91010300u, 257, 1};
         CHECK(rb_restart_host(&P[0].b, &h) == 1);
         pump(60);
-        CHECK(!P[1].b.rs_have);   /* after the end of Episode 1 nothing is followed */
+        CHECK(!P[1].b.rs_have);   /* after the end of co-op nothing is followed */
         CHECK(P[0].foreign_events == 0);
         P[0].b.ep_local = P[0].b.ep_peer = P[1].b.ep_local = P[1].b.ep_peer = 0;   /* (the load barrier blocks below do not depend on it) */
     }

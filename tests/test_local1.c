@@ -295,6 +295,27 @@ static int run_ai_sentinel(int fixed_ai)
     return took;
 }
 
+/* allep step 4 (3-2 / 8-3, run allep3c): the client took the enemy (host record "hidden"), then the host's SPAWN made the unit a replica again (kind 2 -> 3, no HAND_BACK);
+ * the host killed it later: its DEATH must reach the replica (the stale local flag made it "left alone", the replica stayed at hp 1000). Returns the bad count. */
+static int run_spawn_after_take(void)
+{
+    lr_reset(&T);
+    int bad = 0;
+    uint32_t now = 1000;
+    int took = 0;
+    for (int t = 0; t < 8000 && !took; t += 250, now += 250) {
+        if (t % 1000 == 0) lr_on_record(&T, 0x1901, LR_AI_NOUNIT, 0x40002088u, now);
+        if (lr_step(&T, 0x1901, 0x24d23530u, 3, 1, 1000.0f, 573.0f, now) == LR_MAKE_LOCAL) took = 1;
+    }
+    if (!took || lr_kill_allowed(&T, 0x1901)) bad++;   /* local now: a host DEATH would be left alone */
+    for (int t = 0; t < 2000; t += 250, now += 250) {   /* the host's SPAWN: kind 3 again, the host simulates it (live records) */
+        lr_on_record(&T, 0x1901, 12, 0x40000088u, now);
+        lr_step(&T, 0x1901, 0x24d23530u, 3, 1, 1000.0f, 573.0f, now);
+    }
+    if (!lr_kill_allowed(&T, 0x1901)) bad++;
+    return bad;
+}
+
 int main(void)
 {
     t_codec();
@@ -315,6 +336,7 @@ int main(void)
     CHECK(lr_host_ai(0xFFFFFFFFu) == 0xFFFEu && lr_host_ai(0x12345u) == 0x2345u && lr_record_sim(lr_host_ai(0xFFFFu), 0x40000088u), "a real unit's state machine number 0xFFFF is never the no-unit sentinel");
     CHECK(run_ai_sentinel(1) == 0, "lead order: the host runs the Ooze (machine number 0xFFFF): the guest never takes it");
     CHECK(run_ai_sentinel(0) >= 1, "the host before the fix sent the sentinel for a live Ooze: the guest took it (l12c: runs on THIS PC's AI now ... 156 away)");
+    CHECK(run_spawn_after_take() == 0, "a taken enemy turned into a replica by the host's SPAWN: the host's DEATH is applied (not left alone)");
     printf("%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

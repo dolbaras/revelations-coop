@@ -106,6 +106,18 @@ function Explain-Error($ex) {
     $ex.Message
 }
 
+# What the player is shown after a failed download / install, in his language (i18n1, the Rev2 lang2 fix 78a1138): the English details stay in the log only.
+function Shown-Reason($ex) {
+    $m = "" + $ex.Message
+    if ($m -eq (Lt "bad")) { return $m }
+    if ($m -like "coop-installer.ps1 missing*") { return (Lt "why_noinst") }
+    if ($m -match '^installer exit (-?\d+)') { return ((Lt "why_exit") -f $Matches[1]) }
+    $e = $ex
+    while ($e.InnerException -and -not ($e -is [Net.WebException])) { $e = $e.InnerException }
+    if ($e -is [Net.WebException] -or $m -like "the feed*" -or $m -like "the download broke off*") { return (Lt "why_net") }
+    Lt "why_other"
+}
+
 # The feed (a small JSON): 6 seconds to answer, 10 seconds and 1 MB in all. (Async + Wait: the request's own Timeout does not cover an asynchronous call, and its
 # synchronous form leaves the name lookup out (Microsoft's documentation of HttpWebRequest.Timeout); measured 2026-11-06 under Windows PowerShell 5.1:
 # GetResponseAsync returns at once, a failed lookup or a dead address stays inside the task, and Wait(6000) ends it.)
@@ -206,13 +218,14 @@ if (-not $NoUpdate) {
     try { Try-Update } catch {
         # (a rate limit or a missing release shows as the HTTP status; the downloaded part is removed)
         $why = Explain-Error $_.Exception
+        $shown = Shown-Reason $_.Exception
         Log "update: $why"
         if ($script:tmp) { Remove-Item -LiteralPath $script:tmp -Recurse -Force -ErrorAction SilentlyContinue }
         # (offline or GitHub slow: no message, the game just starts; a failed install is said)
         if ($form) {
             $form.Hide()
             $cur = Get-Content -LiteralPath (Join-Path $coop "version.txt") -TotalCount 1 -ErrorAction SilentlyContinue
-            [Windows.Forms.MessageBox]::Show(((Lt "failed") -f $why, $cur), $script:TITLE, "OK", "Warning") | Out-Null
+            [Windows.Forms.MessageBox]::Show(((Lt "failed") -f $shown, $cur), $script:TITLE, "OK", "Warning") | Out-Null
         }
     }
     if ($form) { $form.Close() }
