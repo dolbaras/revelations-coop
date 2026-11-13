@@ -693,6 +693,10 @@ static void fill_env(l1_env *env, int pads)
         g_alone_since = 0;
     env->save_area = save_area();
     env->coop_role1 = coopsave_rec_role1();   /* rev1 live 16: the host's room says that Continue plays the co-op save's characters */
+    {   /* fix021: and names the save's own pair (its section from the role record), not the Episode 1 pair */
+        extern uint32_t coopsave_rec_area(void);
+        env->coop_area = coopsave_rec_area();
+    }
     l1_settings ls;
     if (g_lobby) l1_settings_get(g_lobby, &ls);
     friends_refresh(g_lobby ? &ls : NULL);

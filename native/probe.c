@@ -585,7 +585,7 @@ void probe_install(void)
 /* ---- commands ---- */
 int probe_is_game_cmd(const char *n)
 {
-    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "tp", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", "net", "guards", "mapptn", "barrier", "world", "packcopy", "bag", "r32", "downed", "ach", "coopsave", "scan", "give", NULL};
+    static const char *const list[] = {"players", "unit", "mode", "gamepad", "camera", "units", "ulist", "plug", "P", "ctl", "tp", "call", "w32", "w8", "wf", "rf", "probelog", "ltinfo", "pokesw", "cap", "split", "menu", "warp", "net", "guards", "mapptn", "barrier", "world", "packcopy", "bag", "r32", "downed", "ach", "coopsave", "rtab", "savepanel", "scan", "give", NULL};
     for (int i = 0; list[i]; i++)
         if (!strcmp(n, list[i]))
             return 1;
@@ -632,6 +632,12 @@ void probe_run(const char *cmd, char *out, int size)
         packcopy_cmd(arg, out, size);
     } else if (!strcmp(name, "bag")) {   /* LAB: bag <slot> (the carry-over of a section change); weapon / equip / clip (rev1 live 11) */
         bag_cmd(arg, out, size);
+    } else if (!strcmp(name, "rtab")) {   /* fix021 LAB (rdump1.c): the resource table's use, `rtab <path part>` lists the matching resources */
+        extern int rdump_table(const char *filter, char *out, int size);
+        rdump_table(arg, out, size);
+    } else if (!strcmp(name, "savepanel")) {   /* fix021 LAB (rdump1.c): the Campaign page's slot entries */
+        extern int rdump_panel(char *out, int size);
+        rdump_panel(out, size);
     } else if (!strcmp(name, "world")) {   /* the engine hooks of the shared world (world1_game.c): world status | apply | revert | auto | list | flags | set */
         world_cmd(arg, out, size);
     } else if (!strcmp(name, "ach")) {   /* the achievement gate (ach1_game.c): ach [status] | gate 0|1 | taint 0|1 | profile */

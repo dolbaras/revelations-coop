@@ -25,6 +25,14 @@
  *     lead order's guest sees the host's enemies, R7's host the client's); a PC that does not watch changes nothing;
  *  5. the watcher's HUD minimap follows the watched human: its update runs with the own slot answering the watched human's slot (with minimap1's partner marker
  *     the watching PC's own human becomes the partner marker there).
+ * 0.2.1 (fix021, notes/fix021.md) rules 2 / 3 for an ACTIVE host human (wt_host_step_zone; watching keeps wt_host_step):
+ *  2z. the host keeps a reverse replica of a key the client runs while the client's records are fresh and the host's unit is ASLEEP (E1C 0x1000: its own
+ *      zone pass, outside the host human's zone) - no distance gate (0.2.0: only farther than WT_TAKEBACK, so a host human in the next zone left the unit
+ *      frozen where its zone pass had reset it, with its old hp: fr1b);
+ *  3z. the host takes it back (own AI, from the mirrored position and hp) on the pass that sees it AWAKE (in the host human's zone); then no new reverse
+ *      replica of the key for WT_REHOLD_MS (a zone border does not flap);
+ *  6.  the host's own blows on the key while the client drives it and until the client's hand-back report are summed (hd): a record's hp is written as
+ *      hp - hd, the hand-back's hp is min(host hp, client hp - hd), never below 1 by a report (no kill, no resurrection), then hd is settled.
  */
 #ifndef WATCH1_H
 #define WATCH1_H
@@ -42,7 +50,8 @@
 #define WT_MSG_MAX (WT_HDR_LEN + WT_PER_MSG * WT_REC_LEN)   /* 75 <= W1_EXT_MAX (92) */
 #define WT_STALE_MS 1500u       /* no record for this long: the client does not run it any more */
 #define WT_NEAR 3000.0f         /* the watcher shows replicas this close to the watched human */
-#define WT_TAKEBACK 1500.0f     /* the host's active own human this close takes the enemy back */
+#define WT_TAKEBACK 1500.0f     /* the host's active own human this close takes the enemy back (0.2.0 rule 3; 0.2.1: watching only) */
+#define WT_REHOLD_MS 3000u      /* 0.2.1 rule 3z: after a take-back no new reverse replica of the key before this */
 
 typedef struct {
     uint16_t key;
@@ -100,6 +109,9 @@ typedef struct {
     uint8_t used, active;
     uint32_t rx_ms;
     float pos[3], hp;
+    uint8_t open;      /* 0.2.1 rule 6: the host's blows on the key are summed (from the reverse replica until the client's hand-back report) */
+    float hd;          /* 0.2.1 rule 6: their sum */
+    uint32_t back_ms;  /* 0.2.1 rule 3z: the last take-back */
 } wt_ent;
 
 typedef struct {
@@ -176,6 +188,58 @@ static inline int wt_host_step(wt_host *h, wt_ent *e, unsigned unit_kind, int ow
         }
     }
     return WT_KEEP;
+}
+
+/* 0.2.1 rules 2z / 3z (an active host human; watching: wt_host_step). host_hidden = the host's unit has E1C 0x1000 now. */
+static inline int wt_host_step_zone(wt_host *h, wt_ent *e, unsigned unit_kind, int own_active, float own_dist, float view_dist, int host_hidden, uint32_t now)
+{
+    if (!own_active) return wt_host_step(h, e, unit_kind, own_active, own_dist, view_dist, now);
+    int hold = e->back_ms && (uint32_t)(now - e->back_ms) < WT_REHOLD_MS;
+    int want = wt_fresh(e, now) && view_dist <= WT_NEAR && unit_kind && host_hidden && (e->active || !hold);
+    if (want) {
+        if (!e->active) e->active = 1, e->open = 1, e->hd = 0.0f, h->made++;
+        return unit_kind != 3 ? WT_MAKE_REPLICA : WT_KEEP;
+    }
+    if (e->active) {
+        e->active = 0, h->ended++;
+        if (unit_kind == 3) {
+            h->taken_back++, e->back_ms = now ? now : 1;
+            return WT_TAKE_BACK;
+        }
+    }
+    return WT_KEEP;
+}
+
+/* 0.2.1 rule 6: a blow of the host's own human on the key (dealt = the hp it took here) */
+static inline void wt_host_blow(wt_host *h, uint16_t key, float dealt)
+{
+    wt_ent *e = wt_find(h, key, 0);
+    if (e && e->open && dealt > 0.0f) e->hd += dealt;
+}
+
+/* 0.2.1 rule 6: the hp a record gives the reverse replica */
+static inline float wt_mirror_hp(float rec_hp, float hd)
+{
+    float v = rec_hp - (hd > 0.0f ? hd : 0.0f);
+    return v < 1.0f ? 1.0f : v;
+}
+
+/* 0.2.1 rule 6: the client's hand-back hp as the host's value (the host's own blows since the client drove it taken off); 0.2.0 = the client's hp */
+static inline float wt_handback_eff(const wt_host *h, uint16_t key, float client_hp)
+{
+    for (unsigned i = 0; i < WT_MAX; i++)
+        if (h->e[i].used && h->e[i].key == key && h->e[i].open) {
+            float v = client_hp - (h->e[i].hd > 0.0f ? h->e[i].hd : 0.0f);
+            return v < 1.0f ? 1.0f : v;
+        }
+    return client_hp;
+}
+
+/* 0.2.1 rule 6: the hand-back report arrived (or the enemy died): the sum is settled */
+static inline void wt_settle(wt_host *h, uint16_t key)
+{
+    wt_ent *e = wt_find(h, key, 0);
+    if (e) e->open = 0, e->hd = 0.0f;
 }
 
 /* is the key a reverse replica on the host now */

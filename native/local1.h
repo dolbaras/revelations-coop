@@ -20,6 +20,10 @@
  *      dead check (ArgCheckCharaState mCheckState 2 = record used up / dead bit) agrees, kills a hidden unit it may still have, and its model sends DEATH
  *      (the client's credit is its own kill record; the DEATH changes nothing there);
  *   5. when the host simulates it again for LR_BACK_MS, the client's unit becomes a replica and the client sends its hp (LR_REC_HP): the host takes the lower hp.
+ *  0.2.1 (fix021, notes/fix021.md; lr_t.v020 = 1 is the 0.2.0 model for the tests):
+ *   5a. the hand-back waits while the client's own human is held (a grab by the local copy would be cut by the kind change), at most LR_HOLD_MAX_MS;
+ *   4a. the host's DEATH finishes a LOCAL copy the client has not reported itself (the host killed its reverse replica / its own unit in the hand-back
+ *       window: one death on both PCs); a copy the client reported keeps its own death (as before).
  */
 #ifndef LOCAL1_H
 #define LOCAL1_H
@@ -35,6 +39,7 @@
 #define LR_BACK_MS 1000u             /* "simulated by the host" must hold this long before the client hands it back */
 #define LR_FRESH_MS 2500u            /* a record younger than this counts (the host refreshes every ALIVE record at least once a second) */
 #define LR_NEAR 3000.0f              /* the client takes only enemies near its own human */
+#define LR_HOLD_MAX_MS 8000u         /* 0.2.1 rule 5a: the longest the hand-back waits for the client's own human to be let go */
 
 enum lr_act { LR_NONE = 0, LR_MAKE_REPLICA, LR_MAKE_LOCAL, LR_REPORT_DEATH, LR_HAND_BACK };
 enum lr_rec { LR_REC_DEATH = 1, LR_REC_HP = 2 };
@@ -51,6 +56,9 @@ typedef struct {
     unsigned took, gave_back, reports, made_replica, stale_local;
     unsigned dead_refused;   /* rev1 live 14: replicas not taken because the host's DEATH came for them */
     int no_dead_guard;       /* rev1 live 14 LAB (`world set deadguard 0`): 1 = the rule before the fix (a replica the host's model killed may still be taken) */
+    int v020;                /* fix021 LAB (`world set handover 0`): 1 = the 0.2.0 rules (no rule 5a, no rule 4a) */
+    int own_held;            /* fix021: the glue's per-pass input: the client's own human is held now (+0xE34) */
+    unsigned back_held;      /* fix021: hand-back passes that waited for a grab */
 } lr_t;
 
 static inline void lr_reset(lr_t *t) { memset(t, 0, sizeof *t); }
@@ -164,6 +172,10 @@ static inline int lr_step(lr_t *t, uint16_t key, uint32_t unit, unsigned kind, i
         }
         if (!e->cond_since_ms) e->cond_since_ms = now ? now : 1;
         if ((uint32_t)(now - e->cond_since_ms) >= LR_BACK_MS) {
+            if (!t->v020 && t->own_held && (uint32_t)(now - e->cond_since_ms) < LR_HOLD_MAX_MS) {   /* rule 5a: a grab first */
+                t->back_held++;
+                return LR_NONE;
+            }
             e->local = 0, e->cond_since_ms = 0, t->gave_back++;
             return LR_HAND_BACK;   /* the glue makes it a replica and sends LR_REC_HP */
         }
@@ -175,7 +187,8 @@ static inline int lr_step(lr_t *t, uint16_t key, uint32_t unit, unsigned kind, i
 static inline int lr_kill_allowed(lr_t *t, uint16_t key)
 {
     lr_ent *e = lr_find(t, key, 0);
-    return !(e && (e->local || e->reported));
+    if (t->v020) return !(e && (e->local || e->reported));
+    return !(e && e->reported);   /* rule 4a: a local copy not reported by this PC dies by the host's DEATH (one death) */
 }
 
 /* ---- the report (ext CP_W1_LOCAL): u8 type, u16 key, f32 hp, u8 killer slot (0xFF = none) */

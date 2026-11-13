@@ -266,19 +266,15 @@ static int arch_ensure(uint32_t cls)   /* a grenade type's weapon archive on THI
         glog("grenade %08x: the archive %s is not there (stock check): not given", (unsigned)cls, path);
         return 0;
     }
-    uint32_t res = ((load_fn)(uintptr_t)fn)((void *)(uintptr_t)sres, (void *)(uintptr_t)GVA_DTI_ARCHIVE, path, 1);
-    if (!res) {
-        S.arch_fail++;
-        glog("grenade %08x: the archive %s did not load: not given", (unsigned)cls, path);
-        return 0;
-    }
+    uint32_t res = 1;   /* fix021 (0.2.1): no own load: the stock grenade add (FUN_005C7B10 -> FUN_005C7060 -> FUN_005D0C60 -> FUN_005CE180) loads the archive
+                        * itself, refcounted per item and released at the level end; r48 showed that references the mod holds for the session are not safe */
     for (int i = 0; i < GV_ARCH_MAX; i++)
         if (!g_arch_cls[i]) {
             g_arch_cls[i] = cls, g_arch_res[i] = res;
             break;
         }
     S.arch_loads++;
-    glog("grenade %08x: archive %s held (%08x, the stock sResource load)", (unsigned)cls, path, (unsigned)res);
+    glog("grenade %08x: archive %s is there (the stock check): the stock add loads it", (unsigned)cls, path);
     return 1;
 }
 /* add n of an item to a bag with the stock adds. Returns the units really added (counts before / after). */

@@ -1460,6 +1460,48 @@ static void test_kick_norejoin_name(void)
     faults(0, 0, 0, 0, 0, 1);
 }
 
+/* fix021 (fw1 2026-11-12 23:04 / 23:53): the first level's load barrier counts from the session START; the title (93-150 s) and the 1-2 intro movie (207 s)
+ * passed the 300 s timeout while NOBODY had loaded, and the host opened the barrier into both PCs' movies. Now the timeout counts from the first LOAD_DONE
+ * of the load and never opens while nobody has loaded. */
+static void test_timeout_nobody_loaded(void)
+{
+    printf("-- fix021: a long title + intro (nobody loaded for 400 s): no barrier timeout; the timeout counts from the first LOAD_DONE\n");
+    Node h, c;
+    unreg_all();
+    node_init(&h, "Host", CP_CHAR_CLAIRE, 0);
+    node_init(&c, "Moira Player", CP_CHAR_NONE, 0);
+    reg(&h), reg(&c);
+    faults(0, 0, 0, 5, 0, 1);
+    CHECK(connect_pair(&h, &c, 36));
+    start_game(&h, &c);
+    CHECK(cs_phase(h.s) == CP_PHASE_PLAYING && cs_phase(c.s) == CP_PHASE_PLAYING);
+    int go_h = h.count[CS_N_GO];
+    /* (a) both PCs in their load (the title, the intro movie) for 400 s: the barrier stays closed, then both load: 'all loaded' */
+    cs_load_begin(h.s, 155);
+    step(100);
+    cs_load_begin(c.s, 155);
+    step(400000);
+    CHECK(cs_phase(h.s) == CP_PHASE_LOADING && cs_phase(c.s) == CP_PHASE_LOADING && h.count[CS_N_GO] == go_h);   /* the model before the fix opened it at 300 s */
+    cs_load_done(c.s);
+    step(1500);
+    cs_load_done(h.s);
+    step(200);
+    CHECK(cs_phase(h.s) == CP_PHASE_PLAYING && cs_phase(c.s) == CP_PHASE_PLAYING && h.count[CS_N_GO] == go_h + 1);
+    /* (b) the host loaded after 350 s, the client hangs: the barrier opens 300 s after the host's LOAD_DONE (650 s), not at 300 s */
+    go_h = h.count[CS_N_GO];
+    cs_load_begin(h.s, 156);
+    step(100);
+    cs_load_begin(c.s, 156);
+    step(350000);
+    cs_load_done(h.s);
+    step(250000);   /* 600 s since the load began, 250 s since the host's LOAD_DONE */
+    CHECK(cs_phase(h.s) == CP_PHASE_LOADING && h.count[CS_N_GO] == go_h);
+    step(60000);    /* 310 s since the host's LOAD_DONE */
+    CHECK(cs_phase(h.s) == CP_PHASE_PLAYING && cs_phase(c.s) == CP_PHASE_PLAYING && h.count[CS_N_GO] == go_h + 1);
+    cs_free(h.s), cs_free(c.s);
+    unreg_all();
+}
+
 int main(void)
 {
     cn_sim_set_time(vclock);
@@ -1477,6 +1519,7 @@ int main(void)
     test_leave_during_load();
     test_quit_during_barrier();
     test_slow_load_barrier();
+    test_timeout_nobody_loaded();
     test_leave_reconnect_hostloss();
     test_transport_selection();
     test_silent_partner();

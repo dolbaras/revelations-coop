@@ -35,7 +35,7 @@ Install
    "Resident Evil Revelations Co-op" shortcut (desktop, Start menu). Start the game with that shortcut (it starts it through Steam): it also installs a newer version of the
    mod from GitHub first, if there is one (no internet: the game starts as it is). A new version is installed only when its download matches the checksum GitHub gives for it.
 3. In the main menu choose "Co-Op Play" (the fourth entry) to open the co-op lobby; F6 (keyboard) or BACK (gamepad) open it too.
-If you had an older version (0.0.1, 0.0.2 or 0.1.0): the shortcut updates it to this version by itself at the next start. A 0.1.0 game and a 0.2.0 game do not play together: the lobby refuses the other version and says so.
+If you had an older version (0.0.1, 0.0.2, 0.1.0 or 0.2.0): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.0 and 0.2.1): the lobby refuses the other version and says so.
 
 Network play: Steam friends or IP address
 - "Steam friends": the host starts hosting, the friend joins from the Steam friends list ("Join Game") or from the host's invite. No address and no port forwarding are needed.
@@ -52,7 +52,8 @@ Saves
   New Game only. With co-op off your solo Continue loads your solo progress as before.
 - In a network game Continue keeps the characters the co-op save was played with: if the room gave the host the other character, the host's Continue puts the
   save's characters back on both PCs and both screens say so. New Game keeps the characters chosen in the room. The guest's game follows the host's checkpoint
-  and takes its own weapons from its own co-op save.
+  and takes its own weapons from its own co-op save. At the first level after New Game or Continue, a guest's character that has no gun or no knife there
+  starts with what the host's game gives that character: its guns, the knife, spare ammunition and herbs.
 - To start the co-op campaign over, delete the rev1_coop_save folder (with the game closed).
 
 Achievements
@@ -74,11 +75,7 @@ Limits
   again (a game over before the next one) takes it back, like everything else since. Where the story changes the characters with the section (Episode 9 to 10), an item
   still on its way lands with the new character on that PC; it is not lost.
 - Joining a running network game is not possible: if one player's game closes or the connection is lost, start a new co-op game from the lobby (Continue picks up the checkpoint).
-- An enemy that chases the guest into another area is driven by the guest's PC. The host sees it asleep there, and if the host comes back before it dies,
-  the guest's damage to it is lost (known since 0.1.0).
-- While co-op is on, the Campaign page's save panel (play time, chapter) can still show your solo save's values; Continue loads the co-op save.
-- In a network game the partner's character on your screen can hold other guns than the partner really carries (the DLC pistols are never shown on it); what the partner
-  shoots and hits is always done with the partner's own weapon on the partner's PC.
+- At the first level of a network session the host's character on the guest's screen carries no knife, so a knife attack of the host is not shown there (it counts on the host's PC as usual).
 - Other mods that use dinput8.dll (ASI loaders, fixes): the installer keeps your file in coop-backup and puts the mod's dinput8.dll in its place. If your file is an Ultimate ASI
   Loader (the loader of most ASI mods), the installer also puts a copy of it in the game folder as winmm.dll, so the plugins in your scripts folder keep working. Any other
   dinput8.dll is off until you remove the co-op mod, which puts your files back as they were. Do not rename an ASI loader to dinput8_real.dll: the mod does not load a loader

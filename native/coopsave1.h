@@ -51,7 +51,7 @@
 
 /* rule 6: how this PC played when the co-op file was last written */
 enum { CS1_REC_NONE = 0, CS1_REC_NET = 1, CS1_REC_SPLIT = 2 };
-typedef struct { int mode, role; } cs1_rec;   /* role: 0 lead / 1 partner for CS1_REC_NET, else -1 */
+typedef struct { int mode, role; uint32_t area; } cs1_rec;   /* role: 0 lead / 1 partner for CS1_REC_NET, else -1; area (fix021): the section of the write, 0 = unknown */
 
 /* "mode=net\r\nrole=1\r\n" / "mode=split\r\n"; returns the length, 0 for a record that says nothing (CS1_REC_NONE, a net record without a role) */
 static inline int cs1_rec_format(char *out, size_t size, const cs1_rec *r)
@@ -61,12 +61,13 @@ static inline int cs1_rec_format(char *out, size_t size, const cs1_rec *r)
     out[0] = 0;
     if (r && r->mode == CS1_REC_NET && (r->role == 0 || r->role == 1)) n = snprintf(out, size, "mode=net\r\nrole=%d\r\n", r->role);
     else if (r && r->mode == CS1_REC_SPLIT) n = snprintf(out, size, "mode=split\r\n");
+    if (n > 0 && (size_t)n < size && r->area) n += snprintf(out + n, size - (size_t)n, "area=%08X\r\n", (unsigned)r->area);   /* fix021 */
     return n > 0 && (size_t)n < size ? n : 0;
 }
 /* the record's text (key=value lines, any line end, unknown keys ignored); 1 = a valid record */
 static inline int cs1_rec_parse(const char *t, cs1_rec *r)
 {
-    cs1_rec o = {CS1_REC_NONE, -1};
+    cs1_rec o = {CS1_REC_NONE, -1, 0};
     while (t && *t) {
         const char *e = t;
         while (*e && *e != '\n' && *e != '\r') e++;
@@ -74,6 +75,17 @@ static inline int cs1_rec_parse(const char *t, cs1_rec *r)
         if (n == 8 && !strncmp(t, "mode=net", 8)) o.mode = CS1_REC_NET;
         else if (n == 10 && !strncmp(t, "mode=split", 10)) o.mode = CS1_REC_SPLIT;
         else if (n == 6 && !strncmp(t, "role=", 5) && (t[5] == '0' || t[5] == '1')) o.role = t[5] - '0';
+        else if (n == 13 && !strncmp(t, "area=", 5)) {   /* fix021: the section of the write */
+            uint32_t a = 0;
+            int ok = 1;
+            for (int i = 5; i < 13; i++) {
+                char c = t[i];
+                unsigned d = c >= '0' && c <= '9' ? (unsigned)(c - '0') : c >= 'A' && c <= 'F' ? (unsigned)(c - 'A' + 10) : c >= 'a' && c <= 'f' ? (unsigned)(c - 'a' + 10) : 99u;
+                if (d > 15) ok = 0;
+                a = a << 4 | (d & 15u);
+            }
+            if (ok) o.area = a;
+        }
         t = e;
         while (*t == '\n' || *t == '\r') t++;
     }
@@ -85,7 +97,7 @@ static inline int cs1_rec_parse(const char *t, cs1_rec *r)
  * that ended inside its level, Episode 2 after the end of Episode 1: the game goes on as the character it played) */
 static inline cs1_rec cs1_rec_now(int net_started, int net_role, int split, const cs1_rec *last)
 {
-    cs1_rec r = {CS1_REC_NONE, -1};
+    cs1_rec r = {CS1_REC_NONE, -1, 0};
     if (net_started && (net_role == 0 || net_role == 1)) r.mode = CS1_REC_NET, r.role = net_role;
     else if (split) r.mode = CS1_REC_SPLIT;
     else if (last) r = *last;

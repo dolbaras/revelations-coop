@@ -87,6 +87,7 @@ int rolebarrier_spectating(unsigned *watched)
     return g_t_spec;
 }
 int coopsave_rec_role1(void) { return 0; }   /* rev1 live 16: no co-op save in the harness */
+unsigned coopsave_rec_area(void) { return 0; }   /* fix021: the record's section (none in the harness) */
 /* ep1-flow E5: the end of Episode 1 as rolebarrier1_game.c reports it (the test sets it) */
 static unsigned g_t_ep1, g_t_ep1_closed;
 static int g_t_ep1_local;

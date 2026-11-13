@@ -44,6 +44,7 @@
 #include "downed1.h"
 #include "sf1.h"
 #include "rolebarrier1.h"   /* continue1: rolebarrier_shielded */
+#include "wgate1.h"         /* fix021: the world waits until this PC's own level is up (a barrier opened by its timeout) */
 #include "hunk1.h"          /* allep1: Hunk (class, start gun) */
 #include "ach1_game.h"   /* rel010 B10: the client's own kill also counts for its achievements */
 
@@ -468,11 +469,15 @@ static unsigned TC hook_apply(void *self, void *hit)
         return r;
     }
     if (!g_client && human && hslot == g_own && hkind == 1 && unit_key(victim, &key)) {   /* the host's own human: credit if the blow kills */
+        float hp0 = rdf(victim + WH_U_HP);
+        unsigned r = orig_apply(self, hit);
+        float hp1 = rdf(victim + WH_U_HP);
         ev_t ev;
         memset(&ev, 0, sizeof ev);
-        ev.type = EV_HITNOTE, ev.key = key, ev.slot = hslot;
+        ev.type = EV_HITNOTE, ev.key = key, ev.slot = hslot, ev.dmg = hp0 > hp1 ? hp0 - hp1 : 0.0f;   /* fix021: the hp it took (the hand-over sum) */
         ev_push(&ev);
         S.hits_noted++;
+        return r;
     }
     return orig_apply(self, hit);
 }
@@ -1141,6 +1146,7 @@ static void drain(void)
             break;
         case EV_HITNOTE:
             w1_host_hit_note(&N.w, e.key, e.slot);
+            wt_host_blow_note(e.key, e.dmg);   /* fix021 rule 6 */
             break;
         case EV_DEATH:
             w1_host_death(&N.w, e.key, e.slot, e.hitflags, e.pos);
@@ -1267,11 +1273,13 @@ static void host_pass(uint32_t now)
     }
 }
 
+static wg_t WG;                 /* fix021 (wgate1.h) */
+static volatile int g_world_up = 1;
 static void tap_note(void *u, const cs_note *n)
 {
     (void)u;
     EnterCriticalSection(&mcs);
-    if (bound) w1n_note(&N, n);
+    if (bound && g_world_up) w1n_note(&N, n);   /* fix021: not before this PC's level is up (not acknowledged: the sender repeats it) */
     if (bound && n->what == CS_N_EVENT && n->ev && n->ev->kind == CP_EV_SFPRE) story_pre_rx(n->ev->body, n->ev->len);   /* ep1-probe: the host's pre-load digest */
     LeaveCriticalSection(&mcs);
 }
@@ -1410,15 +1418,23 @@ static void world_frame(void)
     last_want = want;
     if (want || bound) model_sync();
     if (bound) {
-        if (cs_phase(bound_cs) == CP_PHASE_PLAYING) {   /* the level instance before the queue: events of the new level go out in its epoch */
+        int playing = cs_phase(bound_cs) == CP_PHASE_PLAYING, up = 1;
+        if (playing) {   /* the level instance before the queue: events of the new level go out in its epoch */
             w1_set_epoch(&N.w, cs_epoch(bound_cs));
             story_epoch(cs_now(bound_cs));
             story_pre_drain();
+            int how = 0, was = WG.valid && WG.epoch == cs_epoch(bound_cs);
+            up = wg_step(&WG, cs_epoch(bound_cs), rolebarrier_loaded_epoch(cs_epoch(bound_cs)), own_placed(), cs_now(bound_cs), &how);   /* fix021 (wgate1.h) */
+            if (!up && !was)
+                wlog("level instance (epoch %u): the barrier is open but this PC has not reported its level loaded (the barrier's timeout): the world waits for this PC's level start", cs_epoch(bound_cs));
+            if (how == WG_HOW_PLACED)
+                wlog("level instance (epoch %u): this PC's human placed %u ms ago: the world's work starts now (the other PC's events from here on)", cs_epoch(bound_cs), WG_UP_MS);
         }
+        g_world_up = up;
         drain();
-        w1n_frame(&N);
-        zone_pass(cs_phase(bound_cs) == CP_PHASE_PLAYING);   /* round 9: the puppet-authority zone rule (zone1_game.inc) */
-        if (cs_phase(bound_cs) == CP_PHASE_PLAYING) {
+        if (up) w1n_frame(&N);
+        zone_pass(playing && up);   /* round 9: the puppet-authority zone rule (zone1_game.inc) */
+        if (playing && up) {
             uint32_t now = cs_now(bound_cs);
             story_pass(now);
             prompt_pass(now);
@@ -1769,7 +1785,7 @@ static int set_switch(const char *name, const char *v, char *out, int size)
         {"credit", &f_credit, 1}, {"spawnfh", &f_spawnfh, 1}, {"pchit", &f_pchit, 1}, {"interp", &f_interp, 1}, {"doorlog", &f_doorlog, 1}, {"doors", &f_doors, 1}, {"itemspent", &f_itemspent, 1},
         {"vital", &f_vital, 1},   {"death87", &f_death87, 1}, {"despawn", &f_despawn, 2}, {"yawidx", &f_yawidx, 2}, {"revive", &f_revive, 1}, {"puppethits", &f_puppethits, 1},
         {"story", &f_story, 1},   {"localrun", &f_localrun, 1}, {"rearr", &f_rearr, 1}, {"ewatch", &f_ewatch, 1}, {"watchzone", &f_watchzone, 1}, {"watchstage", &f_watchstage, 1},
-        {"watchrep", &f_watchrep, 1}, {"rloc", &f_rloc, 1}, {"watchmap", &f_watchmap, 1}, {"zkeep", &f_zkeep, 1}, {"fallguard", &f_fallguard, 1}, {"fallres", &f_fallres, 1},
+        {"watchrep", &f_watchrep, 1}, {"rloc", &f_rloc, 1}, {"watchmap", &f_watchmap, 1}, {"zkeep", &f_zkeep, 1}, {"handover", &f_handover, 1}, {"fallguard", &f_fallguard, 1}, {"fallres", &f_fallres, 1}, {"rguard", &f_rguard, 1},
         {"hitx", &f_hitx, 1}, {"rdeath", &f_rdeath, 1}, {"deadguard", &f_deadguard, 1}, {"watchcam", &f_watchcam, 1}, {"watchlight", &f_watchlight, 1}, {"motion", &f_motion, 1}, {"bagsync", &f_bagsync, 1},
         {"bagdlc", &f_bagdlc, 1}, {"bagroom", &f_bagroom, 1},
     };

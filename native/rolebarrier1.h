@@ -587,6 +587,8 @@ int rolebarrier_end_kind(void);   /* allep1: RB_EK_* of the end of co-op that be
 void rolebarrier_on_restart(void (*cb)(void));
 /* continue1: 1 = this PC's own humans must take no enemy blow now (a restart came, the session barrier of the next level instance has not opened); any thread */
 int rolebarrier_shielded(void);
+/* fix021: 1 = this PC reported LOAD_DONE for the session epoch `epoch` (its level is up in the usual order; world1_game.c wgate1.h); logic thread */
+int rolebarrier_loaded_epoch(unsigned epoch);
 void rolebarrier_shield_drop(int pchit);   /* the glue of a dropped blow counts it here (world1_game.c: 0 = ApplyHit on the host, 1 = a PCHIT on the client) */
 
 #endif

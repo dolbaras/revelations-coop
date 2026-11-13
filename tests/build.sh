@@ -106,9 +106,17 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 # the guest's human crossed a zone border mid-fight, its engine slept the host's Ooze and every shot went through); the model before the fix must fail
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_zkeep1.exe test_zkeep1.c
 ./build/test_zkeep1.exe
+# fix021 (0.2.1): an enemy the host sleeps while the guest drives it continues from the guest's state when the host wakes it (watch1.h 2z / 3z / 6, local1.h
+# 4a / 5a), on a two-PC model; the 0.2.0 rules must fail it (MODEL BEFORE THE FIX FAILS lines)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_handover1.exe test_handover1.c
+./build/test_handover1.exe
 # allep step 4: the fall-out rescue of the own human (native/fallres1.h)
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_fallres1.exe test_fallres1.c
 ./build/test_fallres1.exe
+# fix021 candidate (rguard1.h): an enemy copy (kind 3) never dies of this PC's fall-out (f21s5 07:11:36: the guest's replicas over floor it never loaded); the model
+# before the fix must fail it (MODEL BEFORE THE FIX FAILS line)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_rguard1.exe test_rguard1.c
+./build/test_rguard1.exe
 # allep step 4: Hunk as the second human of the solo part (native/hunk1.h)
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_hunk1.exe test_hunk1.c
 ./build/test_hunk1.exe
@@ -129,6 +137,9 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 # show different guns on the two PCs
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_bag1.exe test_bag1.c
 ./build/test_bag1.exe
+# fix021 (0.2.1): the world of a level instance waits for this PC's own level (a barrier opened by its timeout: the 1-2 start crash of fw1 23:04 / 23:53)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_wgate1.exe test_wgate1.c
+./build/test_wgate1.exe
 # rev1 live 15 (coopsave1.h, task 5): the co-op game's own save; the solo DATA0.DAT never written by a co-op game (the model before the fix overwrites it)
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_coopsave1.exe test_coopsave1.c
 ./build/test_coopsave1.exe

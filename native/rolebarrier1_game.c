@@ -752,6 +752,7 @@ static int title_read_done(int *ok)
 }
 
 int rolebarrier_shielded(void) { return g_shield; }
+int rolebarrier_loaded_epoch(unsigned epoch) { return B.reported_valid && B.reported_epoch == epoch; }   /* fix021: wgate1.h */
 void rolebarrier_shield_drop(int pchit)
 {
     unsigned n = ++g_shield_drops[pchit ? 1 : 0];
@@ -785,6 +786,10 @@ static int running_area(char *name, int size, unsigned *hash)
 static uint32_t __attribute__((force_align_arg_pointer)) cb_start(rbk_frame *f)
 {
     int section = f->ret_addr >= RB_SECTION_FN_LO && f->ret_addr < RB_SECTION_FN_HI;
+    {   /* fix021 LAB (REV1_LAB_RDUMP=1, rdump1.c): the resource table and the save panel entries at every start (r48: em1000 at start #2) */
+        extern void rdump_auto(const char *why);
+        rdump_auto(section ? "barrier start: a SECTION CHANGE" : "barrier start");
+    }
     unsigned from = 0;
     char an[48] = "";
     rb_triple nx;

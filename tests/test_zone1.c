@@ -341,7 +341,7 @@ static void t_facts(void)
     CHECK(strstr(g, "!z1_rec_ok(type, all)) return r;") && strstr(g, "rcp + 0xB8") && strstr(g, "rcp + 0xC8"), "glue: only any-mode player-class records");
     CHECK(strstr(g, "wh_player_by_slot(&MEM, (unsigned)(1 - g_own), &u) || u != pup) return 0;"), "glue: the puppet is looked up again before it is written into a slot");
     CHECK(strstr(w, "#include \"zone1_game.inc\"") && strstr(w, "{WH_ZONEHIT, (void *)hook_zhit, (void **)&orig_zhit},"), "world: the include and the hook table entry");
-    CHECK(strstr(w, "w1n_frame(&N);\n        zone_pass(cs_phase(bound_cs) == CP_PHASE_PLAYING);"), "world: the logic pass every bound frame");
+    CHECK(strstr(w, "if (up) w1n_frame(&N);\n        zone_pass(playing && up);"), "world: the logic pass every bound frame (fix021: once this PC's level is up, wgate1.h)");
     CHECK(strstr(w, "!strcmp(sub, \"zone\")") && strstr(w, "zone_cmd(a2, arg, out, size);"), "world: the console `world zone`");
     const char *oe = strstr(s, "static void op_ext(void *u, unsigned sub, const uint8_t *b, unsigned len)");
     const char *zz = oe ? strstr(oe, "if (sub == CP_W1_ZONE) {") : NULL, *so = oe ? strstr(oe, "if (!story_on()) return;") : NULL;

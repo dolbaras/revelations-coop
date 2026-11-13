@@ -134,6 +134,7 @@ typedef struct {
     char own_addr[48];      /* this PC's address for Host ("192.168.0.5:28410"), set by the network glue; "" = not known yet */
     int alone_s;            /* host: seconds the link has been waiting without a partner (the internet hint comes after 30 s) */
     unsigned save_area;     /* the area of this PC's save (the checkpoint Continue loads; 0 = unknown): a network host is warned when it is outside Episode 1 */
+    unsigned coop_area;     /* fix021: the section of the co-op save's last write (its role record; 0 = unknown): the room names that section's pair */
     int n_friends;          /* rel010: Steam friends in the game with a lobby right now (the Join + Steam friends row), filled by the glue about once a second */
     char friend_name[L1_FRIENDS][40];
     char friend_id[L1_FRIENDS][24];   /* SteamID64 as digits: what the row puts into join_addr */

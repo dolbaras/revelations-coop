@@ -30,13 +30,19 @@ static volatile uint8_t wv_keep[2][WV_MAX];   /* 1 = zkeep1.h rule 7 (the host s
 #define wv_n (wv_cnt[wv_cur])
 #include "zkeep1.h"
 #include "fallres1.h"
+#include "rguard1.h"
 static volatile uint32_t pcls_persist[2];   /* LAB (Hunk probe): `world pcls persist <slot> <hexid>`: the player class id of that slot is re-written every pass (the engine rewrites cSystem_20 at the section start; FUN_0042B720 / FUN_0042A730 read it frames later) */
 static volatile int f_fallres = 0;     /* LAB (allep step 4, `world set fallres 1`): fallres1.h, an own human without ground for 1.5 s (not falling) is put next to the partner before the engine kills him at 5 s */
 static frs_t FRS;
 static volatile int f_fallguard = 0;   /* LAB (allep step 4, `world set fallguard 1`): the fall-out timer of the humans' move objects is held at 0 (FUN_006F16B0: no ground for 5 s -> FUN_006F0660 kills the OWN human; a human of another slot is exempt) */
+static volatile int f_rguard = 1;      /* fix021 candidate (rguard1.h): the fall-out timer of every enemy COPY (kind 3) is held at 0, its death comes from the PC that runs it; `world set rguard 0` = before */
+static unsigned rg_held, rg_said;
+#define RG_TRACK 32
+static struct { uint32_t unit; float acc; int said; } RGT[RG_TRACK];   /* the copies held in this level instance: the summed no-ground time of the current spell */
 static volatile int f_zkeep = 1;       /* client: rule 7 of zkeep1.h; `world set zkeep 0` = the model before the fix (the m16a1 hide) */
+static volatile int f_handover = 1;    /* fix021 (0.2.1): watch1.h rules 2z / 3z / 6 + local1.h rules 4a / 5a; `world set handover 0` = the 0.2.0 rules (LAB) */
 static volatile DWORD zk_pass_tid;     /* the engine thread inside FUN_00460250 (hook_zpass) */
-static struct { volatile LONG listed_units, lists, skipped, cleared; } ZK;
+static struct { volatile LONG listed_units, lists, skipped, cleared, skipped_host; } ZK;   /* skipped_host: fix021, the host's reverse replicas */
 static uint32_t zk_said[16];   /* the units whose first rule-7 listing was logged in this level instance (the log stays short) */
 static unsigned zk_nsaid;
 static int zk_listed_keep(uint32_t u)   /* engine thread: is the unit in the current list as a rule-7 replica, and does its entry still point at it */
@@ -127,6 +133,14 @@ static void TC hook_zleave(void *self, void *unit, int kill)
             if (k <= 40)
                 wlog("zkeep: zone leave of %s%u/%u unit %08x (a replica the HOST still simulates) on this PC's zone pass: its reset SKIPPED, kept visible and hittable (E1C %08x, this "
                      "PC's human left the enemy's zone)", has ? "" : "?", key >> 8, key & 0xFF, (unsigned)u, rd32(u + WH_U_FLAGS));
+            return;
+        }
+        /* fix021: the host's zone pass must not reset a REVERSE replica (kind 3 on the host = the client drives it; the reset would move it to the record's point) */
+        if (zk_skip_reset(f_handover && !g_client && bound_role == W1_HOST, rd32(u + WH_U_KIND) == 3, zk_pass_tid == GetCurrentThreadId(), kill, (unsigned)lr_state_type(u))) {
+            LONG k = InterlockedIncrement(&ZK.skipped_host);
+            if (k <= 40)
+                wlog("handover: zone leave of %s%u/%u unit %08x (a REVERSE replica: the client's PC drives it) on this PC's zone pass: its reset SKIPPED (E1C %08x)", has ? "" : "?",
+                     key >> 8, key & 0xFF, (unsigned)u, rd32(u + WH_U_FLAGS));
             return;
         }
     }
@@ -230,6 +244,8 @@ static void local_reset(void)
     lr_reset(&LR);
     ew_zone_own[0] = ew_zone_own[1] = ew_zone_partner[0] = ew_zone_partner[1] = -2;
     ew_nsaid = 0;
+    memset(RGT, 0, sizeof RGT);   /* fix021 (rguard1.h): the held copies belong to one level instance */
+    rg_said = 0;
     st_reset(&ST);
     wt_host_reset(&WTH);   /* rev1 live 13: the reverse replicas belong to one level instance */
     hx_reset();            /* rev1 live 14: the finish table and the last HitInfos too */
@@ -261,8 +277,43 @@ static void local_send(unsigned type, w1_key key, float hp, unsigned killer)
     else LS.reports_tx++;
 }
 
+/* fix021 candidate (rguard1.h): every pass, both PCs: no enemy copy dies of THIS PC's fall-out (f21s5 07:11:36: the guest's replicas of the host's 2/3 / 2/5 over
+ * floor the guest never loaded, killed by its engine while alive on the host) */
+static void rguard_pass(void)
+{
+    uint32_t sa = sarrange();
+    if (!sa) return;
+    unsigned n = wh_list_count(&MEM, sa, WH_LIST_ENEMIES);
+    for (unsigned i = 0; i < n; i++) {
+        wh_entry e;
+        if (!wh_list_at(&MEM, sa, WH_LIST_ENEMIES, i, &e) || !e.unit) continue;
+        uint32_t u = e.unit, mo = rd32(u + 0xE88);
+        if (!mo) continue;
+        float t = rdf(mo + 0x2B8);
+        unsigned kind = rd32(u + WH_U_KIND), j, fr = RG_TRACK;
+        if (kind != RG_KIND_COPY) continue;
+        for (j = 0; j < RG_TRACK && RGT[j].unit != u; j++)
+            if (!RGT[j].unit && fr == RG_TRACK) fr = j;
+        if (!rg_hold(f_rguard, kind, t)) {   /* ground (the stock update set the timer to 0): the spell is over */
+            if (j < RG_TRACK) RGT[j].acc = 0.0f, RGT[j].said = 0;
+            continue;
+        }
+        wrf(mo + 0x2B8, 0.0f);
+        rg_held++;
+        if (j == RG_TRACK && fr < RG_TRACK) j = fr, RGT[j].unit = u, RGT[j].acc = 0.0f, RGT[j].said = 0;
+        if (j == RG_TRACK) continue;
+        RGT[j].acc += t;
+        if (RGT[j].acc >= 1.0f && !RGT[j].said && rg_said < 40) {   /* one line per no-ground spell of at least 1 s (a stock fall-out needs 5 s) */
+            RGT[j].said = 1, rg_said++;
+            wlog("rguard: enemy copy unit %08x (kind 3) at (%.0f,%.0f,%.0f) has had no ground for %.1f s on this PC (its floor is not loaded here): its fall-out timer is held at 0, the PC that runs it decides its death",
+                 (unsigned)u, rdf(u + WH_U_POS), rdf(u + WH_U_POS + 4), rdf(u + WH_U_POS + 8), (double)RGT[j].acc);
+        }
+    }
+}
+
 static void local_pass(uint32_t now)
 {
+    if (f_rguard) rguard_pass();
     for (unsigned s = 0; s < 2; s++) {   /* every pass: the persisted player class ids (Hunk probe) */
         uint32_t obj = rd32(0x116A340u);
         if (pcls_persist[s] && obj && rd32(obj + 0x24 + 4 * s) != pcls_persist[s]) {
@@ -327,6 +378,8 @@ static void local_pass(uint32_t now)
             wlog("enemy: zones: this PC's human (slot %d, unit %08x) %d/%d, the partner's puppet (unit %08x) %d/%d", (int)g_own, (unsigned)own_u, ob, ou, (unsigned)par_u, pb, pu);
         ew_zone_own[0] = ob, ew_zone_own[1] = ou, ew_zone_partner[0] = pb, ew_zone_partner[1] = pu;
     }
+    LR.v020 = !f_handover;
+    LR.own_held = own_u && rd32(own_u + 0xE34) != 0;   /* fix021 rule 5a: the own human is held (a grab): the hand-back waits */
     unsigned n = wh_list_count(&MEM, sa, WH_LIST_ENEMIES);
     for (unsigned i = 0; i < n; i++) {
         wh_entry e;
@@ -434,7 +487,14 @@ static void local_rx(const uint8_t *b, unsigned len)
     int alive_unit = u && rdf(u + WH_U_HP) > 0.0f && ((rd32(u + 0xC) & 7) == 1 || (rd32(u + 0xC) & 7) == 2);
     int hidden = alive_unit && wt_report_hidden(&WTH, key, (rd32(u + WH_U_FLAGS) & LR_E1C_HIDDEN) != 0);   /* rev1 live 13: a reverse replica counts as hidden (watch1.h rule 2) */
     int spent = rd8(e.entry + WH_ENTRY_SPENT);
-    int d = lr_host_decide(type, alive_unit, hidden, spent, alive_unit ? rdf(u + WH_U_HP) : 0.0f, hp);
+    float hd = 0.0f, eff = hp;
+    if (f_handover && type == LR_REC_HP) {   /* fix021 rule 6: the client's hp minus the host's own blows since the client drove it */
+        wt_ent *we = wt_find(&WTH, key, 0);
+        hd = we && we->open ? we->hd : 0.0f;
+        eff = wt_handback_eff(&WTH, key, hp);
+    }
+    int d = lr_host_decide(type, alive_unit, hidden, spent, alive_unit ? rdf(u + WH_U_HP) : 0.0f, eff);
+    if (f_handover && (type == LR_REC_HP || d == LR_H_SPEND || d == LR_H_SPEND_KILL)) wt_settle(&WTH, key);
     float pt[3] = {u ? rdf(u + WH_U_POS) : 0.0f, u ? rdf(u + WH_U_POS + 4) : 0.0f, u ? rdf(u + WH_U_POS + 8) : 0.0f};
     if (d == LR_H_SPEND_KILL) {
         uint32_t fn = 0;
@@ -452,9 +512,11 @@ static void local_rx(const uint8_t *b, unsigned len)
         wlog("enemy %u/%u: the client's PC killed it on its own AI (this PC has %s): record used up here%s, model death %s", key >> 8, key & 0xFF,
              !u ? "no unit for it" : hidden ? "only a hidden unit: killed" : "a dead unit", d == LR_H_SPEND_KILL ? " (the hidden unit killed)" : "", md >= 0 ? "sent" : "not known to the model");
     } else if (d == LR_H_SET_HP) {
-        wlog("enemy %u/%u: handed back by the client with hp %.0f (here %.0f): taken", key >> 8, key & 0xFF, hp, rdf(u + WH_U_HP));
-        wrf(u + WH_U_HP, hp);
+        wlog("enemy %u/%u: handed back by the client with hp %.0f (this PC's own blows meanwhile %.0f: hp %.0f; here %.0f): taken", key >> 8, key & 0xFF, hp, hd, eff, rdf(u + WH_U_HP));
+        wrf(u + WH_U_HP, eff);
         LS.hp_set++;
+    } else if (type == LR_REC_HP) {
+        wlog("enemy %u/%u: handed back by the client with hp %.0f (this PC's own blows meanwhile %.0f: hp %.0f; here %.0f): kept as it is", key >> 8, key & 0xFF, hp, hd, eff, u ? rdf(u + WH_U_HP) : 0.0f);
     } else if (d == LR_H_REFUSE) {
         LS.refused++;
         wlog("enemy %u/%u: the client's report %u REFUSED: this PC simulates it (unit %08x hp %.0f E1C %08x)", key >> 8, key & 0xFF, type, (unsigned)u, u ? rdf(u + WH_U_HP) : 0.0f, u ? rd32(u + WH_U_FLAGS) : 0);
@@ -485,6 +547,7 @@ static void local_status(char *out, int size)
     int o = snprintf(out, (size_t)size, "world local (local1.h): %s; took %u, handed back %u, made replica %u, kind refused %u, reports sent %u | host: reports %u, used up %u (hidden units killed %u), hp taken %u, refused %u | rearrange calls %u (enemy %u, the mod's own %u, failed %u), zone leave %u (kills %u), story removals %u, enemy log lines %u, DEATH left on own corpses %u, host records marked 'no unit' %u, zone passes in the watched view %u (watchzone %d), owner+kind changes %u | stage: watchstage %d, own codes sent %u, the other's received %u (refused %u), passes streamed for the watched human %u, the other's now %04x %04x %04x %04x",
                  f_localrun ? "ON" : "OFF (`world set localrun 1`)", LS.took, LS.back, LS.made_replica, LS.kind_fail, LS.reports_tx, LS.rx, LS.spent, LS.killed, LS.hp_set, LS.refused, LS.rearr,
                  LS.rearr_enemy, LS.ops_rearr, LS.ops_rearr_fail, LS.zleave, LS.zleave_kill, LS.rmarr, LS.ew_lines, LS.kill_skipped, LS.parked, LS.zpass_scoped, f_watchzone, LS.owner_set, f_watchstage, ST.tx, ST.rx, ST.rx_bad, ST.used, ST.partner[0], ST.partner[1], ST.partner[2], ST.partner[3]);
+    if (o > 0 && o < size - 80) o += snprintf(out + o, (size_t)(size - o), " | rguard %d (rguard1.h): enemy copies' fall-out timers held %u times", f_rguard, rg_held);
     for (unsigned i = 0; i < LR_MAX && o < size - 120; i++) {
         lr_ent *e = &LR.e[i];
         if (!e->used) continue;

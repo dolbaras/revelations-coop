@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "../native/coopsave1.h"
+#include "../native/secids1.h"
 
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; printf("FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
@@ -402,8 +403,38 @@ static void t_glue(void)
     free(g), free(p), free(b), free(r), free(im);
 }
 
+/* fix021 (0.2.1): the role record keeps the section of the write (the host's room names the save's own pair), the save panel follows the co-op switch */
+static void t_fix021(void)
+{
+    cs1_rec r = {CS1_REC_NET, 1, 0x91030100u}, q;
+    char t[96];
+    int n = cs1_rec_format(t, sizeof t, &r);
+    CHECK(n > 0 && strstr(t, "role=1") && strstr(t, "area=91030100"), "fix021: the record writes area=");
+    CHECK(cs1_rec_parse(t, &q) && q.mode == CS1_REC_NET && q.role == 1 && q.area == 0x91030100u, "fix021: and reads it back");
+    CHECK(cs1_rec_parse("mode=net\r\nrole=0\r\n", &q) && q.area == 0, "fix021: a 0.2.0 record has no area (the room keeps its old names)");
+    CHECK(cs1_rec_parse("mode=net\nrole=0\narea=9103XX00\n", &q) && q.area == 0, "fix021: a broken area is ignored");
+    int l = -1, p = -1;
+    CHECK(sec_pair(0x91030100u, &l, &p) && l == 2 && p == 4, "fix021: 3-1 = Parker + Jessica");
+    CHECK(sec_pair(0x910A0100u, &l, &p) && l == 2 && p == 4 && sec_pair(0x91020200u, &l, &p) && p == 7, "fix021: 10-1 = Parker + Jessica, 2-2's partner = HUNK");
+    CHECK(sec_pair(0x91010100u, &l, &p) && l == 0 && p == 2 && !sec_pair(0x91100200u, &l, &p) && !sec_pair(0x91FF0000u, &l, &p), "fix021: 1-1 = Jill + Parker; 16-2 / none: unknown");
+    int pairs = 0;
+    for (unsigned e = 1; e <= 0x10; e++)
+        for (unsigned ss = 1; ss <= 3; ss++) {
+            uint32_t a = 0x91000000u | e << 16 | ss << 8;
+            if (sec_kind(a) == RB_SK_PAIR) pairs += sec_pair(a, &l, &p);
+        }
+    CHECK(pairs == 28, "fix021: every one of the 28 paired sections has its pair");
+    FILE *f = fopen("../native/coopsave1_game.c", "rb");
+    static char src[200000];
+    size_t k = f ? fread(src, 1, sizeof src - 1, f) : 0;
+    if (f) fclose(f);
+    src[k] = 0;
+    CHECK(strstr(src, "cs_panel_pass(at_title, level);") && strstr(src, "sm, 4u, 0u, 6u)") && strstr(src, "sm + 0xB4"), "fix021: the panel's stock slot read at the co-op switch, only with the save task idle");
+}
+
 int main(void)
 {
+    t_fix021();
     t_rules();
     t_evening();
     t_round16();

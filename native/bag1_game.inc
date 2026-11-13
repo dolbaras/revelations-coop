@@ -13,9 +13,37 @@ static volatile int f_bagsync = 1;
 ativePC\model\chara\em * em1000\em1000.mod 3`, ExitProcess(1) (round 14 passed that change many times without either). Both stay LAB until a live run clears them (default 0):
  * `world set bagdlc 1` = load the DLC guns' archives for a puppet; `world set bagroom 1` = a full puppet bag gives up a gun (BG_REMOVE). With bagdlc 0 the
  * DLC guns are left out of the owner's list before the plan (the puppet keeps its own gun; nothing is taken away for a gun it cannot get). */
-static volatile int f_bagdlc, f_bagroom;
+static volatile int f_bagdlc = 1, f_bagroom = 1;   /* fix021 (0.2.1): on by default through the stock path (LAB 0 = the 0.2.0 rules) */
 static bg_msg bg_own_last, bg_peer;
 static int bg_own_have, bg_peer_have;
+static unsigned bg_peer_epoch;                   /* fix021 (bag1.h bg_peer_usable): the level instance the partner's last report arrived in */
+static uint32_t bg_added[BG_ADDED_MAX];          /* fix021 (bag1.h bg_stale_mirror): the guns the mirror gave the puppet in this level instance */
+static int bg_nadded;
+static void bg_note_added(uint32_t c)
+{
+    for (int i = 0; i < bg_nadded; i++)
+        if (bg_added[i] == c) return;
+    if (bg_nadded < BG_ADDED_MAX) bg_added[bg_nadded++] = c;
+}
+static void bg_forget_added(uint32_t c)
+{
+    for (int i = 0; i < bg_nadded; i++)
+        if (bg_added[i] == c) bg_added[i] = bg_added[--bg_nadded];
+}
+static int bg_seed_sent, bg_seed_have, bg_seed_applied, bg_armed_seen;   /* fix021: the host's seed of the guest's guns (bag1.h) */
+static bg_msg bg_seed;
+static int bg_kit_sent, bg_kit_have, bg_kit_applied, bg_knife_seen;   /* fix021 kit: the host's start kit of the guest's character (bag1.h, version 3) */
+static bg_kit bg_kitv;
+#define BG_PACK_AMMO_SET 0x5C2CE0u   /* fix021 kit: cBioItemPack vf11 (+0x2C) thiscall(pack; index, n): mBullet[index] = n (give1.c's "bag ammo set") */
+static const uint8_t bg_ammo_sig[] = {0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0x0c, 0x73, 0x08, 0x8b, 0x54, 0x24};
+typedef void(__attribute__((thiscall)) *bg_ammo_fn)(void *pack, unsigned index, unsigned n);
+static uint32_t bg_level_ms;   /* fix021: the first gameplay pass of this level instance with this PC's human placed (bag1.h bg_gate) */
+static int bg_unit_placed(uint32_t u)   /* fix021: the unit stands somewhere other than 0,0,0: the stock level start has placed it (story1's own_placed) */
+{
+    if (!u) return 0;
+    float x = rdf(u + WH_U_POS), y = rdf(u + WH_U_POS + 4), z = rdf(u + WH_U_POS + 8);
+    return isfinite(x) && isfinite(y) && isfinite(z) && fabsf(x) + fabsf(y) + fabsf(z) > 1.0f;
+}
 static uint32_t bg_own_ms, bg_last_pass, bg_apply_ms;
 #define BG_ARCH_MAX 16
 static uint32_t bg_arch[BG_ARCH_MAX], bg_arch_cls[BG_ARCH_MAX];   /* archives loaded for the puppet's guns (kept: a reference held for the session) */
@@ -34,7 +62,11 @@ typedef unsigned (TC *bg_fsm4_fn)(void *self, void *param, void *x, void *unit);
 
 static void bg_reset(void)
 {
-    bg_own_have = 0, bg_peer_have = 0;   /* the archives stay referenced (bg_arch): a later level finds them loaded */
+    bg_own_have = 0;   /* fix021: the own bag is sent again at the first gameplay pass of the new level (no archive is held by the mod) */
+    bg_peer_have = bg_peer_have && bg_peer_epoch == w1_epoch(&N.w);   /* fix021: a report of THIS level instance (it may have come first in this frame) stays */
+    bg_nadded = 0;
+    bg_seed_sent = bg_seed_have = bg_seed_applied = bg_armed_seen = 0, bg_level_ms = 0;   /* fix021: one seed per level instance */
+    bg_kit_sent = bg_kit_have = bg_kit_applied = bg_knife_seen = 0;   /* fix021 kit: one start kit per level instance */
 }
 
 /* the classes of a bag's words +4 .. +0x3C (0 = empty / not an item) and its current index; 1 = read */
@@ -80,10 +112,15 @@ static int bg_arc_exists(uint32_t cls, const char *path)
     ops_leave();
     return r != 0;
 }
-static int bg_load_archive(uint32_t cls)
+/* fix021 (0.2.1, bag1.h): 1 = the stock weapon loader will find this class's archive (FUN_009B12C0, the check of FUN_005CE180 -> FUN_008A2D60). The mod loads
+ * NOTHING itself any more (r48 held its own references for the whole session): the stock AddWeapon loads, refcounts and releases the archive. */
+#define BG_OKARCH_MAX 32
+static uint32_t bg_okarch[BG_OKARCH_MAX];
+static unsigned bg_nokarch;
+static int bg_arc_ok(uint32_t cls)
 {
-    for (unsigned i = 0; i < bg_narch; i++)
-        if (bg_arch_cls[i] == cls) return 1;
+    for (unsigned i = 0; i < bg_nokarch; i++)
+        if (bg_okarch[i] == cls) return 1;
     for (unsigned i = 0; i < bg_nnoarch; i++)
         if (bg_noarch[i] == cls) return 0;
     char path[96];
@@ -91,36 +128,56 @@ static int bg_load_archive(uint32_t cls)
     if (!bg_arc_exists(cls, path)) {
         if (bg_nnoarch < BG_NOARCH_MAX) bg_noarch[bg_nnoarch++] = cls;
         BGS.load_fail++;
-        wlog("bag: gun %08x: the archive %s is not there for this game (the stock check FUN_009B12C0 said no): not loaded, the puppet keeps its own gun", (unsigned)cls, path);
+        wlog("bag: gun %08x: the archive %s is not there for this game (the stock check FUN_009B12C0 said no)", (unsigned)cls, path);
         return 0;
     }
-    uint32_t sres = rd32(BG_SRES), vt = sres ? rd32(sres) : 0, fn = vt ? rd32(vt + 0x30) : 0;
-    if (!fn || bg_narch >= BG_ARCH_MAX) {
-        BGS.load_fail++;
-        return 0;
-    }
-    ops_enter();
-    uint32_t a = ((bg_load_fn)(uintptr_t)fn)((void *)(uintptr_t)sres, (void *)(uintptr_t)BG_DTI_ARCHIVE, path, 1);
-    ops_leave();
-    if (!a) {
-        BGS.load_fail++;
-        wlog("bag: the archive %s did not load: the puppet does not get class %08x", path, (unsigned)cls);
-        return 0;
-    }
-    bg_arch[bg_narch] = a, bg_arch_cls[bg_narch++] = cls, BGS.loads++;
-    wlog("bag: the archive %s is loaded (%08x, the stock sResource load as FUN_0087EA10): the puppet's gun %08x gets its model", path, (unsigned)a, (unsigned)cls);
+    if (bg_nokarch < BG_OKARCH_MAX) bg_okarch[bg_nokarch++] = cls;
     return 1;
 }
+/* fix021: the item manager's 16 archive slots ([0x116AB48] +0x2F8): a class it does not hold needs a free one (a full table leaks the archive) */
+#define BG_ITEMMGR_PTR 0x116AB48u
+static int bg_item_room(uint32_t cls)
+{
+    uint32_t im = rd32(BG_ITEMMGR_PTR), tab[16];
+    if (!im || !r1_safe_read((const void *)(uintptr_t)(im + 0x2F8), tab, sizeof tab)) return 0;
+    return bg_item_table_ok(tab, cls);
+}
+/* fix021: the owner's message as this PC can show it: a gun whose archive is not here becomes the nearest stock gun of its family (bag1.h bg_fallback) */
+static void bg_mirrorable(bg_msg *m)
+{
+    for (int k = 0; k < 4; k++) {
+        uint32_t *c = k < 3 ? &m->cls[k] : &m->cur_cls;
+        if (!*c || !bg_is_gun(*c)) continue;
+        if (!f_bagdlc && bg_is_dlc(*c)) {   /* LAB `world set bagdlc 0`: the 0.2.0 filter */
+            *c = 0;
+            continue;
+        }
+        uint32_t f = bg_fallback(*c, bg_arc_ok(*c));
+        if (f != *c) {
+            static uint32_t said[8];
+            int known = 0;
+            for (int i = 0; i < 8; i++) known |= said[i] == *c;
+            for (int i = 0; i < 8 && !known; i++)
+                if (!said[i]) {
+                    said[i] = *c, known = 1;
+                    wlog("bag: the partner's gun %08x has no files on this PC: his puppet shows the nearest stock gun %08x instead", (unsigned)*c, (unsigned)f);
+                }
+        }
+        *c = f;
+    }
+}
 
-static void bg_fsm(uint32_t fn, uint32_t unit, uint32_t a)
+static void bg_fsm_slot(uint32_t fn, uint32_t unit, uint32_t a, uint32_t slot)
 {
     uint32_t param[8] __attribute__((aligned(4)));
     memset(param, 0, sizeof param);
-    param[2] = 0x10, param[3] = a, param[4] = 0xFFFFFFFFu, param[5] = 1;   /* the unit is given; class / slot; the bag's free slot; one */
+    param[2] = 0x10, param[3] = a, param[4] = slot, param[5] = 1;   /* the unit is given; class / slot; the bag's free slot; one */
     ops_enter();
     ((bg_fsm4_fn)(uintptr_t)fn)(NULL, param, NULL, (void *)(uintptr_t)unit);
     ops_leave();
 }
+
+static void bg_fsm(uint32_t fn, uint32_t unit, uint32_t a) { bg_fsm_slot(fn, unit, a, 0xFFFFFFFFu); }
 
 /* hunk1.h (the product's weapons for a Hunk human): Hunk has no profile bag (his bag holds only uWpUnarmed). A Hunk unit that is THIS PC's human (kind 1) and carries no gun is given the start
  * gun the stock way (the archive first, then the stock AddWeapon and ChangeEquipSlot FSM actions on the unit: the proven puppet route above, a weapon object of its own, nothing shared between
@@ -130,6 +187,7 @@ static unsigned hk_bag_tries;
 static void hunk_bag_pass(uint32_t me, uint32_t now)
 {
     if (!me || rd32(me + WH_U_KIND) != 1 || wh_unit_class(&MEM, me) != HK_CLASS_HUNK) return;
+    if (!bg_unit_placed(me)) return;   /* fix021: not before the stock level start has placed him (bag1.h bg_gate) */
     if (me != hk_bag_unit) hk_bag_unit = me, hk_bag_tries = 0, hk_bag_ms = 0;
     uint32_t b[BG_SLOTS];
     int c = -1;
@@ -140,8 +198,8 @@ static void hunk_bag_pass(uint32_t me, uint32_t now)
         wlog("hunk: the stock AddWeapon / ChangeEquipSlot bytes differ: Hunk gets no gun");
         return;
     }
-    if (!bg_load_archive(HK_START_GUN)) {
-        wlog("hunk: the archive of the start gun %08x did not load: no gun", (unsigned)HK_START_GUN);
+    if (!bg_arc_ok(HK_START_GUN) || !bg_item_room(HK_START_GUN)) {
+        wlog("hunk: the archive of the start gun %08x is not there / the item table is full: no gun", (unsigned)HK_START_GUN);
         return;
     }
     bg_fsm(BG_ADDWEAPON, me, HK_START_GUN);
@@ -259,7 +317,83 @@ static void bag_pass(uint32_t now)
     wh_player_by_slot(&MEM, (unsigned)(1 - own), &pup);
     uint32_t cls[BG_SLOTS];
     int cur = -1;
+    if (!bg_gate(1, bg_unit_placed(me))) return;   /* fix021 (fw1 de2598fc 23:04): nothing before the stock level start has placed this PC's human */
+    if (!bg_level_ms) bg_level_ms = now ? now : 1;
+    if (!g_client && pup && !bg_seed_sent) {   /* fix021: the host's seed: the guns its save gave the guest's character, before any mirror change */
+        uint32_t pc0[BG_SLOTS];
+        int pcur0 = -1;
+        if (bg_read(pup, pc0, &pcur0)) {
+            bg_msg sm;
+            memset(&sm, 0, sizeof sm);
+            for (int k = 0; k < 3; k++) sm.cls[k] = bg_is_gun(pc0[k]) ? pc0[k] : 0;
+            sm.cur = (uint8_t)(pcur0 >= 0 && pcur0 < 3 ? pcur0 : 0xFF), sm.cur_cls = pcur0 >= 0 && pcur0 < 3 ? sm.cls[pcur0] : 0;
+            uint8_t b[BG_LEN];
+            bg_enc_seed(b, &sm);
+            if (w1_send_ext(&N.w, CP_W1_BAG, b, BG_LEN)) {
+                bg_seed_sent = 1;
+                wlog("bag: this host's save gave the guest's character %08x %08x %08x: sent once (the guest takes them only if it has no gun)", (unsigned)sm.cls[0], (unsigned)sm.cls[1], (unsigned)sm.cls[2]);
+            }
+        }
+    }
+    if (!g_client && pup && !bg_kit_sent) {   /* fix021 kit: the start kit the host's level start gave the guest's character (its knife, reserve ammo, herbs) */
+        uint32_t pc0[BG_SLOTS], pk = rd32(pup + WH_U_BAG);
+        int pcur0 = -1;
+        if (pk && bg_read(pup, pc0, &pcur0)) {
+            bg_kit k;
+            memset(&k, 0, sizeof k);
+            k.knife = bg_is_knife(pc0[BK_KNIFE_ITEM]) ? pc0[BK_KNIFE_ITEM] : 0;
+            for (int i = 0; i < BK_AMMO; i++) {
+                uint32_t v = rd32(pk + 0x40 + 4u * (unsigned)i);
+                k.ammo[i] = (uint16_t)(v <= 999u ? v : 0u);
+            }
+            uint32_t h = rd32(pk + 0xC8);
+            k.herb = (uint16_t)(h <= 99u ? h : 0u);
+            uint8_t b[BK_LEN];
+            bg_enc_kit(b, &k);
+            if (w1_send_ext(&N.w, CP_W1_BAG, b, BK_LEN)) {
+                bg_kit_sent = 1;
+                wlog("bag: this host's level start gave the guest's character the knife %08x, ammo %u %u %u %u, herbs %u: sent once (the guest takes them only if its human has no knife)",
+                     (unsigned)k.knife, (unsigned)k.ammo[0], (unsigned)k.ammo[1], (unsigned)k.ammo[2], (unsigned)k.ammo[3], (unsigned)k.herb);
+            }
+        }
+    }
     if (me && rd32(me + WH_U_KIND) == 1 && bg_read(me, cls, &cur)) {   /* the own human's bag to the other PC */
+        if (g_client && bg_has_gun(cls)) bg_armed_seen = 1;   /* fix021: a gun of its own (dealt, picked up, given): the seed never applies in this level */
+        if (bg_seed_wanted(g_client, bg_seed_have, bg_seed_applied, bg_has_gun(cls), bg_armed_seen, bg_settled(bg_level_ms, now))) {
+            bg_seed_applied = 1;   /* once, whatever the adds give */
+            int added = 0;
+            for (int k = 0; k < 3 && bg_fsm_ok(BG_ADDWEAPON); k++) {
+                uint32_t c = bg_seed.cls[k];
+                if (!bg_is_gun(c)) continue;
+                c = bg_fallback(c, bg_arc_ok(c));
+                uint32_t nowb[BG_SLOTS];
+                int nc = -1;
+                if (!c || !bg_read(me, nowb, &nc) || bg_find(nowb, c) >= 0 || !bg_item_room(c)) continue;
+                bg_fsm(BG_ADDWEAPON, me, c), added++;
+            }
+            if (added && bg_fsm_ok(BG_EQUIPSLOT)) bg_fsm(BG_EQUIPSLOT, me, 0);
+            bg_read(me, cls, &cur);
+            wlog("bag: this PC's human had NO gun at the level start: the guns the host's save gave its character added (%d of %08x %08x %08x, the stock AddWeapon): now %08x %08x %08x",
+                 added, (unsigned)bg_seed.cls[0], (unsigned)bg_seed.cls[1], (unsigned)bg_seed.cls[2], (unsigned)cls[0], (unsigned)cls[1], (unsigned)cls[2]);
+        }
+        if (g_client && bg_is_knife(cls[BK_KNIFE_ITEM])) bg_knife_seen = 1;   /* fix021 kit: a knife of its own in this level: the kit never applies */
+        if (bg_kit_wanted(g_client, bg_kit_have, bg_kit_applied, bg_is_knife(bg_kitv.knife), bg_is_knife(cls[BK_KNIFE_ITEM]), bg_knife_seen,
+                          bg_settled(bg_level_ms, now))) {
+            bg_kit_applied = 1;   /* once, whatever the calls give */
+            uint32_t pk = rd32(me + WH_U_BAG), vt = pk ? rd32(pk) : 0, af = vt == BG_PACK_VT ? rd32(vt + 4u * 11u) : 0;
+            int oa[BK_AMMO], oh = pk ? (int)rd32(pk + 0xC8) : 1, knife = 0, sets = 0, ammo_ok = af == BG_PACK_AMMO_SET;
+            for (int i = 0; i < BK_AMMO; i++) oa[i] = pk ? (int)rd32(pk + 0x40 + 4u * (unsigned)i) : 1;
+            for (unsigned i = 0; ammo_ok && i < sizeof bg_ammo_sig; i++) ammo_ok = rd8(af + i) == bg_ammo_sig[i];
+            bg_kit_plan p = bg_kit_plan_of(&bg_kitv, cls, oa, oh);
+            if (p.knife && bg_fsm_ok(BG_ADDWEAPON) && bg_arc_ok(p.knife) && bg_item_room(p.knife)) bg_fsm_slot(BG_ADDWEAPON, me, p.knife, BK_KNIFE_ITEM), knife = 1;
+            for (int i = 0; i < BK_AMMO && ammo_ok; i++)
+                if (p.ammo[i] >= 0) ((bg_ammo_fn)(uintptr_t)af)((void *)(uintptr_t)pk, (unsigned)i, (unsigned)p.ammo[i]), sets++;
+            if (pk && p.herb >= 0) wr32(pk + 0xC8, (uint32_t)p.herb), sets++;
+            bg_read(me, cls, &cur);
+            wlog("bag: this PC's human had NO knife at the level start (a bag the stock start never filled): the host's start kit: knife %08x %s (item 10 now %08x), %d count(s) set (ammo %s; herbs %d -> %d)",
+                 (unsigned)p.knife, knife ? "added (the stock AddWeapon, slot 10)" : "not added", (unsigned)cls[BK_KNIFE_ITEM], sets, ammo_ok ? "stock vf11" : "NOT set: the pack's vf11 differs",
+                 oh, pk ? (int)rd32(pk + 0xC8) : -1);
+        }
         bg_msg m;
         memset(&m, 0, sizeof m);
         m.cur = (uint8_t)(cur >= 0 && cur < 0xFF ? cur : 0xFF);
@@ -275,36 +409,75 @@ static void bag_pass(uint32_t now)
             } else BGS.tx_fail++;
         }
     }
-    if (!bg_peer_have || !pup || (int32_t)(now - bg_apply_ms) < (int32_t)BG_APPLY_GAP_MS) return;
-    bg_msg want = bg_peer;   /* rev1 live 15: the owner's guns this PC can mirror (no DLC gun unless bagdlc) */
-    if (!f_bagdlc) {
-        for (int k = 0; k < 3; k++)
-            if (bg_is_dlc(want.cls[k])) want.cls[k] = 0;
-        if (bg_is_dlc(want.cur_cls)) want.cur_cls = 0;
-    }
+    /* fix021 (f21r1 04:13: bag_pass ran before the new level instance's reset and gave the 1-2 puppet the guest's 1-1 gun): only a report of this level instance */
+    if (!bg_peer_usable(bg_peer_have, bg_peer_epoch, w1_epoch(&N.w)) || !pup || (int32_t)(now - bg_apply_ms) < (int32_t)BG_APPLY_GAP_MS) return;
+    bg_msg want = bg_peer;   /* fix021: the owner's guns as this PC can show them (bag1.h bg_fallback; LAB bagdlc 0 = no DLC gun) */
+    bg_mirrorable(&want);
     uint32_t pc[BG_SLOTS];
     int pcur = -1;
     if (!bg_read(pup, pc, &pcur)) return;
     int free_slot = !pc[0] || !pc[1] || !pc[2];
-    bg_step s = bg_plan(&want, pc, pcur, free_slot);
-    if (s.act == BG_REMOVE && !f_bagroom) return;   /* (LAB bagroom) */
-    if (s.act == BG_NONE) return;
+    bg_step s = bg_plan2(&want, pc, pcur, free_slot);   /* fix021: a full bag makes room by the stock replace (BG_REPLACE) */
+    if (s.act == BG_REPLACE && !f_bagroom) return;   /* (LAB bagroom 0) */
+    if (s.act == BG_NONE) {   /* fix021: a gun the mirror added in this level instance that he no longer lists goes, the stock way (bag1.h bg_stale_mirror) */
+        int k = bg_stale_mirror(&want, pc, pcur, bg_added, bg_nadded);
+        if (k < 0) return;
+        uint32_t pk = rd32(pup + WH_U_BAG), pvt = pk ? rd32(pk) : 0, rm = pvt ? rd32(pvt + 0x1C) : 0, old = pc[k];
+        bg_apply_ms = now;
+        bg_forget_added(old);   /* one try per gun */
+        if (pvt != BG_PACK_VT || rm != BG_PACK_REMOVE) {
+            BGS.remove_fail++;
+            if (++BGS.refused <= 5) wlog("bag: the puppet's bag (vtable %08x, slot 7 %08x) is not the stock cBioItemPack: its stale gun %08x stays", (unsigned)pvt, (unsigned)rm, (unsigned)old);
+            return;
+        }
+        ops_enter();
+        ((bg_remove_fn)(uintptr_t)rm)((void *)(uintptr_t)pk, (unsigned)k);
+        ops_leave();
+        uint32_t after[BG_SLOTS];
+        int ac = -1;
+        bg_read(pup, after, &ac);
+        int ok = after[k] == 0;
+        if (ok) BGS.removes++;
+        else BGS.remove_fail++;
+        if (++BGS.lines <= 60) wlog("bag: the partner's puppet (unit %08x) carried %08x (index %d) from an earlier report of his that he no longer lists: %s", (unsigned)pup, (unsigned)old, k,
+                                    ok ? "taken away the stock way (cBioItemPack_vf7)" : "NOT taken away");
+        return;
+    }
     bg_apply_ms = now;
     if (s.act == BG_ADD) {
         if (!bg_fsm_ok(BG_ADDWEAPON)) {
             if (++BGS.refused <= 5) wlog("bag: PcsMainCharacterAddWeapon's bytes differ: the puppet gets nothing");
             return;
         }
-        if (!bg_load_archive(s.cls)) return;
-        bg_fsm(BG_ADDWEAPON, pup, s.cls);
+        if (!bg_item_room(s.cls)) {
+            if (++BGS.refused <= 5) wlog("bag: the item manager's 16 archive slots are full: the puppet does not get %08x now", (unsigned)s.cls);
+            return;
+        }
+        bg_fsm(BG_ADDWEAPON, pup, s.cls);   /* the stock AddWeapon loads the archive itself (FUN_005CE180) */
         uint32_t after[BG_SLOTS];
         int ac = -1;
         bg_read(pup, after, &ac);
         int ok = bg_find(after, s.cls) >= 0;
-        if (ok) BGS.adds++;
+        if (ok) BGS.adds++, bg_note_added(s.cls);
         else BGS.add_fail++;
         if (++BGS.lines <= 60) wlog("bag: the partner's puppet (unit %08x) %s his gun %08x (his current %08x): %s", (unsigned)pup, ok ? "now carries" : "did NOT take", (unsigned)s.cls,
-                                    (unsigned)bg_peer.cur_cls, ok ? "added by the stock AddWeapon after its archive" : "the add left the bag unchanged");
+                                    (unsigned)bg_peer.cur_cls, ok ? "added by the stock AddWeapon (its archive by the stock loader)" : "the add left the bag unchanged");
+    } else if (s.act == BG_REPLACE) {   /* fix021: the stock replace: AddWeapon into that slot (the bag's FUN_005C7060 releases the old item, never the held one) */
+        if (!bg_fsm_ok(BG_ADDWEAPON) || s.index < 0 || s.index > 2 || s.index == pcur || !bg_item_room(s.cls)) {
+            BGS.remove_fail++;
+            if (++BGS.refused <= 5) wlog("bag: no replace of the puppet's slot %d (held %d / the item table / the bytes): nothing changed", s.index, pcur);
+            return;
+        }
+        uint32_t old = pc[s.index];
+        bg_fsm_slot(BG_ADDWEAPON, pup, s.cls, (uint32_t)s.index);
+        uint32_t after[BG_SLOTS];
+        int ac = -1;
+        bg_read(pup, after, &ac);
+        int ok = after[s.index] == s.cls;
+        if (ok) BGS.removes++, BGS.adds++, bg_note_added(s.cls);
+        else BGS.remove_fail++;
+        if (++BGS.lines <= 60) wlog("bag: the partner's puppet (unit %08x) had a full bag: its gun %08x (index %d, not his) %s his %08x (the stock replace)", (unsigned)pup, (unsigned)old,
+                                    s.index, ok ? "replaced by" : "NOT replaced by", (unsigned)s.cls);
     } else if (s.act == BG_REMOVE) {   /* rev1 live 15: a full puppet bag makes room: one gun the owner does not carry, never the held one (bag1.h) */
         uint32_t pk = rd32(pup + WH_U_BAG), pvt = pk ? rd32(pk) : 0, rm = pvt ? rd32(pvt + 0x1C) : 0;
         if (pvt != BG_PACK_VT || rm != BG_PACK_REMOVE || s.index < 0 || s.index > 2 || s.index == pcur) {
@@ -338,13 +511,29 @@ static void bag_rx(const uint8_t *b, unsigned len)
 {
     bg_msg m;
     BGS.rx++;
+    bg_kit kt;
+    if (bg_dec_kit(b, len, &kt)) {   /* fix021 kit: the host's start kit of this guest's character (once per level instance) */
+        if (g_client && !bg_kit_applied && !bg_kit_have) {
+            bg_kitv = kt, bg_kit_have = 1;
+            wlog("bag: the host's start kit of this PC's character: knife %08x, ammo %u %u %u %u, herbs %u (taken only if this PC's human has no knife)", (unsigned)kt.knife,
+                 (unsigned)kt.ammo[0], (unsigned)kt.ammo[1], (unsigned)kt.ammo[2], (unsigned)kt.ammo[3], (unsigned)kt.herb);
+        }
+        return;
+    }
+    if (bg_dec_seed(b, len, &m)) {   /* fix021: the host's seed of this guest's guns (once per level instance) */
+        if (g_client && !bg_seed_applied && !bg_seed_have) {
+            bg_seed = m, bg_seed_have = 1;
+            wlog("bag: the host's save gave this PC's character %08x %08x %08x (taken only if this PC's human has no gun)", (unsigned)m.cls[0], (unsigned)m.cls[1], (unsigned)m.cls[2]);
+        }
+        return;
+    }
     if (!bg_dec(b, len, &m)) {
         BGS.bad++;
         return;
     }
     if (!bg_peer_have || !bg_same(&m, &bg_peer))
         if (++BGS.lines <= 60) wlog("bag: the partner carries %08x %08x %08x, current %08x: his puppet here follows", (unsigned)m.cls[0], (unsigned)m.cls[1], (unsigned)m.cls[2], (unsigned)m.cur_cls);
-    bg_peer = m, bg_peer_have = 1;
+    bg_peer = m, bg_peer_have = 1, bg_peer_epoch = w1_epoch(&N.w);   /* fix021: w1 delivers only events of its current epoch */
 }
 
 static void bag_status(char *out, int size)
@@ -352,4 +541,16 @@ static void bag_status(char *out, int size)
     snprintf(out, (size_t)size, "world bag (bag1.h): bagsync %d | sent %u (failed %u), received %u (bad %u) | the puppet: archives loaded %u (failed %u), guns added %u (failed %u), equips %u, refused %u, taken away %u (failed %u) | the partner's current %08x",
              f_bagsync, BGS.tx, BGS.tx_fail, BGS.rx, BGS.bad, BGS.loads, BGS.load_fail, BGS.adds, BGS.add_fail, BGS.equips, BGS.refused, BGS.removes, BGS.remove_fail,
              bg_peer_have ? (unsigned)bg_peer.cur_cls : 0u);
+    {   /* fix021 (LAB BAGSYNC): the partner's report and its level instance, the puppet's three gun slots, the guns the mirror added in this level instance */
+        uint32_t pup = 0, pc[BG_SLOTS];
+        int pcur = -1, n = (int)strlen(out);
+        memset(pc, 0, sizeof pc);
+        if (g_own == 0 || g_own == 1) wh_player_by_slot(&MEM, (unsigned)(1 - g_own), &pup);
+        if (pup) bg_read(pup, pc, &pcur);
+        unsigned ep = w1_epoch(&N.w);
+        if (n < size) n += snprintf(out + n, (size_t)(size - n), " | BAGSYNC report epoch %u level %u %s %08x %08x %08x cur %08x | puppet %08x %08x %08x cur %d | added", bg_peer_epoch, ep,
+                                    bg_peer_usable(bg_peer_have, bg_peer_epoch, ep) ? "usable" : "none", (unsigned)bg_peer.cls[0], (unsigned)bg_peer.cls[1], (unsigned)bg_peer.cls[2],
+                                    (unsigned)bg_peer.cur_cls, (unsigned)pc[0], (unsigned)pc[1], (unsigned)pc[2], pcur);
+        for (int i = 0; i < bg_nadded && n > 0 && n < size; i++) n += snprintf(out + n, (size_t)(size - n), " %08x", (unsigned)bg_added[i]);
+    }
 }

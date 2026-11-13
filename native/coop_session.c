@@ -83,6 +83,7 @@ struct cs_t {
     uint32_t pend_ms[CN_MAX_PEERS];   /* host: transport-connected peers that have not said hello yet (connect time + 1) */
     uint8_t epoch, me_load_epoch;
     uint32_t load_started;
+    uint32_t first_loaded;   /* fix021: when the first player of this load reported loaded (0 = nobody yet): the barrier timeout counts from it */
     uint32_t wait_ls, wait_next;   /* stage 6i: the load_started that the last 'still waiting' note belongs to, and the time of the next note */
     uint32_t last_hb, last_state;
     uint16_t state_seq, event_seq, world_seq;
@@ -968,7 +969,15 @@ void cs_poll(cs_t *s)
                     s->pend_ms[p] = 0;
                     cn_disconnect_peer(s->net, p, 0);
                 }
-            if (s->phase == CP_PHASE_LOADING && (int32_t)(now - s->load_started) > BARRIER_TIMEOUT_MS) {
+            /* fix021 (fw1 2026-11-12 23:04 / 23:53): the timeout opened the first level's barrier while NO player had loaded (the title time counts from the
+             * session START, then a 207 s intro movie): both PCs played the model before their level start. The timeout is for a partner that never
+             * finishes: it counts from the first player's LOAD_DONE of this load, and never opens while nobody has loaded. */
+            int any_loaded = 0;
+            for (int i = 0; i < CP_MAX_PLAYERS; i++)
+                if (s->pl[i].used && s->pl[i].connected && s->pl[i].loaded) any_loaded = 1;
+            if (s->phase != CP_PHASE_LOADING || !any_loaded) s->first_loaded = 0;
+            else if (!s->first_loaded) s->first_loaded = now ? now : 1;
+            if (s->phase == CP_PHASE_LOADING && s->first_loaded && (int32_t)(now - s->first_loaded) > BARRIER_TIMEOUT_MS) {
                 for (int i = 0; i < CP_MAX_PLAYERS; i++)
                     if (s->pl[i].used && s->pl[i].connected && !s->pl[i].loaded) cn_log("session: barrier timeout, player %d never reported loaded", i);
                 open_barrier(s, "barrier timeout");

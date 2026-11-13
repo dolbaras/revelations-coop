@@ -16,7 +16,7 @@
 
 static struct {
     unsigned tx_rounds, tx_msgs, tx_recs, tx_fail, applied, snaps, kind_made, kind_back, kind_fail, rearr, vis_lists, vis_units, vis_cleared, vis_stale, map_installs,
-        map_scoped, map_reverts, lines;
+        map_scoped, map_reverts, lines, host_blows;   /* host_blows: fix021 rule 6 */
 } WS;
 static uint32_t wt_last_pass_ms;
 #define WS_LOG(...) do { if (++WS.lines <= 200) wlog(__VA_ARGS__); } while (0)
@@ -77,7 +77,10 @@ static void watch_apply_one(wt_ent *e, uint32_t now)
     unsigned kind = alive ? rd32(u + WH_U_KIND) : 0;
     float dx = own_u ? rdf(own_u + WH_U_POS) - e->pos[0] : 1e9f, dz = own_u ? rdf(own_u + WH_U_POS + 8) - e->pos[2] : 0.0f;
     float own_dist = sqrtf(dx * dx + dz * dz);
-    int a = f_watchrep ? wt_host_step(&WTH, e, kind, own_active, own_dist, view_dist, now) : (e->active ? wt_host_step(&WTH, e, kind, 1, 0.0f, 0.0f, now) : WT_KEEP);
+    int hidden = u && (rd32(u + WH_U_FLAGS) & LR_E1C_HIDDEN) != 0;
+    int a = !f_watchrep ? (e->active ? wt_host_step(&WTH, e, kind, 1, 0.0f, 0.0f, now) : WT_KEEP)
+            : f_handover ? wt_host_step_zone(&WTH, e, kind, own_active, own_dist, view_dist, hidden, now)   /* fix021: by the host's zone (rules 2z / 3z) */
+                         : wt_host_step(&WTH, e, kind, own_active, own_dist, view_dist, now);
     if (a == WT_MAKE_REPLICA) {
         int ok = lr_set_kind(we.entry, u, 3);
         if (ok) WS.kind_made++;
@@ -89,8 +92,9 @@ static void watch_apply_one(wt_ent *e, uint32_t now)
         int ok = lr_set_kind(we.entry, u, 2);
         if (ok) WS.kind_back++;
         else WS.kind_fail++;
-        WS_LOG("watch: enemy %u/%u: unit %08x back on THIS PC's AI (kind 2%s): %s", b, ix, (unsigned)u, ok ? "" : " REFUSED",
-               wt_fresh(e, now) ? "this PC's active human is near" : "the client's records stopped");
+        WS_LOG("watch: enemy %u/%u: unit %08x back on THIS PC's AI (kind 2%s): %s; it continues from the client's state at (%.0f,%.0f,%.0f) hp %.0f (E1C %08x)", b, ix, (unsigned)u,
+               ok ? "" : " REFUSED", !wt_fresh(e, now) ? "the client's records stopped" : f_handover && own_active ? "awake in this PC's human's zone" : "this PC's active human is near",
+               rdf(u + WH_U_POS), rdf(u + WH_U_POS + 4), rdf(u + WH_U_POS + 8), rdf(u + WH_U_HP), rd32(u + WH_U_FLAGS));
         return;
     }
     if (!e->active || !alive || kind != 3 || !wt_fresh(e, now)) return;
@@ -105,7 +109,8 @@ static void watch_apply_one(wt_ent *e, uint32_t now)
     } else {
         wr(u + WH_U_POS, e->pos, 12);
     }
-    if (e->hp > 0.0f && fabsf(e->hp - hp) > 0.01f) wrf(u + WH_U_HP, e->hp);
+    float mh = f_handover ? wt_mirror_hp(e->hp, e->hd) : e->hp;   /* fix021 rule 6: the host's own blows stay taken off */
+    if (e->hp > 0.0f && fabsf(mh - hp) > 0.01f) wrf(u + WH_U_HP, mh);
     WS.applied++;
 }
 
@@ -403,6 +408,16 @@ static void watchlight_pass(int force_off)
     }
 }
 
+/* fix021 rule 6 (logic thread, from the EV_HITNOTE drain): a blow of this PC's own human on a key whose client drives it / has not handed it back yet */
+static void wt_host_blow_note(w1_key key, float dealt)
+{
+    wt_ent *e = f_handover ? wt_find(&WTH, key, 0) : NULL;
+    if (!e || !e->open || dealt <= 0.0f) return;
+    wt_host_blow(&WTH, key, dealt);
+    WS.host_blows++;
+    if (WS.host_blows <= 20) WS_LOG("handover: this PC's own blow on %u/%u (%s): %.0f, summed %.0f until the client's hand-back", key >> 8, key & 0xFF, e->active ? "a reverse replica" : "taken back", dealt, e->hd);
+}
+
 /* ---- the frame (logic thread, model lock, a level being played) */
 static void watch_pass(uint32_t now)
 {
@@ -430,10 +445,13 @@ static void watch_status(char *out, int size)
     o += snprintf(out + o, (size_t)(size - o), "\n  watchlight %d: zone manager targets set to the watched human %u, given back %u", f_watchlight, WLS.sets, WLS.backs);
     o += snprintf(out + o, (size_t)(size - o), "\n  zkeep %d (zkeep1.h rule 7, client): lists %ld, kept replicas listed %ld, hidden bits cleared %ld, zone-pass resets skipped %ld",
                   f_zkeep, (long)ZK.lists, (long)ZK.listed_units, (long)ZK.cleared, (long)ZK.skipped);
+    o += snprintf(out + o, (size_t)(size - o), "\n  handover %d (fix021, 0.2.1: reverse replica while the host's unit sleeps, taken back awake, the host's own blows summed): "
+                  "host zone-pass resets of reverse replicas skipped %ld, own blows summed %u | client: hand-backs that waited for a grab %u",
+                  f_handover, (long)ZK.skipped_host, WS.host_blows, LR.back_held);
     for (unsigned i = 0; i < WT_MAX && o < size - 100; i++) {
         wt_ent *e = &WTH.e[i];
         if (!e->used) continue;
-        o += snprintf(out + o, (size_t)(size - o), "\n  %u/%u %s, last record (%.0f,%.0f,%.0f) hp %.0f", e->key >> 8, e->key & 0xFF, e->active ? "REVERSE REPLICA" : "own", e->pos[0], e->pos[1],
-                      e->pos[2], e->hp);
+        o += snprintf(out + o, (size_t)(size - o), "\n  %u/%u %s, last record (%.0f,%.0f,%.0f) hp %.0f, own blows summed %.0f (%s)", e->key >> 8, e->key & 0xFF, e->active ? "REVERSE REPLICA" : "own",
+                      e->pos[0], e->pos[1], e->pos[2], e->hp, e->hd, e->open ? "open" : "settled");
     }
 }

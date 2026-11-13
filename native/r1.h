@@ -2,7 +2,7 @@
 #define R1_H
 #include <windows.h>
 
-#define R1_VERSION "0.2.0"
+#define R1_VERSION "0.2.1"
 
 /* The Steam build 13298487 exe (SHA-256 of rerev.exe on disk, lower case). Any other exe: the proxy only forwards DirectInput8Create. */
 #define R1_EXE_SHA256 "1573b79eb921b1e7f571e6deb71c39961c7f1940fad6d19283fc3aea7fca48aa"

@@ -18,6 +18,7 @@
 #include "r1.h"
 #include "net1.h"
 #include "coopsave1.h"
+#include "secids1.h"
 
 #define TC __attribute__((thiscall))
 #define CS_SLOT_ENTRY_VA 0x8B5D20u   /* thiscall(sSaveManager, slot) -> entry, ret 4 */
@@ -28,7 +29,49 @@ static const unsigned char cs_entry_bytes[30] = {0x51, 0x8B, 0x44, 0x24, 0x08, 0
 static cs1_t CS;
 static volatile int g_on_flag;          /* CS.active for the storage thread */
 static volatile LONG g_rec_now;         /* rule 6: (mode << 4) | (role + 1) of the record a co-op write puts next to the file now (the storage thread reads it) */
-static cs1_rec g_rec_last = {CS1_REC_NONE, -1};
+static cs1_rec g_rec_last = {CS1_REC_NONE, -1, 0};
+/* fix021 (0.2.1): the Campaign page's save panel shows the slot entry [[0x116A328]+0x6C][0] (+0x38 area, +0x40 difficulty, +0x48 play time), filled by the
+ * per-slot CAM read (DG1 live: `area 91ff0000 play 0` at the title, `area 91030100 play 92 s` after the Continue's read of the co-op save). When co-op is
+ * switched on or off at the title, the stock read of slot 0 (FUN_008B9260(sm, 4 = CAM, 0, 6), the HD Continue job's call 0x8B2466) runs once while the save
+ * task is idle (sm+0xB4 == 0): the redirect serves the co-op file when co-op is on, the solo file when it is off. */
+#define CS_SM_PTR 0x116A328u
+#define CS_CAM_READ_VA 0x8B9260u
+static const unsigned char cs_cam_read_sig[] = {0x8B, 0x44, 0x24, 0x04, 0xC7, 0x81, 0xEC, 0x00};
+static int g_panel_pending;
+static DWORD g_panel_since;
+static unsigned g_panel_reads, g_panel_giveups;
+static void cs_panel_pass(int at_title, int level)
+{
+    if (!g_panel_pending) return;
+    DWORD now = GetTickCount();
+    if (!at_title || level || now - g_panel_since > 20000u) {   /* left the title / waited 20 s for an idle save task */
+        if (now - g_panel_since > 20000u) g_panel_giveups++, r1_log("coopsave: the save panel re-read gave up (the save task never idle at the title for 20 s)");
+        g_panel_pending = 0;
+        return;
+    }
+    uint32_t sm = 0, busy = 1;
+    unsigned char c[sizeof cs_cam_read_sig];
+    if (!r1_safe_read((const void *)(uintptr_t)CS_SM_PTR, &sm, 4) || !sm || !r1_safe_read((const void *)(uintptr_t)(sm + 0xB4), &busy, 4) || busy) return;
+    if (!r1_safe_read((const void *)(uintptr_t)CS_CAM_READ_VA, c, sizeof c) || memcmp(c, cs_cam_read_sig, sizeof c)) {
+        g_panel_pending = 0;
+        r1_log("coopsave: the stock slot read differs from this build: the save panel is not re-read");
+        return;
+    }
+    ((void(__attribute__((thiscall)) *)(void *, unsigned, unsigned, unsigned))(uintptr_t)CS_CAM_READ_VA)((void *)(uintptr_t)sm, 4u, 0u, 6u);
+    g_panel_pending = 0, g_panel_reads++;
+    r1_log("coopsave: the Campaign page's save panel re-read (the stock slot 0 read FUN_008B9260(sm, CAM, 0, 6)): it shows the %s save now", g_on_flag ? "CO-OP" : "solo");
+}
+static volatile LONG g_rec_area;   /* fix021: the paired section running now (the logic thread's frame), written with the role record */
+#define CS_SECTION_VA 0x720320u   /* thiscall([0x116A340]) -> the running section 0x91EESS00 (scan1.c's SIG) */
+static const unsigned char cs_section_sig[] = {0x53, 0x8b, 0xd9, 0x56, 0x85, 0xdb, 0x74, 0x05, 0xe8, 0x93, 0x56, 0x2b};
+static uint32_t cs_section_now(void)
+{
+    unsigned char c[sizeof cs_section_sig];
+    uint32_t ep = 0;
+    if (!r1_safe_read((const void *)(uintptr_t)CS_SECTION_VA, c, sizeof c) || memcmp(c, cs_section_sig, sizeof c)) return 0;
+    if (!r1_safe_read((const void *)(uintptr_t)0x116A340u, &ep, 4) || !ep) return 0;
+    return ((uint32_t(__attribute__((thiscall)) *)(void *))(uintptr_t)CS_SECTION_VA)((void *)(uintptr_t)ep);
+}
 static volatile LONG g_rec_writes, g_rec_fails, g_locks, g_lock_keeps;
 static int g_last_lock_why = CS1_LKW_NONE, g_last_lock_role = -1;
 static char g_rec_path[MAX_PATH + 32];
@@ -76,7 +119,15 @@ static const char *rec_words(const cs1_rec *r)
 static void cs_rec_write(void)
 {
     LONG v = g_rec_now;
-    cs1_rec r = {(int)(v >> 4), (int)(v & 15) - 1};
+    cs1_rec r = {(int)(v >> 4), (int)(v & 15) - 1, (uint32_t)g_rec_area};
+    {   /* fix021: the area this save's Continue loads (sCheckPoint's record, menu.c save_area: filled before the write, the NEW section at a section change) */
+        uint32_t cp = 0, g = 0, o = 0, mode = 9, a = 0;
+        r1_safe_read((const void *)(uintptr_t)0x116A334u, &cp, 4), r1_safe_read((const void *)(uintptr_t)0x1169108u, &g, 4);
+        if (g) r1_safe_read((const void *)(uintptr_t)(g + 0x24), &o, 4);
+        if (o) r1_safe_read((const void *)(uintptr_t)(o + 0x20), &mode, 4);
+        if (cp && mode <= 1) r1_safe_read((const void *)(uintptr_t)(cp + 0x60 + mode * 0x24 + 0x14), &a, 4);
+        if (sec_pair(a, NULL, NULL)) r.area = a;
+    }
     char t[64], tmp[MAX_PATH + 40];
     int n = cs1_rec_format(t, sizeof t, &r);
     if (!n || !cs_paths()) return;
@@ -119,6 +170,10 @@ static unsigned char TC w_write(void *self, const char *name, const void *data, 
     ok = ok && MoveFileExA(tmp, g_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
     if (!ok) InterlockedIncrement(&g_fails), DeleteFileA(tmp);
     r1_log("coopsave: the game wrote its save (%d bytes) to the CO-OP file %s: %s (the solo DATA0.DAT not opened)", size, g_path, ok ? "ok" : "FAILED");
+    {   /* fix021 LAB (REV1_LAB_RDUMP=1): the panel entries right after a co-op write */
+        extern void rdump_auto(const char *why);
+        rdump_auto("after a co-op write");
+    }
     if (ok) cs_rec_write();   /* rule 6 */
     return (unsigned char)ok;
 }
@@ -307,7 +362,12 @@ static void cs_frame(void)
         if (r.mode != g_rec_last.mode || r.role != g_rec_last.role) r1_log("coopsave: the co-op writes record %s from now on", rec_words(&r));
         g_rec_last = r;
         InterlockedExchange(&g_rec_now, (LONG)((r.mode << 4) | (r.role + 1)));
+        if (level) {   /* fix021: the section of the next co-op write (the host's room names its pair: secids1.h sec_pair) */
+            uint32_t a = cs_section_now();
+            if (sec_pair(a, NULL, NULL)) InterlockedExchange(&g_rec_area, (LONG)a);
+        }
     }
+    if (on != was && at_title && !level && g_enabled) g_panel_pending = 1, g_panel_since = GetTickCount();   /* fix021: the panel follows the switch */
     if (on != was || (on && !g_on_flag)) {
         if (on)
             r1_log("coopsave: CO-OP SAVE ON (%s): this PC reads and writes %s (%s); the solo %s is not opened until co-op ends",
@@ -317,6 +377,7 @@ static void cs_frame(void)
             r1_log("coopsave: co-op save OFF (back at the title without a session): the solo save %s again", CS1_SOLO_NAME);
     }
     g_on_flag = on;
+    cs_panel_pass(at_title, level);
 }
 
 void coopsave_install(void)
@@ -332,6 +393,18 @@ void coopsave_install(void)
 
 int coopsave_active(void) { return g_on_flag; }
 int coopsave_file_exists(void) { return cs_exists(); }
+/* fix021: the section of the co-op save's last write (the role record's area), 0 = unknown (a record made before 0.2.1) */
+uint32_t coopsave_rec_area(void)
+{
+    static DWORD at;
+    static uint32_t v;
+    DWORD now = GetTickCount();
+    if (at && now - at < 1000) return v;
+    at = now | 1;
+    cs1_rec r;
+    v = g_enabled && cs_exists() && cs_rec_read(&r) ? r.area : 0;
+    return v;
+}
 int coopsave_rec_role1(void)
 {
     static DWORD at;

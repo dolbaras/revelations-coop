@@ -307,7 +307,10 @@ static int run_spawn_after_take(void)
         if (t % 1000 == 0) lr_on_record(&T, 0x1901, LR_AI_NOUNIT, 0x40002088u, now);
         if (lr_step(&T, 0x1901, 0x24d23530u, 3, 1, 1000.0f, 573.0f, now) == LR_MAKE_LOCAL) took = 1;
     }
-    if (!took || lr_kill_allowed(&T, 0x1901)) bad++;   /* local now: a host DEATH would be left alone */
+    T.v020 = 1;
+    if (!took || lr_kill_allowed(&T, 0x1901)) bad++;   /* 0.2.0: local now: a host DEATH would be left alone */
+    T.v020 = 0;
+    if (!lr_kill_allowed(&T, 0x1901)) bad++;           /* 0.2.1 rule 4a: the host's DEATH of a local copy this PC has not reported finishes it (one death) */
     for (int t = 0; t < 2000; t += 250, now += 250) {   /* the host's SPAWN: kind 3 again, the host simulates it (live records) */
         lr_on_record(&T, 0x1901, 12, 0x40000088u, now);
         lr_step(&T, 0x1901, 0x24d23530u, 3, 1, 1000.0f, 573.0f, now);

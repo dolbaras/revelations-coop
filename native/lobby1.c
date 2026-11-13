@@ -667,9 +667,11 @@ void l1_view_get(l1_t *l, l1_view *v)
         } else if (host && l->net_state == L1NS_WAIT && l->env.alone_s >= 30)   /* nobody came: the internet case */
             snprintf(v->note2, sizeof v->note2, "%s", l1_text(L1T_NET_HOST_HINT, lang));
         else if (host && (l->env.coop_role1 == 1 || l->env.coop_role1 == 2)) {   /* rev1 live 16: Continue plays the co-op save's characters, New Game the room's */
-            int sp = l->env.coop_role1 == 2;
+            int sp = l->env.coop_role1 == 2, pl = -1, pp = -1;
             l1_expand(l1_text(L1T_NOTE_CONT_ROLES, lang), lang, t, sizeof t);
-            l1_fmt(v->note2, sizeof v->note2, t, sp ? part : lead, sp ? lead : part);
+            const char *ln = lead, *pn = part;
+            if (sec_pair(l->env.coop_area, &pl, &pp)) ln = l1_person_name(pl, lang), pn = l1_person_name(pp, lang);   /* fix021: the save's own pair */
+            l1_fmt(v->note2, sizeof v->note2, t, sp ? pn : ln, sp ? ln : pn);
         } else
             snprintf(v->note2, sizeof v->note2, "%s", l1_text(L1T_RAID_NOTE, lang));
         return;
