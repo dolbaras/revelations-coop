@@ -175,11 +175,22 @@ GitHub never reports a pre-release as "latest", so a pre-release is never instal
 | Pre-release 1 | `0.0.1`, tag `v0.0.1`, GitHub "pre-release" | published 2026-11-05 |
 | Pre-release 2 | `0.0.2`, tag `v0.0.2`, GitHub "pre-release" | published 2026-11-06 (`R1_VERSION` was `0.0.2-pre2`) |
 | First full release | `0.1.0` (tag `v0.1.0`, NOT a pre-release) | higher than any `0.0.N`, so every tester who installed a pre-release is updated by the shortcut at the next start |
-| Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release, Latest) | published 2026-11-12 from public commit `58a0d02`: network co-op over all episodes (no setting), give to partner, the Genesis for the second player, HUNK in 2-2, the split aim fix; `R1_VERSION` in `native/r1.h` is `0.2.0` |
+| Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release) | published 2026-11-12 from public commit `58a0d02`: network co-op over all episodes (no setting), give to partner, the Genesis for the second player, HUNK in 2-2, the split aim fix; `R1_VERSION` in `native/r1.h` is `0.2.0` |
+| Fix release | `0.2.1` (tag `v0.2.1`, NOT a pre-release, Latest) | published 2026-11-13 from public commit `de5e123`: the zone hand-over of an enemy between the PCs, the partner's real guns on the puppet, the guest's start kit, the start of the shared world with the own level, the save panel, the guns of the host's save for an unarmed guest, the fall-out guard of enemy copies (`rguard`); `R1_VERSION` in `native/r1.h` is `0.2.1` |
 
 Rules: never publish a full release with a version below `0.1.0`; never mark `v0.1.0` or higher as a pre-release while it should reach players; no "RC" wording anywhere (title,
 notes, tag message, README). Both players need the same package: the network hello carries the mod version (`R1_VERSION`) and refuses another one with a reason; a release that
 changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
+
+## 0.2.1 (fix release; published 2026-11-13)
+
+- **Published:** tag `v0.2.1` (full release, Latest) on public commit `de5e123`, 2026-11-13. Assets: `revelations-coop-0.2.1.zip` sha256 `ccec18ef...`, `revelations-coop-setup-0.2.1.exe` sha256 `7bc68917...`, `dinput8.dll` in the zip `8d01f1d3...` (the DLL of the final regression).
+- **Checks after the publication (2026-11-13):**
+  - The release is neither a draft nor a pre-release, and each asset's `digest` equals the local SHA-256. `releases/latest` = `v0.2.1`.
+  - `tests	est_installer.ps1 -Online`: 286 of 286.
+  - The real update through the real feed (no `-Feed`) on a stand-in folder: the published 0.2.0 launcher logged `installed 0.2.0, latest v0.2.1`, `downloaded 738699 bytes`, `checksum ok CCEC18EF...`, `installer exit 0`; `version.txt` read 0.2.1 and the installed `dinput8.dll` was `8d01f1d3...`. A second start installed nothing. The uninstall put the stand-in back byte for byte.
+- **Number:** `0.2.1`, fixes of the network game only. `R1_VERSION` = `0.2.1`; 0.2.0 and 0.2.1 refuse each other in a game by the hello's version string, with the reason. `CP_PROTO_VERSION` stays `3`.
+- **Before publishing:** `lab\publish-0.2.1-checklist.md` (the final regression on the release DLL, slot by slot, each with its positive markers) and the owner's word.
 
 ## 0.2.0 (all episodes; published 2026-11-12)
 
