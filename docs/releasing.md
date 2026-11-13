@@ -187,7 +187,7 @@ changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
 - **Published:** tag `v0.2.1` (full release, Latest) on public commit `de5e123`, 2026-11-13. Assets: `revelations-coop-0.2.1.zip` sha256 `ccec18ef...`, `revelations-coop-setup-0.2.1.exe` sha256 `7bc68917...`, `dinput8.dll` in the zip `8d01f1d3...` (the DLL of the final regression).
 - **Checks after the publication (2026-11-13):**
   - The release is neither a draft nor a pre-release, and each asset's `digest` equals the local SHA-256. `releases/latest` = `v0.2.1`.
-  - `tests	est_installer.ps1 -Online`: 286 of 286.
+  - `tests\test_installer.ps1 -Online`: 286 of 286.
   - The real update through the real feed (no `-Feed`) on a stand-in folder: the published 0.2.0 launcher logged `installed 0.2.0, latest v0.2.1`, `downloaded 738699 bytes`, `checksum ok CCEC18EF...`, `installer exit 0`; `version.txt` read 0.2.1 and the installed `dinput8.dll` was `8d01f1d3...`. A second start installed nothing. The uninstall put the stand-in back byte for byte.
 - **Number:** `0.2.1`, fixes of the network game only. `R1_VERSION` = `0.2.1`; 0.2.0 and 0.2.1 refuse each other in a game by the hello's version string, with the reason. `CP_PROTO_VERSION` stays `3`.
 - **Before publishing:** `lab\publish-0.2.1-checklist.md` (the final regression on the release DLL, slot by slot, each with its positive markers) and the owner's word.
