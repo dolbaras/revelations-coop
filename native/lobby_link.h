@@ -109,7 +109,7 @@ int lk_manual_start(lk_t *k);
 
 /* events of the other player (CP_EVENT, any kind): the callback gets every one, with the session lock held (it must only queue the event, not call back into the link). Up to LK_EVENT_CBS callbacks;
  * they stay registered across lk_stop. 1 = registered (also when it already was). */
-#define LK_EVENT_CBS 4
+#define LK_EVENT_CBS 8   /* sync022: 4 were taken (downed, give, role barrier, scan); the movie words (cut1_game.inc) are the fifth */
 typedef void (*lk_event_cb)(void *user, const cp_event *ev);
 int lk_add_event_cb(lk_t *k, lk_event_cb cb, void *user);
 

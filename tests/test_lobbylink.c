@@ -16,6 +16,12 @@
 static int fails, checks;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
 
+static void ev_cb1(void *u, const cp_event *e) { (void)u, (void)e; }
+static void ev_cb2(void *u, const cp_event *e) { (void)u, (void)e; }
+static void ev_cb3(void *u, const cp_event *e) { (void)u, (void)e; }
+static void ev_cb4(void *u, const cp_event *e) { (void)u, (void)e; }
+static void ev_cb5(void *u, const cp_event *e) { (void)u, (void)e; }
+
 static l1_t *open_lobby(int mode, const char *join_addr)
 {
     l1_t *l = l1_new();
@@ -134,6 +140,10 @@ int main(void)
         l1_t *h = open_lobby(L1N_HOST, "");
         lk_t *hk = lk_new(h, "sim", 0);
         CHECK(hk != NULL);
+        {   /* sync022: five receivers of the partner's events (downed, give, role barrier, scan, the movie words): all registered, a repeat is no new one */
+            CHECK(lk_add_event_cb(hk, ev_cb1, NULL) && lk_add_event_cb(hk, ev_cb2, NULL) && lk_add_event_cb(hk, ev_cb3, NULL) && lk_add_event_cb(hk, ev_cb4, NULL) &&
+                  lk_add_event_cb(hk, ev_cb5, NULL) && lk_add_event_cb(hk, ev_cb5, NULL));
+        }
         CHECK(find_row(h, L1T_NET_START) >= 0);
         click(h, L1T_NET_START);
         CHECK(take_and_run(h, hk, own, sizeof own) == 1);

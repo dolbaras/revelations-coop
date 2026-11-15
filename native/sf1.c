@@ -4,11 +4,62 @@
 #include <stdio.h>
 #include <string.h>
 
-/* the Episode 1 whitelist (notes\ep1-world.md 2.1; ids from work\d-story\out\evmap_11/12/13.txt): 1 + 84 + 129 + 161 + 5 = 380 */
+/* the Episode 1 whitelist (notes\ep1-world.md 2.1; ids from work\d-story\out\evmap_11/12/13.txt): 1 + 84 + 129 + 161 + 5 = 380
+ * sync022 (notes\net-sync-max.md (0)): + the flags of the key items of EVERY episode (21 ids). The game's own table (game_system\game\game.arc
+ * `game\episode\setup`, rEventManage, rKeyItem at 0x9450: 35 pairs item code -> flag, work\s22-out\keyitems.py) gives 23 flags; 4864 (uItKeyBarn) and 4608
+ * (uItFileGenesisManual) are in the Episode 1 ranges already. FUN_00721F90 stores them when the item enters a bag (AddItem 0x5CB004, FUN_005C8560), and the
+ * scripts of Episodes 2-12 read them (e.g. 25091 uItKeyVeltro 162 times, 12800 / 12801 / 16640 the deco keys 55 / 52 / 42). The partner's pickup removes the item
+ * here (PICKUP), so without these ids this PC could never have the key's flag: its scripts took the "no key" branch of the prompt the partner pressed.
+ * Appended after the Episode 1 ranges: the old indices stay. */
 static const struct { uint32_t lo, hi; } R[] = {
     {257, 257}, {4374, 4457}, {4608, 4736}, {4864, 5024}, {16725, 16729},
+#ifndef SF1_MODEL_BEFORE_KEYS
+    {8537, 8537},     /* 80041524 uItFlightPlan */
+    {8704, 8704},     /* 80041501 uItScrewdriver */
+    {12800, 12801},   /* 80041502 / 03 uItKeyDecoA / B */
+    {12912, 12912},   /* 8004151a uItCrest */
+    {16640, 16640},   /* 80041504 uItKeyDecoC */
+    {16749, 16751},   /* 80041508 uItCoinCopper 16749, 8004151f uItKeyBunchOfCoins 16750, 80041505 uItKeyC 16751 */
+    {20845, 20846},   /* 8004150b uItKeyRebootB, 80041518 uItGear */
+    {20992, 20992},   /* 8004150c uItSecurityToken */
+    {24912, 24912},   /* 8004151c uItKeyDecoD */
+    {25091, 25091},   /* 8004150e uItKeyVeltro */
+    {25203, 25203},   /* 8004150d uItBrokenPipe */
+    {37488, 37489},   /* 80041529 uItVaccine, 80041527 uItKeyCertification */
+    {45568, 45568},   /* 80041517 uItHemostat */
+    {49408, 49408},   /* 80041528 uItPlasmaCutter */
+    {49664, 49665},   /* 80041521 uItRecorder, 80041522 uItPDA */
+#endif
+#ifndef SF1_MODEL_BEFORE_OBJ
+    /* sync022 (the lead's double filter): the flags the scripts of Episodes 2-12 READ that NO script sets (89 ids, work\s22-out\flagsets.py on the FSM dumps of every
+     * scene folder; the key-item ones and Episode 1 excluded): engine code sets them on the PC where the action happened (doors, levers, valves, elevator switches,
+     * lifts, shutters, boxes, item pickups, but also Genesis scans and enemies). They cross ONLY through sf1_local_obj with the glue's caller filter passed (a proven
+     * world-object path for this PC's own human); the digest / pre-load touch only ids proven in this session (objp). */
+    {340, 340}, {8521, 8521}, {8540, 8540}, {8574, 8574}, {8705, 8706}, {8734, 8734}, {8737, 8737}, {8742, 8742}, {8747, 8747}, {8761, 8761},
+    {8785, 8785}, {8788, 8788}, {8794, 8794}, {8822, 8822}, {12575, 12575}, {12587, 12587}, {12591, 12591}, {12598, 12598}, {12609, 12609},
+    {12614, 12614}, {12632, 12632}, {12634, 12634}, {12692, 12692}, {12903, 12903}, {12926, 12926}, {16684, 16684}, {16694, 16694}, {20816, 20818},
+    {20863, 20863}, {20993, 20993}, {21034, 21034}, {21248, 21248}, {21285, 21285}, {24872, 24872}, {24877, 24877}, {24886, 24886}, {24976, 24979},
+    {25123, 25123}, {25134, 25134}, {25152, 25152}, {25168, 25170}, {25185, 25185}, {25192, 25193}, {25210, 25210}, {25212, 25212}, {25214, 25214},
+    {33575, 33575}, {33589, 33589}, {33606, 33606}, {37416, 37416}, {41497, 41497}, {41533, 41533}, {41567, 41567}, {45357, 45357}, {45363, 45363},
+    {45365, 45366}, {45368, 45370}, {45372, 45374}, {45400, 45401}, {45639, 45639}, {49430, 49430}, {49447, 49451}, {49694, 49694}, {49753, 49753},
+    {49951, 49951}, {49961, 49961}, {49963, 49963}, {49967, 49967}, {49969, 49969}, {49971, 49971},
+#endif
 };
 #define NR (sizeof R / sizeof R[0])
+
+/* sync022: the key items and their flags as the data of this build has them (the 23 pairs with a flag of the rKeyItem table, see above); the glue compares them
+ * with the live table (wh_keyitem_flag) once a level is up and refuses the ids that differ */
+const sf1_keyitem sf1_keyitems[] = {
+    {0x80041500u, 4864, "uItKeyBarn"},        {0x80041501u, 8704, "uItScrewdriver"},     {0x80041502u, 12800, "uItKeyDecoA"},
+    {0x80041503u, 12801, "uItKeyDecoB"},      {0x80041504u, 16640, "uItKeyDecoC"},       {0x80041505u, 16751, "uItKeyC"},
+    {0x80041508u, 16749, "uItCoinCopper"},    {0x8004150Bu, 20845, "uItKeyRebootB"},     {0x8004150Cu, 20992, "uItSecurityToken"},
+    {0x8004150Du, 25203, "uItBrokenPipe"},    {0x8004150Eu, 25091, "uItKeyVeltro"},      {0x80041517u, 45568, "uItHemostat"},
+    {0x80041518u, 20846, "uItGear"},          {0x8004151Au, 12912, "uItCrest"},          {0x8004151Cu, 24912, "uItKeyDecoD"},
+    {0x8004151Eu, 4608, "uItFileGenesisManual"}, {0x8004151Fu, 16750, "uItKeyBunchOfCoins"}, {0x80041521u, 49664, "uItRecorder"},
+    {0x80041522u, 49665, "uItPDA"},           {0x80041524u, 8537, "uItFlightPlan"},      {0x80041527u, 37489, "uItKeyCertification"},
+    {0x80041528u, 49408, "uItPlasmaCutter"},  {0x80041529u, 37488, "uItVaccine"},
+};
+const unsigned sf1_nkeyitems = sizeof sf1_keyitems / sizeof sf1_keyitems[0];
 
 /* the set pieces whose break is mirrored (class hash): only classes whose break path was read (notes\ep1-world.md 1.3) */
 static const uint32_t PIECES[] = {
@@ -47,11 +98,16 @@ uint16_t sf1_layout(void)
 }
 
 int sf1_crosses(const sf1_t *s, uint32_t id) { return sf1_index(id) >= 0 || (s && s->wide && id >= 256 && id < 0x10000); }
+int sf1_is_obj(uint32_t id) { return sf1_index(id) >= SF1_N_OBJ0; }
 
 static int bit(const uint8_t *b, int i) { return i >= 0 && ((b[i >> 3] >> (i & 7)) & 1); }
 static void bset(uint8_t *b, int i) { if (i >= 0) b[i >> 3] |= (uint8_t)(1u << (i & 7)); }
+/* sync022: an object-group id is usable for the digest / pre-load only when it crossed (or was applied) in this session */
+static int obj_skip(const sf1_t *s, int i) { return i >= SF1_N_OBJ0 && (!s || !s->objon || !bit(s->objp, i)); }
+int sf1_obj_proven(const sf1_t *s, uint32_t id) { int i = sf1_index(id); return i >= SF1_N_OBJ0 && bit(s->objp, i); }
 
-static const char *const WHY[SF1_W_N] = {"-", "not mirrored", "unchanged", "a clear (not sent by the guest)", "the host already decided it", "quiet window after the load", "no epoch", "wrong role", "hold table full"};
+static const char *const WHY[SF1_W_N] = {"-", "not mirrored", "unchanged", "a clear (not sent by the guest)", "the host already decided it", "quiet window after the load", "no epoch", "wrong role", "hold table full",
+                                         "an object flag whose store did not pass the caller filter (or sfobj off)"};
 const char *sf1_why_name(int why) { return why >= 0 && why < SF1_W_N ? WHY[why] : "?"; }
 
 void sf1_init(sf1_t *s, int role)
@@ -59,15 +115,19 @@ void sf1_init(sf1_t *s, int role)
     memset(s, 0, sizeof *s);
     s->role = role;
     s->rate_last = -1;
+    s->objon = 1;
 }
 
 void sf1_epoch(sf1_t *s, unsigned epoch, uint32_t now)
 {
     if (s->epoch_valid && s->epoch == epoch) return;
-    int role = s->role, wide = s->wide;
+    int role = s->role, wide = s->wide, objon = s->objon;
     sf1_stats st = s->st;
+    uint8_t objp[SF1_BYTES];
+    memcpy(objp, s->objp, sizeof objp);   /* sync022: the proven object ids belong to the session, not to one level instance */
     sf1_init(s, role);
-    s->wide = wide, s->st = st;
+    s->wide = wide, s->st = st, s->objon = objon;
+    memcpy(s->objp, objp, sizeof objp);
     s->epoch_valid = 1, s->epoch = epoch, s->epoch_ms = now, s->quiet_ms = now;
 }
 
@@ -93,11 +153,22 @@ static int out(int *why, int w, int r)
     return r;
 }
 
-int sf1_local(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int *why)
+static int local_common(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int *why);
+int sf1_local(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int *why) { return sf1_local_obj(s, id, old, value, now, 0, why); }
+int sf1_local_obj(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int pass, int *why)
 {
     if (!s->epoch_valid) return out(why, SF1_W_NOEPOCH, SF1_SKIP);
     s->st.local_seen++;
     if (!sf1_crosses(s, id)) return s->st.skip_range++, out(why, SF1_W_RANGE, SF1_SKIP);
+    if (sf1_is_obj(id)) {
+        if (!pass || !s->objon) return s->st.obj_refused++, out(why, SF1_W_FILTER, SF1_SKIP);
+        bset(s->objp, sf1_index(id));
+        s->st.obj_passed++;
+    }
+    return local_common(s, id, old, value, now, why);
+}
+static int local_common(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int *why)
+{
     if ((old != 0) == (value != 0) && old == value) return s->st.skip_same++, out(why, SF1_W_SAME, SF1_SKIP);
     int i = sf1_index(id);
     if (s->role == SF1_HOST) {
@@ -129,6 +200,10 @@ int sf1_remote_stream(sf1_t *s, uint32_t id, int32_t value, int32_t cur, uint32_
     if (!s->epoch_valid) return out(why, SF1_W_NOEPOCH, SF1_SKIP);
     s->st.stream_rx++;
     int i = sf1_index(id);
+    if (i >= SF1_N_OBJ0) {
+        if (!s->objon) return out(why, SF1_W_FILTER, SF1_SKIP);
+        bset(s->objp, i);
+    }
     bset(s->touched, i);
     hold_drop(s, id);   /* a newer word of the host replaces a held one */
     if (value != 0) {
@@ -170,11 +245,13 @@ int sf1_proposal(sf1_t *s, uint32_t id, int32_t value, int32_t cur, int *why)
     s->st.prop_rx++;
     int i = sf1_index(id), w = SF1_W_NONE;
     if (!sf1_crosses(s, id)) w = SF1_W_RANGE;
+    else if (i >= SF1_N_OBJ0 && !s->objon) w = SF1_W_FILTER;   /* sync022: the guest's PC filtered the store; with sfobj off here nothing of the group is applied */
     else if (value == 0) w = SF1_W_CLEAR;
     else if (bit(s->touched, i)) w = SF1_W_TOUCHED;
     else if (cur != 0) w = SF1_W_SAME, bset(s->touched, i);
     if (w != SF1_W_NONE) return s->st.prop_refused++, out(why, w, SF1_SKIP);
     bset(s->touched, i);
+    if (i >= SF1_N_OBJ0) bset(s->objp, i), s->st.obj_prop_applied++;
     s->st.prop_applied++;
     return out(why, SF1_W_NONE, SF1_APPLY);
 }
@@ -213,6 +290,10 @@ int sf1_digest_apply(sf1_t *s, const uint8_t *b, unsigned len, sf1_get_fn get, s
     }
     s->dig_kept = 0;
     for (unsigned i = 0; i < SF1_N; i++) {
+        if (obj_skip(s, (int)i)) {   /* sync022: an object flag that never crossed in this session is this PC's own (a scan, a reward ...): never set or cleared by the digest */
+            s->st.obj_digest_skipped++;
+            continue;
+        }
         uint32_t id = sf1_id_at(i);
         int h = (b[4 + (i >> 3)] >> (i & 7)) & 1, l = get(u, id) != 0;
         if (h) bset(s->touched, (int)i);
@@ -493,6 +574,7 @@ int sf1_pre_apply(sf1_pre_t *p, uint32_t now, sf1_get_fn get, sf1_set_fn set, vo
         return 0;
     }
     for (unsigned i = 0; i < SF1_N; i++) {
+        if (i >= SF1_N_OBJ0) break;   /* sync022: the object group is never written by the pre-load digest (the post-load digest covers its proven ids) */
         int want = (p->bm[i >> 3] >> (i & 7)) & 1, cur = get(u, sf1_id_at(i));
         if (cur < 0) continue;
         if ((cur > 0) != want) {

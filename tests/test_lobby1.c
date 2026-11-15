@@ -852,7 +852,7 @@ static void test_strips(void)
             l1_strip_text(&in, lang, out, sizeof out, &kind);
             CHECKF(utf8_ok(out) && strlen(out) < sizeof out - 1 && !strstr(out, "%s") && !strchr(out, '$'), "strip %d lang %d: %s", k, lang, out);
             CHECKF((k == L1G_NONE) == (out[0] == 0), "strip %d lang %d empty", k, lang);
-            if (k == L1G_WAIT_LOAD || k == L1G_SILENT || k == L1G_PARTNER_LEFT || k == L1G_GUEST_HOLD || k == L1G_HOST_GO || k == L1G_SOLO_WATCH || k == L1G_CONT_ROLES) CHECKF(strstr(out, "Lissa") != NULL, "strip %d lang %d lacks the name: %s", k, lang, out);
+            if (k == L1G_WAIT_LOAD || k == L1G_SILENT || k == L1G_PARTNER_LEFT || k == L1G_GUEST_HOLD || k == L1G_HOST_GO || k == L1G_SOLO_WATCH || k == L1G_CONT_ROLES || k == L1G_CUT_WAIT || k == L1G_CUT_PARTNER_SKIP || k == L1G_CUT_SELF_SKIP) CHECKF(strstr(out, "Lissa") != NULL, "strip %d lang %d lacks the name: %s", k, lang, out);
             if (k == L1G_SILENT) CHECKF(strstr(out, "37") != NULL, "strip %d lang %d lacks the seconds", k, lang);
             CHECKF(kind == L1S_INFO || kind == L1S_WARN, "strip %d kind %d", k, kind);
         }
@@ -881,7 +881,7 @@ static void test_strips(void)
             CHECKF(out[0] && utf8_ok(out) && !strstr(out, "%s"), "reason %d lang %d", r, lang);
         }
     /* the placeholders of the translated texts: the same count as English in every language */
-    static const int one[] = {L1T_NET_PEER, L1T_JOINING_AS, L1T_NET_ST_CONNECTING_TO, L1T_NET_ST_GO_HOST, L1T_NET_ST_GO_GUEST, L1T_REF_MODVER_OLD, L1T_REF_NOANSWER, L1T_WAIT_LOAD};
+    static const int one[] = {L1T_NET_PEER, L1T_JOINING_AS, L1T_NET_ST_CONNECTING_TO, L1T_NET_ST_GO_HOST, L1T_NET_ST_GO_GUEST, L1T_REF_MODVER_OLD, L1T_REF_NOANSWER, L1T_WAIT_LOAD, L1T_CUT_PARTNER_SKIP, L1T_CUT_SELF_SKIP};
     static const int two[] = {L1T_REF_MODVER, L1T_PARTNER_SILENT};
     for (int lang = 0; lang < L1_LANGS; lang++) {
         for (unsigned i = 0; i < sizeof one / sizeof one[0]; i++) {

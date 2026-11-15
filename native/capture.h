@@ -110,6 +110,10 @@ void capture_ext_request(int on);
 int capture_hooks_ready(void);
 void capture_own_scope(int slot);
 int capture_own_effective(void);
+/* fix022 (interact1.h): the split screen's second human operates the objects he is nearest to (doors, items, switches ...): split.c says whether both humans are local (1) or not (0);
+ * capture_interact_active() = the object table is being maintained (the pickup guard then lets both humans pick up) */
+void capture_set_interact(int on, unsigned view);   /* view = the viewport (index) the other human's prompts / icons are made for, 0 = the stock one */
+int capture_interact_active(void);
 /* 1 = this unit is a captured human driven by its pad slot right now (taken over and its control type / kind still 1); 0 = not captured, passive, or the game took him back */
 int capture_unit_human(unsigned unit);
 

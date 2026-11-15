@@ -52,6 +52,9 @@ enum l1_text {
     /* allep1 (2026-11-10): every paired section of every episode is shared; these are the parts that cannot be (our wording, not read by native speakers) */
     L1T_SEC_BAD,       /* strip: this part is no section of the campaign (0-1, 0-2, 8-4 ...) and cannot be shared: the session has ended */
     L1T_NET_SEC_NOTE,  /* the host's room: its save continues in a part that network co-op cannot share */
+    /* sync022 (the cutscene skip vote; our wording, not read by native speakers) */
+    L1T_CUT_PARTNER_SKIP,   /* "%s wants to skip the cutscene. Press Start to skip it together." */
+    L1T_CUT_SELF_SKIP,      /* "Waiting for %s to skip as well..." */
     L1T_COUNT
 };
 /* the game's own strings (Coop_<lang>.gmd, the Raid mode's online texts, in all 13 languages) that the network lobby quotes: menu.c loads them for the running language
@@ -219,6 +222,9 @@ enum {
     L1G_CAMP_DONE,                   /* allep1: the campaign is complete (the last section's end), the session has ended, this PC's game goes on alone */
     L1G_CAMP_BEHIND,                 /* allep1: the host completed the campaign while this PC was behind: the session has ended, back to the title */
     L1G_SEC_BAD,                     /* allep1: this PC started a part that is no section of the campaign (0-1, 0-2, 8-4 ...): the session was closed */
+    L1G_CUT_WAIT,                    /* sync022: this PC's movie is ready and waits for the partner's (name) */
+    L1G_CUT_PARTNER_SKIP,            /* sync022: the partner wants to skip the movie (name) */
+    L1G_CUT_SELF_SKIP,               /* sync022: this player wants to skip, the partner has not pressed yet (name) */
     L1G_COUNT
 };
 enum { L1GF_CONNECTED = 1, L1GF_READY = 2, L1GF_PEER_READY = 4, L1GF_HOST = 8 };   /* l1_strip_in.flags of L1G_READY_GATE */

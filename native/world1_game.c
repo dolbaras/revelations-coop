@@ -40,6 +40,7 @@
 #include "world1_net.h"
 #include "world1_hooks.h"
 #include "pickpend1.h"
+#include "sfobj1.h"         /* sync022: the caller filter of the object-group flags */
 #include "world1_game.h"
 #include "downed1.h"
 #include "sf1.h"
@@ -237,6 +238,8 @@ typedef struct {
     int32_t value;
     uint8_t blob[WH_PCHIT_LEN];   /* EV_PCHIT: the packed cDamageSyncData fields; EV_CLIENT_HIT (rev1 live 14): the own human's real HitInfo, the same packing */
     uint8_t have_blob;
+    uint8_t have_ret2;            /* EV_FLAG (sync022): ret2 was read from the object flag setter's frame */
+    uint32_t ret, ret2;           /* EV_FLAG (sync022): the return address of the SetScenarioFlag call, and of FUN_0067DB80's caller when ret is inside it */
 } ev_t;
 #define EVQ 256
 static ev_t evq[EVQ];
@@ -567,6 +570,14 @@ static unsigned TC hook_kill(void *self, unsigned cls, unsigned serial, unsigned
 
 static unsigned TC hook_flag(void *self, unsigned id, int value)
 {
+    /* sync022 (sfobj1.h): who stores. The detour is a plain jmp, so our return address is the caller's; for the object flag setter FUN_0067DB80 the stack at
+     * the store is [ret][id][value][saved esi][ret2]: ret2 is taken only when the slots read back as ret and id (the incoming argument slots) */
+    uint32_t ret = (uint32_t)(uintptr_t)__builtin_return_address(0), ret2 = 0;
+    int have2 = 0;
+    if (ret == SFO_RET_SET_A || ret == SFO_RET_SET_B) {
+        volatile uint32_t *sp = (volatile uint32_t *)(void *)&id - 1;
+        if (sp[0] == ret && sp[1] == id) ret2 = sp[4], have2 = 1;
+    }
     int old = story_hook_old(id);   /* the value before the store, for ids that may cross (story1_game.inc) */
     unsigned r = orig_flag(self, id, value);
     S.flags_seen++;
@@ -575,6 +586,7 @@ static unsigned TC hook_flag(void *self, unsigned id, int value)
         ev_t ev;
         memset(&ev, 0, sizeof ev);
         ev.type = EV_FLAG, ev.id = id, ev.value = value, ev.old = old;
+        ev.ret = ret, ev.ret2 = ret2, ev.have_ret2 = (uint8_t)have2;
         ev_push(&ev);
     }
     return r;
@@ -609,6 +621,7 @@ static unsigned TC hook_keyflag(void *self, unsigned code, int value)
 #include "hitx1_game.inc"    /* rev1 live 14: the client's kills die by the game's own death on both PCs (hitx1.h) */
 #include "motion1_game.inc"  /* rev1 live 14: a replica plays its owner's motions (mot1.h) */
 #include "bag1_game.inc"     /* rev1 live 14: a puppet carries and holds its owner's guns (bag1.h) */
+#include "cut1_game.inc"     /* sync022: movies start together, a skip needs both players (cut1.h); before the hook table (two detours) */
 
 static unsigned TC hook_death87(void *self, void *victim)
 {
@@ -637,6 +650,8 @@ static const struct { int id; void *fn; void **orig; } HOOKS[WH_N_HOOKS] = {
     {WH_ZLEAVE, (void *)hook_zleave, (void **)&orig_zleave}, {WH_REARR, (void *)hook_rearr, (void **)&orig_rearr}, {WH_RMARR, (void *)hook_rmarr, (void **)&orig_rmarr},
     {WH_ZPASS, (void *)hook_zpass, (void **)&orig_zpass},
     {WH_STAGEFL, (void *)hook_stagefl, (void **)&orig_stagefl},
+    {WH_MPLAY, (void *)hook_mplay, (void **)&orig_mplay},
+    {WH_MSTOP, (void *)hook_mstop, (void **)&orig_mstop},
 };
 
 /* ---------------------------------------------------------------- model callbacks (logic thread, model lock held) */
@@ -1072,6 +1087,10 @@ static void world_doors(char *out, int size, float radius)
     }
 }
 
+#include "objsync1_game.inc"   /* sync022 W1: a lever the partner pulls moves here too (objsync1.h) */
+#include "pmot1_game.inc"      /* sync022 P5-P10 / P12: the partner's interaction motions on his puppet (pmot1.h) */
+#include "lid1_game.inc"       /* sync022 W2 / W3: the partner's locker door / weapon box lid as a picture (lid1.h) */
+
 /* client: an enemy's blow on this PC's human, decided on the host (PCHIT) */
 static void op_pc_hit(void *u, w1_key att, const uint8_t *payload, unsigned len)
 {
@@ -1161,7 +1180,7 @@ static void drain(void)
             break;
         }
         case EV_FLAG:
-            story_local(e.id, e.old, e.value);
+            story_local(e.id, e.old, e.value, e.ret, e.ret2, e.have_ret2);
             break;
         case EV_PCHIT:
             w1_host_pchit(&N.w, e.key, e.blob, WH_PCHIT_LEN);
@@ -1311,6 +1330,10 @@ static void model_sync(void)
         wh_keyset_clear(&credited);
         ndoors = 0;
         pickpend_forget();
+        lever_reset();
+        pmot_reset();
+        cut_reset();
+        lid_reset();
         if (tap_lk != lk) {
             lk_set_note_tap(lk, tap_note, NULL);
             tap_lk = lk;
@@ -1407,6 +1430,7 @@ static void pickpend_forget(void)
 static void world_frame(void)
 {
     int active = net1_session_active();   /* before the model lock: it takes the net lock and the link lock */
+    cut_pass(active);                     /* sync022: the movie words on the session's event lane, before the model lock (cut1_game.inc) */
     EnterCriticalSection(&mcs);
     g_status_active = active;
     int want = wh_want(&H, active);
@@ -1445,6 +1469,9 @@ static void world_frame(void)
             bag_pass(now);     /* rev1 live 14: the own human's guns to the other PC, the puppet follows (bag1.h) */
             watch_pass(now);   /* rev1 live 13: reverse replicas, the watcher's visible replicas and minimap (watch1.h) */
             door_pass(now);
+            lever_pass(now);   /* sync022 W1: levers (objsync1.h) */
+            pmot_pass(now);    /* sync022: the partner's interaction motions (pmot1.h) */
+            lid_pass(now);     /* sync022: this PC's boxes opened / closed by its own human (lid1.h) */
             vital_pass(now);
             pickpend_pass();
             unsigned ep = w1_epoch(&N.w);
@@ -1453,6 +1480,10 @@ static void world_frame(void)
                 wh_keyset_clear(&credited);   /* kill credits and known door states belong to one level instance */
                 ndoors = 0;
                 pickpend_forget();
+                lever_reset();   /* sync022: the levers' last states and sequences belong to one level instance */
+                pmot_reset();    /* sync022: the puppet mirror of the old level instance is dropped without a call */
+                cut_reset();     /* sync022: the movie words and counts of the old level instance */
+                lid_reset();     /* sync022: the boxes seen in the old level instance */
                 local_reset();   /* rev1 live 11: the enemy log and the local1 table belong to one level instance */
                 wlog("level instance (epoch %u): model reset%s", ep, bound_role == W1_HOST ? ", the host's pass registers the placed enemies" : ", the client waits for the host's SPAWN events");
             }
@@ -1786,7 +1817,7 @@ static int set_switch(const char *name, const char *v, char *out, int size)
         {"vital", &f_vital, 1},   {"death87", &f_death87, 1}, {"despawn", &f_despawn, 2}, {"yawidx", &f_yawidx, 2}, {"revive", &f_revive, 1}, {"puppethits", &f_puppethits, 1},
         {"story", &f_story, 1},   {"localrun", &f_localrun, 1}, {"rearr", &f_rearr, 1}, {"ewatch", &f_ewatch, 1}, {"watchzone", &f_watchzone, 1}, {"watchstage", &f_watchstage, 1},
         {"watchrep", &f_watchrep, 1}, {"rloc", &f_rloc, 1}, {"watchmap", &f_watchmap, 1}, {"zkeep", &f_zkeep, 1}, {"handover", &f_handover, 1}, {"fallguard", &f_fallguard, 1}, {"fallres", &f_fallres, 1}, {"rguard", &f_rguard, 1},
-        {"hitx", &f_hitx, 1}, {"rdeath", &f_rdeath, 1}, {"deadguard", &f_deadguard, 1}, {"watchcam", &f_watchcam, 1}, {"watchlight", &f_watchlight, 1}, {"motion", &f_motion, 1}, {"bagsync", &f_bagsync, 1},
+        {"hitx", &f_hitx, 1}, {"rdeath", &f_rdeath, 1}, {"deadguard", &f_deadguard, 1}, {"watchcam", &f_watchcam, 1}, {"watchlight", &f_watchlight, 1}, {"motion", &f_motion, 1}, {"bagsync", &f_bagsync, 1}, {"levers", &f_levers, 1}, {"sfobj", &f_sfobj, 1}, {"pmot", &f_pmot, 1}, {"pmtrav", &f_pmtrav, 1}, {"cut", &f_cut, 1}, {"cutskip", &f_cutskip, 1}, {"lids", &f_lids, 1},
         {"bagdlc", &f_bagdlc, 1}, {"bagroom", &f_bagroom, 1},
     };
     if (!strcmp(name, "snap") && v[0] >= '0' && v[0] <= '9') {   /* distance in units, 0 = off */
@@ -1897,6 +1928,26 @@ void world_cmd(const char *arg, char *out, int size)
         hitx_status(out, size);
     } else if (!strcmp(sub, "motion")) {   /* rev1 live 14: the replicas' motions (mot1.h) */
         motion_status(out, size);
+    } else if (!strcmp(sub, "objs")) {   /* sync022 W1: the levers (objsync1.h) */
+        lever_status(out, size);
+    } else if (!strcmp(sub, "stage")) {   /* sync022 LAB: world stage [force <hex c0> [c1 c2 c3] | off]: the stage part codes of FUN_004176B0 */
+        unsigned c[ST_N] = {0, 0, 0, 0};
+        if (!strcmp(a2, "force") && sscanf(arg, "%*s %*s %x %x %x %x", &c[0], &c[1], &c[2], &c[3]) >= 1 && c[0] && c[0] < 0x10000u) {
+            for (int i = 0; i < ST_N; i++) st_force[i] = c[i] < 0x10000u ? c[i] : 0;
+            wlog("stage: LAB force: FUN_004176B0 answers the part codes %04x %04x %04x %04x", c[0], c[1], c[2], c[3]);
+        } else if (!strcmp(a2, "off")) {
+            for (int i = 0; i < ST_N; i++) st_force[i] = 0;
+            wlog("stage: LAB force off: this PC's own floor decides its stage parts again");
+        }
+        snprintf(out, (size_t)size, "world stage: own floor codes %04x %04x %04x %04x | LAB force %04x %04x %04x %04x (answers %u) | watch: partner codes %04x %04x %04x %04x",
+                 (unsigned)st_own_codes[0], (unsigned)st_own_codes[1], (unsigned)st_own_codes[2], (unsigned)st_own_codes[3], (unsigned)st_force[0], (unsigned)st_force[1],
+                 (unsigned)st_force[2], (unsigned)st_force[3], st_force_used, (unsigned)ST.partner[0], (unsigned)ST.partner[1], (unsigned)ST.partner[2], (unsigned)ST.partner[3]);
+    } else if (!strcmp(sub, "lids")) {   /* sync022: the partner's lockers / weapon boxes as a picture (lid1.h) */
+        lid_status(out, size);
+    } else if (!strcmp(sub, "pmot")) {   /* sync022: the puppet's interaction motions (pmot1.h) */
+        pmot_status(out, size);
+    } else if (!strcmp(sub, "cut")) {   /* sync022: movies (cut1.h) */
+        cut_status(out, size);
     } else if (!strcmp(sub, "bag")) {   /* rev1 live 14: the puppets' guns (bag1.h) */
         bag_status(out, size);
     } else if (!strcmp(sub, "watch")) {   /* rev1 live 13: reverse replicas, visible replicas, the minimap of the watching PC (watch1.h) */
@@ -1907,7 +1958,7 @@ void world_cmd(const char *arg, char *out, int size)
         g_replica = a3[0] == '1';
         snprintf(out, (size_t)size, "world: the client's own enemy placements are %s", g_replica ? "made replicas (owner = host, kind 3)" : "left LOCAL (own AI; test only)");
     } else {
-        snprintf(out, (size_t)size, "world status | apply (force on) | revert (force off) | auto (session / REV1_WORLD decides) | list (placed enemies with keys) | items [radius] [class] | doors [radius] | door open <unit> [side] (lab) | sf [status|on|off|wide 0|1|get <id>|set <id> <v>|rate [set <v>]] | set replica|credit|pchit|interp|doorlog|doors|itemspent|vital|death87|revive 0|1 | set despawn 0|1|2 | set doorstate auto|opened | set yawidx 0|1|2 | set snap <units, 0 off>");
+        snprintf(out, (size_t)size, "world status | apply (force on) | revert (force off) | auto (session / REV1_WORLD decides) | list (placed enemies with keys) | items [radius] [class] | doors [radius] | objs (levers, sync022) | pmot (the puppet's interaction motions, sync022) | cut (movies, sync022) | lids (lockers / weapon boxes, sync022) | stage [force <hex codes> | off] (LAB, sync022) | door open <unit> [side] (lab) | sf [status|on|off|wide 0|1|get <id>|set <id> <v>|rate [set <v>]] | set replica|credit|pchit|interp|doorlog|doors|itemspent|vital|death87|revive|levers|sfobj|pmot|pmtrav|cut|cutskip|lids 0|1 | set despawn 0|1|2 | set doorstate auto|opened | set yawidx 0|1|2 | set snap <units, 0 off>");
     }
     LeaveCriticalSection(&mcs);
 }

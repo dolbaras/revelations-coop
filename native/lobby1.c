@@ -739,6 +739,9 @@ void l1_strip_text(const l1_strip_in *in, int lang, char *out, size_t size, int 
         l1_fmt(out, size, b, name, NULL);
         break;
     case L1G_CAMP_DONE: snprintf(out, size, "%s", l1_text(L1T_END_DONE, lang)); break;   /* allep1: the campaign is over, the session has ended */
+    case L1G_CUT_WAIT: l1_fmt(out, size, l1_text(L1T_WAIT_LOAD, lang), name, NULL); break;   /* sync022: the existing line of the session's load wait */
+    case L1G_CUT_PARTNER_SKIP: l1_fmt(out, size, l1_text(L1T_CUT_PARTNER_SKIP, lang), name, NULL); break;
+    case L1G_CUT_SELF_SKIP: l1_fmt(out, size, l1_text(L1T_CUT_SELF_SKIP, lang), name, NULL); break;
     case L1G_CAMP_BEHIND:
         join2(out, size, l1_text(L1T_END_BEHIND, lang), l1_text(L1T_TO_TITLE, lang));
         k = L1S_WARN;

@@ -74,6 +74,8 @@ static stagefl_fn orig_stagefl;
 static st_t ST;
 static volatile LONG st_own_seq, st_own_taken;   /* the engine thread's latest own codes for the logic thread's send */
 static uint32_t st_own_codes[ST_N];
+static volatile uint32_t st_force[ST_N];   /* sync022 LAB `world stage force`: the part codes FUN_004176B0 answers (0 = off) */
+static volatile unsigned st_force_used;
 typedef void (TC *rearr_fn)(void *sa, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
 static zleave_fn orig_zleave;
 static rearr_fn orig_rearr;
@@ -204,6 +206,14 @@ static void TC hook_zpass(void *self)
 static unsigned TC hook_stagefl(void *self)
 {
     uint32_t sys = (uint32_t)(uintptr_t)self;
+    if (st_force[0]) {   /* sync022 LAB: the forced part codes (the stage streams these parts) */
+        uint32_t c[ST_N];
+        for (int i = 0; i < ST_N; i++) c[i] = st_force[i];
+        if (wr(sys + 0x40, c, sizeof c)) {
+            st_force_used++;
+            return 1;
+        }
+    }
     if (g_active && st_use_partner(&ST, f_watchstage, g_solo_watch)) {
         uint32_t c[ST_N];
         memcpy(c, ST.partner, sizeof c);

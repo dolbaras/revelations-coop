@@ -7,7 +7,8 @@
  *        knife (item slot 10) and the hit carries the flag 0x80. The bytes `85 ff 74 08 81 ff cd cd cd cd 75 18` at 0x89EF05, byte 0x89EF08 08 -> 20:
  *        the JZ jumps to 0x89EF29 (`test edi,edi / jz`) instead of the assert. (notes\net-world-enemies-re.md section 3)
  *  PICK  the pickup condition FUN_00881DF0(slot) = "slot == 0" in an offline game: the second human (own slot 1) could never take an item. The first
- *        5 bytes become `jmp stub`; the stub answers `slot == [cell]` and returns with `ret 4`; the cell holds the own slot (updated every frame).
+ *        5 bytes become `jmp stub`; the stub answers `bit slot of [cell]` and returns with `ret 4`; the cell holds the MASK of the slots that may pick up: the own slot's bit
+ *        (updated every frame) plus, in a split screen (fix022), the second human's.
  *        (notes\net-items-doors-re.md section 3)
  * Nothing is written when the bytes are not exactly the expected ones; the reason is logged and shown by `guards status`.
  */
@@ -44,6 +45,7 @@ typedef struct {
     int env_on;                    /* REV1_GUARDS=1 */
     uint32_t stub, cell;           /* the pickup stub and the cell it compares with (0 = not allocated yet) */
     uint32_t own;                  /* the own slot as last written into the cell */
+    uint32_t extra, cellv;         /* fix022: extra slots (bit mask) that may pick up too; the mask as last written into the cell */
     int state[G1_N];               /* G1_OFF / ON / MISMATCH / ERROR as the last attempt left it */
     char why[G1_N][96];            /* the reason of the last refusal */
     unsigned applies[G1_N], reverts[G1_N], refusals[G1_N];
@@ -65,6 +67,7 @@ int g1_apply(g1_t *g, const g1_mem *m, int which, uint32_t own);
 int g1_revert(g1_t *g, const g1_mem *m, int which);
 /* the cell follows the own slot while the pickup patch is on (cheap, compares with the last value) */
 void g1_set_own(g1_t *g, const g1_mem *m, uint32_t own);
+void g1_set_extra(g1_t *g, const g1_mem *m, uint32_t extra);   /* fix022: the split screen's second human (bit mask of slots); 0 = none */
 /* reads the live bytes and says what they are: "original" / "patched" / "FOREIGN xx xx ..." / "unreadable" */
 int g1_probe(const g1_t *g, const g1_mem *m, int which, char *out, size_t size);
 void g1_status(const g1_t *g, const g1_mem *m, int net_active, uint32_t own, char *out, size_t size);

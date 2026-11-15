@@ -115,6 +115,10 @@ enum cp_w1_sub { CP_W1_SPAWN = 1, CP_W1_HIT = 2, CP_W1_DEATH = 3, CP_W1_DESPAWN 
 #define CP_W1_CAM 24    /* rev1 live 14, both: the active PC's gameplay camera while the other human is switched off (watchcam1.h): the watching PC shows it */
 #define CP_W1_MOT 25    /* rev1 live 14, both: a motion layer of an enemy run on this PC's own AI (mot1.h): the other PC's replica plays it */
 #define CP_W1_BAG 26    /* rev1 live 14, both: this PC's human's three guns and the current one (bag1.h): the other PC's puppet carries / holds them */
+#define CP_W1_OBJ 27    /* sync022, both: a lever move started by this PC's own human (objsync1.h): the other PC's copy plays it with operator -1 */
+#define CP_W1_LID 30    /* sync022, both: this PC's own human opens / closes a locker or a weapon box (lid1.h): the other PC's copy shows the motion */
+#define CP_W1_CUT 29    /* sync022, both: a movie ready here / this player's skip vote (cut1.h) */
+#define CP_W1_PMOT 28   /* sync022, both: this PC's human in an interaction state (pmot1.h): the other PC's puppet shows its motion */
 
 enum cp_phase { CP_PHASE_NONE = 0, CP_PHASE_LOBBY = 1, CP_PHASE_LOADING = 2, CP_PHASE_PLAYING = 3 };
 

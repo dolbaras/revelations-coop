@@ -82,6 +82,32 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 # dispatcher and the 1-1 chain) on a lossy line, either human scanning
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_sf1.exe test_sf1.c ../native/sf1.c ../native/world1.c ../native/coop_proto.c
 ./build/test_sf1.exe
+# sync022 W1 (objsync1.h): a lever the partner pulls moves here too (a replay with operator -1 on a model of uLeverBase's state machine, two PCs); the image's
+# facts; the model before the fix (no mirror) must fail (MODEL BEFORE THE FIX FAILS line)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_objsync1.exe test_objsync1.c
+./build/test_objsync1.exe
+# sync022 P5-P10 / P12 (pmot1.h): the partner's interaction motions on his puppet (EventWaitState hold, bank 0xE binding with balanced references across enter / exit /
+# stage unload / despawn, holds, hits, silence, back-to-back events); the image's facts; the model before the fix (no mirror) must fail
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_pmot1.exe test_pmot1.c
+./build/test_pmot1.exe
+# sync022 cutscenes (cut1.h): movies start together (the start barrier), a skip needs both players' votes (the stop hook), stale / other-movie votes never count;
+# the image's facts of the movie player; the model before the fix (no barrier, the stock skip on one PC) must fail
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_cut1.exe test_cut1.c
+./build/test_cut1.exe
+# sync022 W2 / W3 (lid1.h): the partner's locker door / weapon box lid as a picture (the copy stays closed: no content, no GUI, no state); busy / other class /
+# no copy / not shown; the image's facts of the box states; the model before the fix must fail
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_lid1.exe test_lid1.c
+./build/test_lid1.exe
+# sync022: the key-item flags of every episode (part K): the 0.2.1 rule (Episode 1 ranges only) must fail it (MODEL BEFORE THE FIX FAILS line, non-zero exit)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -DSF1_MODEL_BEFORE_KEYS -o build/test_sf1_before.exe test_sf1.c ../native/sf1.c ../native/world1.c ../native/coop_proto.c
+if ./build/test_sf1_before.exe > build/test_sf1_before.out; then cat build/test_sf1_before.out; echo "test_sf1_before: the 0.2.1 rule PASSED the key test (it must fail)"; exit 1; fi
+grep -q "MODEL BEFORE THE FIX FAILS" build/test_sf1_before.out || { cat build/test_sf1_before.out; echo "test_sf1_before: no MODEL BEFORE line"; exit 1; }
+echo "test_sf1_before: the 0.2.1 rule fails the key test as expected: $(grep 'part K' build/test_sf1_before.out)"
+# sync022: the object flags of Episodes 2-12 under the caller filter (part O); the key rule without the object group must fail it
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -DSF1_MODEL_BEFORE_OBJ -o build/test_sf1_before_obj.exe test_sf1.c ../native/sf1.c ../native/world1.c ../native/coop_proto.c
+if ./build/test_sf1_before_obj.exe > build/test_sf1_before_obj.out; then cat build/test_sf1_before_obj.out; echo "test_sf1_before_obj: the rule without the object group PASSED part O (it must fail)"; exit 1; fi
+grep -q "MODEL BEFORE THE FIX FAILS" build/test_sf1_before_obj.out || { cat build/test_sf1_before_obj.out; echo "test_sf1_before_obj: no MODEL BEFORE line"; exit 1; }
+echo "test_sf1_before_obj: the rule without the object group fails part O as expected: $(grep 'part O' build/test_sf1_before_obj.out)"
 # the 1-3 solo part (solo1.h, ep1-solo E3): the story view of FsmSetEnablePartner, the watch camera, the scene flags, the puppet hold and the downed presence on a model
 # of two PCs' engines (both role choices); the model before the fix must fail the same story
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_solo1.exe test_solo1.c
@@ -117,6 +143,10 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 # before the fix must fail it (MODEL BEFORE THE FIX FAILS line)
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_rguard1.exe test_rguard1.c
 ./build/test_rguard1.exe
+# fix022 (interact1.h): the second human of the split screen operates the objects he is nearest to (doors, items ...): the rule and the central context on a model of the engine's own-slot rule;
+# the model before the fix (the 0.2.1 rule) must fail it (MODEL BEFORE THE FIX FAILS line)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_interact1.exe test_interact1.c
+./build/test_interact1.exe
 # allep step 4: Hunk as the second human of the solo part (native/hunk1.h)
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_hunk1.exe test_hunk1.c
 ./build/test_hunk1.exe

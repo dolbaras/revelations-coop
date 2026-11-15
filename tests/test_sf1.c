@@ -14,6 +14,7 @@
 
 #include "../native/coop_proto.h"
 #include "../native/sf1.h"
+#include "../native/sfobj1.h"
 #include "../native/world1.h"
 
 static int fails, checks;
@@ -62,7 +63,13 @@ static void part_a(void)
     CHECK(inv);
     CHECK(sf1_id_at(SF1_N) == 0);
     CHECK(sf1_layout() != 0 && sf1_layout() == sf1_layout());
+#ifdef SF1_MODEL_BEFORE_KEYS
     CHECK(SF1_BYTES == 48 && 4 + SF1_BYTES <= W1_EXT_MAX);
+#elif defined(SF1_MODEL_BEFORE_OBJ)
+    CHECK(SF1_N == 401 && SF1_N_EP1 == 380 && SF1_BYTES == 51 && 4 + SF1_BYTES <= W1_EXT_MAX && SF1_PRE_LEN <= CP_EVENT_MAX);   /* sync022: + 21 key-item flags */
+#else
+    CHECK(SF1_N == 490 && SF1_N_EP1 == 380 && SF1_N_OBJ0 == 401 && SF1_BYTES == 62 && 4 + SF1_BYTES <= W1_EXT_MAX && SF1_PRE_LEN <= CP_EVENT_MAX);   /* + 89 object flags */
+#endif
     /* every flag the Genesis gates / chain need is mirrored */
     uint32_t need[] = {4398, 4399, 4432, 4658, 4661, 4662, 4663, 4666, 4689, 4705, 4720, 4722, 4730, 4943, 4864, 4899, 4989, 16725};
     int all = 1;
@@ -105,7 +112,7 @@ static void part_a(void)
     CHECK(!sf1_digest_due(&g, 1000 + SF1_QUIET_MS + 5000));
     memset(A_flags, 0, sizeof A_flags);
     A_flags[4390] = 1, A_flags[4658] = 1, A_flags[16725] = 1;   /* the host's world */
-    uint8_t dig[64];
+    uint8_t dig[W1_EXT_MAX];
     unsigned dl = sf1_digest_build(&h, A_get, NULL, dig, sizeof dig);
     CHECK(dl == 4 + SF1_BYTES);
     CHECK(sf1_digest_build(&h, A_get, NULL, dig, 20) == 0);
@@ -113,7 +120,7 @@ static void part_a(void)
     memset(A_flags, 0, sizeof A_flags);
     A_flags[4374] = 1, A_flags[4440] = 1, A_flags[4442] = 1, A_flags[16725] = 1;
     A_nset = A_nprop = 0;
-    uint8_t bad[64];
+    uint8_t bad[W1_EXT_MAX];
     memcpy(bad, dig, dl);
     bad[0] ^= 1;
     CHECK(!sf1_digest_apply(&g, bad, dl, A_get, A_set, A_prop, NULL, 5000));               /* another layout */
@@ -292,7 +299,7 @@ typedef struct PC {
     w1_t w;
     sf1_t s;
     Link *tx;
-    int8_t fl[20000];
+    int8_t fl[65536];   /* sync022: the key-item flags go up to 49665 */
     int rate;
     int in_ops;                    /* the glue is applying something of the other PC (the hook does not report it) */
     int scans;                     /* scenes played here */
@@ -306,7 +313,7 @@ typedef struct PC {
 static int g_place_gate = 1;      /* part C: 0 = the glue before the e1w2 fix (the window starts at the epoch) */
 static int placed(const PC *p) { return (int32_t)(g_now - p->placed_at) >= 0; }
 
-static int pc_get(void *u, uint32_t id) { PC *p = u; return id < 20000 ? p->fl[id] : 0; }
+static int pc_get(void *u, uint32_t id) { PC *p = u; return id < 65536 ? p->fl[id] : 0; }
 /* the engine's SetScenarioFlag: the hook reads the old value, calls the store, reports (only when not inside ops) */
 static void eng_set(PC *p, uint32_t id, int v)
 {
@@ -648,9 +655,183 @@ static void part_d(void)
     CHECK(sf1_pre_take(&p, b1, sizeof b1, 1000) && sf1_pre_apply(&p, 1000 + SF1_PRE_MAX_MS + 1, D_getg, D_setg, NULL, &s, &c) == 0 && p.stale == 1 && !p.have);
 }
 
+/* ================================================================ part K (sync022): the key-item flags of every episode cross like the Episode 1 ones.
+ * The case: Episode 3, the GUEST picks up uItKeyDecoA (FUN_00721F90 stores flag 12800 on its PC); the host's pickup mirror removes the item there, so the host can
+ * only ever get the flag from the guest. And the reverse: the HOST picks up uItKeyVeltro (25091), the guest needs it (its scripts read it 162 times). The 0.2.1
+ * rule (Episode 1 ranges only; build with -DSF1_MODEL_BEFORE_KEYS) must fail these checks: MODEL BEFORE THE FIX FAILS. */
+static int K_h[65536], K_g[65536];
+static int K_geth(void *u, uint32_t id) { (void)u; return id < 65536 ? K_h[id] : 0; }
+static int K_getg(void *u, uint32_t id) { (void)u; return id < 65536 ? K_g[id] : 0; }
+static void K_setg(void *u, uint32_t id, int32_t v) { (void)u; if (id < 65536) K_g[id] = v; }
+static void K_propg(void *u, uint32_t id) { (void)u; (void)id; }
+static int part_k(void)
+{
+    int f0 = fails, why = 0;
+    memset(K_h, 0, sizeof K_h), memset(K_g, 0, sizeof K_g);
+    /* every flag of the game's key-item table is mirrored, the Episode 1 indices did not move */
+    int all = 1;
+    for (unsigned k = 0; k < sf1_nkeyitems; k++) all &= sf1_index(sf1_keyitems[k].flag) >= 0;
+    CHECK(sf1_nkeyitems == 23 && all);
+    CHECK(sf1_index(4864) == 214 && sf1_index(16729) == 379 && sf1_index(4608) == 85);
+    CHECK(sf1_index(8537) == 380 && sf1_index(49665) == 400);
+    CHECK(sf1_index(29010) < 0 && sf1_index(9000) < 0);   /* a script's own flag (the safe's 29010: both PCs' scripts set it) still stays local */
+    sf1_t h, g;
+    sf1_init(&h, SF1_HOST), sf1_init(&g, SF1_GUEST);
+    sf1_epoch(&h, 9, 1000), sf1_epoch(&g, 9, 1000);
+    uint32_t t = 1000 + SF1_QUIET_MS;
+    CHECK(sf1_digest_due(&h, t));
+    uint8_t dig[W1_EXT_MAX];
+    K_h[25091] = 0;
+    unsigned dl = sf1_digest_build(&h, K_geth, NULL, dig, sizeof dig);
+    CHECK(dl == 4 + SF1_BYTES && sf1_digest_apply(&g, dig, dl, K_getg, K_setg, K_propg, NULL, t + 10) == 1);
+    /* 1. guest -> host: the guest's own pickup of the deco key A is a proposal, the host applies it */
+    CHECK(sf1_local(&g, 12800, 0, 1, t + 100, &why) == SF1_SEND);
+    int r = sf1_proposal(&h, 12800, 1, K_h[12800], &why);
+    CHECK(r == SF1_APPLY);
+    if (r == SF1_APPLY) K_h[12800] = 1;
+    CHECK(K_h[12800] == 1);   /* the host's prompt / door script now takes the key's branch */
+    /* 2. host -> guest: the host's pickup of the Veltro key streams, the guest applies it */
+    CHECK(sf1_local(&h, 25091, 0, 1, t + 200, &why) == SF1_SEND);
+    r = sf1_remote_stream(&g, 25091, 1, K_g[25091], t + 210, &why);
+    CHECK(r == SF1_APPLY);
+    if (r == SF1_APPLY) K_g[25091] = 1;
+    CHECK(K_g[25091] == 1);
+    /* 3. the next level instance: the host's digest carries the key flags (a guest that joined later / a Continue with another save) */
+    sf1_epoch(&h, 10, 50000), sf1_epoch(&g, 10, 50000);
+    memset(K_g, 0, sizeof K_g);
+    K_h[16640] = 1, K_h[25091] = 1, K_h[12800] = 1;
+    t = 50000 + SF1_QUIET_MS;
+    CHECK(sf1_digest_due(&h, t));
+    dl = sf1_digest_build(&h, K_geth, NULL, dig, sizeof dig);
+    CHECK(dl == 4 + SF1_BYTES && sf1_digest_apply(&g, dig, dl, K_getg, K_setg, K_propg, NULL, t + 10) == 1);
+    CHECK(K_g[16640] == 1 && K_g[25091] == 1 && K_g[12800] == 1);
+    /* 4. a clear by the host's script (the key used up) reaches the guest, a guest's clear never goes out */
+    CHECK(sf1_local(&h, 16640, 1, 0, t + 300, &why) == SF1_SEND);
+    CHECK(sf1_local(&g, 12800, 1, 0, t + 300, &why) == SF1_SKIP && why == SF1_W_CLEAR);
+    int failed = fails - f0;
+    printf("part K (key-item flags of every episode): %d of the checks failed%s\n", failed, failed ? " (MODEL BEFORE THE FIX FAILS)" : "");
+    return failed;
+}
+
+/* ================================================================ part O (sync022, the lead's double filter): the object-group flags of Episodes 2-12.
+ * The cases: a valve's flag (20816, Episode 5: read by its script, set by no script) stored by the guest's valve through the object flag setter FUN_0067DB80
+ * reaches the host; the same id stored by the Genesis scan's end (FUN_0065A500 -> FUN_0067DB80) or an enemy's flag (8706, owners uZombieBase) stays local, and
+ * the digest never touches an object id that did not cross in the session (a per-player scan stays the player's). The 0.2.2 key rule without the group
+ * (-DSF1_MODEL_BEFORE_OBJ) must fail it (MODEL BEFORE THE FIX FAILS). */
+static int O_h[65536], O_g[65536];
+static int O_geth(void *u, uint32_t id) { (void)u; return id < 65536 ? O_h[id] : 0; }
+static int O_getg(void *u, uint32_t id) { (void)u; return id < 65536 ? O_g[id] : 0; }
+static void O_setg(void *u, uint32_t id, int32_t v) { (void)u; if (id < 65536) O_g[id] = v; }
+static void O_propg(void *u, uint32_t id) { (void)u; (void)id; }
+static int part_o(void)
+{
+    int f0 = fails, why = 0;
+    /* the filter (pure) */
+    CHECK(sfo_filter(SFO_RET_SET_B, 0x6395F0u, 1, 0x80061614u, 1) == SFO_PASS);              /* the valve's wait state -> FUN_0067DB80 (owner uOMValveHandle) */
+    CHECK(sfo_filter(SFO_RET_SET_A, 0x6250F0u, 1, 0x80061202u, 1) == SFO_PASS);              /* a crate's break (uItemBox) */
+    CHECK(sfo_filter(SFO_RET_SET_B, 0x65A520u, 1, 0x80061202u, 1) == SFO_SCAN);              /* FUN_0065A500 = the Genesis scan's end */
+    CHECK(sfo_filter(SFO_RET_SET_B, 0x6395F0u, 0, 0x80061614u, 1) == SFO_NOSTACK);           /* the setter's caller not read: refused */
+    CHECK(sfo_filter(SFO_RET_SET_B, 0x6395F0u, 1, SFO_CLS_HANDPRINT, 1) == SFO_HANDPRINT);
+    CHECK(sfo_filter(SFO_RET_SET_B, 0x643800u, 1, 0x80061900u, 1) == SFO_LEVER);
+    CHECK(sfo_filter(SFO_RET_SET_B, 0x6395F0u, 1, 0x80031000u, 1) == SFO_ENEMY);
+    CHECK(sfo_filter(0x6DFDA7u, 0, 0, 0, 0) == SFO_NOT_OBJECT_PATH);                         /* cGenesisEnemyParam_vf17's own store (an enemy scan) */
+    CHECK(sfo_filter(0x752442u, 0, 0, 0, 0) == SFO_NOT_OBJECT_PATH);                         /* the FSM's FsmSetScenarioFlag */
+    CHECK(sfo_filter(0x64559Bu, 0, 0, 0, 0) == SFO_NOT_OBJECT_PATH);                         /* the lever FUN_00645540 (row W1 replays it) */
+    CHECK(sfo_filter(0x66E447u, 0, 0, 0x80061624u, 1) == SFO_PASS && sfo_filter(0x5CB300u, 0, 0, 0, 0) == SFO_PASS);   /* an emptied box, an item pickup */
+    /* the policy */
+    CHECK(sf1_is_obj(20816) && sf1_is_obj(8706) && !sf1_is_obj(12800) && !sf1_is_obj(4374) && !sf1_is_obj(29010));
+    sf1_t h, g;
+    sf1_init(&h, SF1_HOST), sf1_init(&g, SF1_GUEST);
+    sf1_epoch(&h, 4, 1000), sf1_epoch(&g, 4, 1000);
+    memset(O_h, 0, sizeof O_h), memset(O_g, 0, sizeof O_g);
+    uint32_t t = 1000 + SF1_QUIET_MS;
+    uint8_t dig[W1_EXT_MAX];
+    CHECK(sf1_digest_due(&h, t));
+    unsigned dl = sf1_digest_build(&h, O_geth, NULL, dig, sizeof dig);
+    CHECK(dl == 4 + SF1_BYTES && sf1_digest_apply(&g, dig, dl, O_getg, O_setg, O_propg, NULL, t + 1) == 1);
+    /* 1. the guest's valve: passes the filter, proposed, the host applies it */
+    O_g[20816] = 1;
+    CHECK(sf1_local_obj(&g, 20816, 0, 1, t + 100, sfo_filter(SFO_RET_SET_B, 0x6395F0u, 1, 0x80061614u, 1) == SFO_PASS, &why) == SF1_SEND);
+    int r = sf1_proposal(&h, 20816, 1, O_h[20816], &why);
+    CHECK(r == SF1_APPLY);
+    if (r == SF1_APPLY) O_h[20816] = 1;
+    CHECK(O_h[20816] == 1 && sf1_obj_proven(&h, 20816) && sf1_obj_proven(&g, 20816));
+    /* 2. an enemy's / a scan's store of an object-group id: refused on both roles (W_FILTER), never proven; plain sf1_local never crosses the group */
+    O_g[8706] = 1;
+    CHECK(sf1_local_obj(&g, 8706, 0, 1, t + 200, sfo_filter(SFO_RET_SET_B, 0x65A520u, 1, 0, 0) == SFO_PASS, &why) == SF1_SKIP && why == SF1_W_FILTER);
+    CHECK(sf1_local(&h, 8706, 0, 1, t + 200, &why) == SF1_SKIP && why == SF1_W_FILTER);
+    CHECK(!sf1_obj_proven(&g, 8706) && !sf1_obj_proven(&h, 8706));
+    /* 3. the host's own crate break streams, the guest applies it */
+    O_h[8540] = 1;
+    CHECK(sf1_local_obj(&h, 8540, 0, 1, t + 300, 1, &why) == SF1_SEND && sf1_remote_stream(&g, 8540, 1, O_g[8540], t + 310, &why) == SF1_APPLY);
+    O_g[8540] = 1;
+    /* 4. the next level instance (a Continue with the guest's older store): the digest restores the proven ids, leaves the guest's own scan flag alone */
+    sf1_epoch(&h, 5, 60000), sf1_epoch(&g, 5, 60000);
+    O_g[20816] = 0, O_g[8540] = 0;   /* stale */
+    O_h[8706] = 0;                   /* the host never scanned */
+    t = 60000 + SF1_QUIET_MS;
+    CHECK(sf1_digest_due(&h, t));
+    dl = sf1_digest_build(&h, O_geth, NULL, dig, sizeof dig);
+    CHECK(dl == 4 + SF1_BYTES && sf1_digest_apply(&g, dig, dl, O_getg, O_setg, O_propg, NULL, t + 1) == 1);
+    CHECK(O_g[20816] == 1 && O_g[8540] == 1);   /* proven: the host's world */
+    CHECK(O_g[8706] == 1);                       /* never crossed: the guest's own scan stays */
+    /* 5. sfobj off: nothing of the group crosses, the stream of the group is not applied */
+    g.objon = 0, h.objon = 0;
+    CHECK(sf1_local_obj(&g, 20817, 0, 1, t + 400, 1, &why) == SF1_SKIP && why == SF1_W_FILTER);
+    CHECK(sf1_remote_stream(&g, 20818, 1, 0, t + 400, &why) == SF1_SKIP && sf1_proposal(&h, 20818, 1, 0, &why) == SF1_SKIP && why == SF1_W_FILTER);
+    int failed = fails - f0;
+    printf("part O (object flags of Episodes 2-12, the double filter): %d of the checks failed%s\n", failed, failed ? " (MODEL BEFORE THE FIX FAILS)" : "");
+    return failed;
+}
+
+/* the build facts of sfobj1.h: every allowed return address follows `call 0x721DE0`, the scan's end calls the setter inside its range */
+static void part_o_image(void)
+{
+    FILE *f = fopen("../../image/rerev-image.bin", "rb");
+    if (!f) {
+        printf("image not found: sfobj1.h call sites not checked\n");
+        return;
+    }
+    static uint8_t img[0xE80000];
+    size_t n = fread(img, 1, sizeof img, f);
+    fclose(f);
+    uint32_t all[2 + 6 + 7] = {SFO_RET_SET_A, SFO_RET_SET_B};
+    memcpy(all + 2, sfo_box_rets, sizeof sfo_box_rets), memcpy(all + 8, sfo_item_rets, sizeof sfo_item_rets);
+    int ok = n > 0xD00000;
+    for (unsigned i = 0; i < 15 && ok; i++) {
+        const uint8_t *p = img + (all[i] - 5 - 0x400000u);
+        int32_t rel;
+        memcpy(&rel, p + 1, 4);
+        ok &= p[0] == 0xE8 && all[i] + (uint32_t)rel == 0x721DE0u;
+    }
+    CHECK(ok);
+    const uint8_t *s = img + (0x65A51Bu - 0x400000u);   /* FUN_0065A500: call 0x67DB80 at 0x65A51B -> returns at 0x65A520 */
+    int32_t rel;
+    memcpy(&rel, s + 1, 4);
+    CHECK(s[0] == 0xE8 && 0x65A520u + (uint32_t)rel == SFO_FN_SET && 0x65A520u >= SFO_SCAN_LO && 0x65A520u < SFO_SCAN_HI);
+    static const uint8_t set_entry[] = {0x56, 0x8B, 0xB1, 0x18, 0x0F, 0x00, 0x00};   /* push esi; mov esi,[ecx+0xF18]: one push before the stores = [ret][id][value][esi][ret2] */
+    static const uint8_t store_b[] = {0x52, 0x56, 0x8B, 0xC8, 0xE8};                  /* push edx; push esi; mov ecx,eax; call */
+    CHECK(!memcmp(img + (SFO_FN_SET - 0x400000u), set_entry, sizeof set_entry) && !memcmp(img + (0x67DC10u - 0x400000u), store_b, sizeof store_b) &&
+          !memcmp(img + (0x67DBD8u - 0x400000u), store_b, sizeof store_b));
+    printf("image: the 15 object-path call sites of SetScenarioFlag, the scan's end in its range and the setter's frame checked\n");
+}
+
 int main(void)
 {
+#ifdef SF1_MODEL_BEFORE_KEYS
+    /* only the key part: the 0.2.1 rule must fail it (tests/build.sh expects a non-zero exit and the line) */
+    int kf = part_k();
+    printf("test_sf1 (MODEL BEFORE THE KEY FIX): %d checks, %d failed\n", checks, fails);
+    return kf ? 1 : 0;
+#elif defined(SF1_MODEL_BEFORE_OBJ)
+    int of = part_o();
+    printf("test_sf1 (MODEL BEFORE THE OBJECT-FLAG FIX): %d checks, %d failed\n", checks, fails);
+    return of ? 1 : 0;
+#endif
     part_a();
+    CHECK(part_k() == 0);
+    CHECK(part_o() == 0);
+    part_o_image();
     part_d();
     scenario(0, 0, 11);
     scenario(0, 20, 12);

@@ -177,10 +177,16 @@ GitHub never reports a pre-release as "latest", so a pre-release is never instal
 | First full release | `0.1.0` (tag `v0.1.0`, NOT a pre-release) | higher than any `0.0.N`, so every tester who installed a pre-release is updated by the shortcut at the next start |
 | Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release) | published 2026-11-12 from public commit `58a0d02`: network co-op over all episodes (no setting), give to partner, the Genesis for the second player, HUNK in 2-2, the split aim fix; `R1_VERSION` in `native/r1.h` is `0.2.0` |
 | Fix release | `0.2.1` (tag `v0.2.1`, NOT a pre-release, Latest) | published 2026-11-13 from public commit `de5e123`: the zone hand-over of an enemy between the PCs, the partner's real guns on the puppet, the guest's start kit, the start of the shared world with the own level, the save panel, the guns of the host's save for an unarmed guest, the fall-out guard of enemy copies (`rguard`); `R1_VERSION` in `native/r1.h` is `0.2.1` |
+| Fix release | `0.2.2` (tag `v0.2.2`, NOT a pre-release) | split screen: the second player's own action button (doors, items, every object); network: the key-item flags of every episode, the object flags of Episodes 2-12, levers, the partner's door / pickup motions, lockers and weapon boxes as a picture, movies start together and are skipped only by both players, the stale stock freeze of the partner's character released; `R1_VERSION` in `native/r1.h` is `0.2.2` |
 
 Rules: never publish a full release with a version below `0.1.0`; never mark `v0.1.0` or higher as a pre-release while it should reach players; no "RC" wording anywhere (title,
 notes, tag message, README). Both players need the same package: the network hello carries the mod version (`R1_VERSION`) and refuses another one with a reason; a release that
 changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
+
+## 0.2.2 (fix release)
+
+- **Number:** `0.2.2`: the split-screen fix of the second player's action button (`native/interact1.h`) and the network additions (`native/sf1.c` key-item flags of every episode, `native/sfobj1.h` object flags of Episodes 2-12, `native/objsync1.h` levers, `native/pmot1.h` the partner's interaction motions, `native/lid1.h` lockers / weapon boxes as a picture, `native/cut1.h` movies start together and are skipped only when both players pressed). `R1_VERSION` = `0.2.2`; 0.2.1 and 0.2.2 refuse each other in a game by the hello's version string, with the reason. `CP_PROTO_VERSION` stays `3` (the new world messages 27-30 and the session event 0x146 are additions; no message layout changed).
+- **Before publishing:** `lab\publish-0.2.2-checklist.md` (the final regression on the release DLL, slot by slot, each with its positive markers) and the owner's word.
 
 ## 0.2.1 (fix release; published 2026-11-13)
 

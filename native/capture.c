@@ -24,6 +24,7 @@
 #include "capkeep1.h"
 #include "kbskip1.h"
 #include "aimgate1.h"
+#include "interact1.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -161,6 +162,7 @@ static kb1_stats kb_st;   /* written by the game's pad update only */
 static int raid_active(void);
 static void (TC *orig_padData)(void *self, unsigned slot);
 static void (FC *orig_v8)(unsigned), (FC *orig_v9)(unsigned), (FC *orig_v10)(unsigned), (FC *orig_think)(unsigned);
+static unsigned unit_by_slot(unsigned slot);   /* fix022: used by the interaction table pass above its definition */
 static unsigned (FC *orig_own)(unsigned self);
 static int hooks_on;
 static int inited;
@@ -307,6 +309,9 @@ static capu_t *cap_scope(unsigned unit)
     return owner ? cap_find(owner) : NULL;
 }
 
+static volatile unsigned ia_view;   /* fix022: the viewport the other human's per-view units (prompts, icons) and his object events are made for (capture_set_interact) */
+static int ia_event_scope_begin(capu_t *c);   /* fix022: the other human in an object's event state runs with his own-slot answer */
+static void ia_event_scope_end(int prev);
 static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
 {
     unsigned g = gp();
@@ -319,7 +324,10 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
     unsigned old = *(volatile unsigned *)(g + 0x870);
     *(volatile unsigned *)(g + 0x870) = (unsigned)c->pad;
     /* split screen: the view this character's per-view units (action prompts, message boxes) are made for; sCamera viewport lookups by "the current view" see the same index */
+    int ev_prev = ia_event_scope_begin(c);
     unsigned vwant = AD.view_idx_ptr && (unsigned)c->role < 2 ? view_idx[c->role] : 0, vold = 0;
+    if (ev_prev != -3 && ia_view && AD.view_idx_ptr)
+        vwant = ia_view;   /* an object's event state: its camera calls take the viewport of the other human too */
     if (vwant) {
         vold = *(volatile unsigned *)AD.view_idx_ptr;
         *(volatile unsigned *)AD.view_idx_ptr = vwant;
@@ -344,6 +352,7 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
         }
     }
     fn(unit);
+    ia_event_scope_end(ev_prev);
     if (ag_set)
         *(volatile unsigned char *)(g + AG1_FLAG_OFF) = ag_old;
     if (vwant)
@@ -354,11 +363,527 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
         LeaveCriticalSection(&swap_cs);
 }
 
+
+/* ---- fix022 (interact1.h): the SECOND human of the split screen operates the world's objects ----
+ * Everything an object does for "the player" asks the OWN slot (FUN_00882D60 -> FUN_0087E1B0, answered here) and the central action-command update (sActionCommand vf6 0x412600) reads the
+ * pad of the CURRENT pad slot, so the second human (own slot = the first human's, pad slot 1) never got a prompt, never had his button read and could not pick anything up. An object the
+ * other human is nearest to runs its phases (the three dispatchers, the state-machine tick) in HIS context: his pad slot, his view index, the own-slot answer = his slot. The central update
+ * runs in his context in the frames he presses a button of his own pad and the first human presses none. Switches (LAB): `cap ia obj|central 0|1`. */
+#define IA_FN_ACT 0x412600u
+static volatile int ia_req;                       /* capture_set_interact(): the split screen is on, both humans are local */
+static volatile int ia_sw_obj = 1, ia_sw_central = 1;
+static ia_tab ia_tabs[2];
+static volatile int ia_capidx[2] = {-1, -1};      /* per table: caps[] index of the human who operates its objects */
+static volatile LONG ia_cur, ia_live;             /* ia_live: the table is being maintained (the hooks look at it) */
+static DWORD ia_last_scan;
+static volatile LONG ia_n_scans, ia_n_obj_calls, ia_n_central, ia_n_central_other, ia_max_objs, ia_n_lock_to;
+static unsigned ia_last_other_btn, ia_last_own_btn;
+static hk_t hk_act;
+static void (FC *orig_act)(unsigned);
+
+static float rdf_(unsigned a)
+{
+    float v = 0;
+    r1_safe_read((void *)a, &v, 4);
+    return v;
+}
+
+/* this thread answers `slot` to the own-slot query until scope_restore(); returns what to give back (-1 = no scope before, >= 0 = the slot of the scope before, -2 = no room) */
+static int scope_swap(int slot)
+{
+    LONG me = (LONG)GetCurrentThreadId();
+    for (int i = 0; i < SCOPE_MAX; i++)
+        if (scope_tid[i] == me) {
+            int prev = (int)scope_slot[i];
+            scope_slot[i] = slot;
+            return prev;
+        }
+    for (int i = 0; i < SCOPE_MAX; i++)
+        if (InterlockedCompareExchange(&scope_tid[i], me, 0) == 0) {
+            scope_slot[i] = slot;
+            InterlockedIncrement(&scope_n);
+            return -1;
+        }
+    return -2;
+}
+static void scope_restore(int prev)
+{
+    if (prev == -2)
+        return;
+    LONG me = (LONG)GetCurrentThreadId();
+    for (int i = 0; i < SCOPE_MAX; i++)
+        if (scope_tid[i] == me) {
+            if (prev >= 0)
+                scope_slot[i] = prev;
+            else {
+                scope_tid[i] = 0;
+                InterlockedDecrement(&scope_n);
+            }
+            return;
+        }
+}
+
+/* the log of what ran in the other human's context: the first phase of each object / machine (one line per unit and kind, 80 lines at most) */
+static unsigned ia_seen[96];
+static volatile LONG ia_nseen;
+static void ia_note(const char *what, unsigned unit, capu_t *c)
+{
+    unsigned key = unit ^ (what[0] == 'c' ? 0x80000001u : 0u);
+    LONG n = ia_nseen;
+    for (LONG i = 0; i < n && i < 96; i++)
+        if (ia_seen[i] == key)
+            return;
+    if (n >= 80)
+        return;
+    LONG k = InterlockedIncrement(&ia_nseen) - 1;
+    if (k >= 96)
+        return;
+    ia_seen[k] = key;
+    char cn[64] = "?";
+    if (what[0] != 'c')   /* an object: its class name; the central update has none */
+        classes_object_name(unit, cn, sizeof cn);
+    r1_log("interact: %s of %08x (%s) at (%.0f,%.0f,%.0f) runs in the context of unit slot %d (pad slot %d)", what, unit, cn, (double)rdf_(unit + 0x40), (double)rdf_(unit + 0x44), (double)rdf_(unit + 0x48), c->role, c->pad);
+}
+
+/* the same swap as swap_call (pad slot, view index, under the swap lock) plus the own-slot answer of the human, no aim gate (it is for his own character's sections) */
+static void swap_call_ia(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
+{
+    unsigned g = gp();
+    if (!g) {
+        fn(unit);
+        return;
+    }
+    ia_note(fn == orig_act ? "central action-command update" : fn == orig_think ? "state-machine tick" : fn == orig_v8 ? "phase 8" : fn == orig_v9 ? "phase 9" : "phase 10", fn == orig_act ? 0u : unit, c);
+    int locked = lock_take();
+    note_thread();
+    unsigned old = *(volatile unsigned *)(g + 0x870);
+    *(volatile unsigned *)(g + 0x870) = (unsigned)c->pad;
+    unsigned vwant = AD.view_idx_ptr ? (ia_view ? ia_view : (unsigned)c->role < 2 ? view_idx[c->role] : 0) : 0, vold = 0;   /* the interaction's own view index first: `split view` is off by default */
+    if (vwant) {
+        vold = *(volatile unsigned *)AD.view_idx_ptr;
+        *(volatile unsigned *)AD.view_idx_ptr = vwant;
+    }
+    int prev = scope_swap(c->role);
+    fn(unit);
+    scope_restore(prev);
+    if (vwant)
+        *(volatile unsigned *)AD.view_idx_ptr = vold;
+    *(volatile unsigned *)(g + 0x870) = old;
+    if (locked)
+        LeaveCriticalSection(&swap_cs);
+}
+
+/* The other human's OWN state machine too asks the own slot while an object drives him (the door's KnobHandOn requests PlayerHandKnobState / PlayerOpeningDoorState on him, the live proof
+ * sd6 20:40: the door stuck in KnobHandOnPlayerState, his machine took the request (+0x4c = 0x07aa319b) and did nothing): while a captured human who is NOT the own slot is in an object's
+ * EVENT state (the current state derives from EventStateBase), or an event request for one of the objects he operates is pending, his phases run with his own-slot answer too. His other
+ * states keep the first human's (the camera rule `cam = slot == own ? manager 0 : manager 1` is for them). */
+static int ia_ev_cache_vt[24];
+static signed char ia_ev_cache[24];
+static volatile LONG ia_ev_n;
+static LONG ia_n_event_calls;
+static int ia_obj_is_event(unsigned obj)
+{
+    unsigned vt = rd32(obj);
+    if (vt < 0x10000)
+        return 0;
+    LONG n = ia_ev_n;
+    for (LONG i = 0; i < n && i < 24; i++)
+        if (ia_ev_cache_vt[i] == (int)vt)
+            return ia_ev_cache[i];
+    char nm[320];
+    classes_name(obj, nm, sizeof nm);
+    int r = strstr(nm, "EventStateBase") != NULL;
+    LONG k = InterlockedIncrement(&ia_ev_n) - 1;
+    if (k < 24) {
+        ia_ev_cache_vt[k] = (int)vt;
+        ia_ev_cache[k] = (signed char)r;
+        r1_log("interact: state class %s: %s an object-event state", nm, r ? "IS" : "is not");
+    }
+    return r;
+}
+static int ia_human_in_event(capu_t *c)
+{
+    unsigned mgr = rd32(c->unit + 0xE80);
+    if (!mgr)
+        return 0;
+    unsigned st = rd32(mgr + 0x14);
+    if (st > 0x10000 && ia_obj_is_event(st))
+        return 1;
+    if (rd32(mgr + 0x48) == 2) {   /* a state request is pending: for one of the objects he operates? (its serial is the request's argument) */
+        unsigned serial = rd32(mgr + 0x50), ser[IA_MAX];
+        LONG cur = ia_cur;
+        const ia_tab *t = &ia_tabs[cur & 1];
+        unsigned n = t->n < IA_MAX ? t->n : IA_MAX;
+        for (unsigned i = 0; i < n; i++)
+            ser[i] = rd32(t->e[i].unit + 0xE2C);
+        return ia_event_scope(1, 1, n, 0, 1, serial, ser, n);
+    }
+    return 0;
+}
+static int ia_event_scope_begin(capu_t *c)
+{
+    if (!ia_live || !ia_sw_obj || !c->flip || c->lost || (int)c->role == capture_own_effective() || !ia_tabs[ia_cur & 1].n || !ia_human_in_event(c))
+        return -3;
+    InterlockedIncrement(&ia_n_event_calls);
+    return scope_swap(c->role);
+}
+static void ia_event_scope_end(int prev)
+{
+    if (prev != -3)
+        scope_restore(prev);
+}
+
+/* the capture of the human who operates the objects of the current table */
+static capu_t *ia_other_cap(LONG cur)
+{
+    int i = ia_capidx[cur & 1];
+    return i >= 0 && i < MAXCAP && caps[i].active && caps[i].flip && !caps[i].lost ? &caps[i] : NULL;
+}
+/* an object phase (unit = the object) / a state-machine tick (mgr = the uCallThink's +0x30) of an object the other human operates */
+static capu_t *ia_cap_unit(unsigned unit)
+{
+    if (!ia_live || !ia_sw_obj)
+        return NULL;
+    LONG cur = ia_cur;
+    const ia_tab *t = &ia_tabs[cur & 1];
+    if (!t->n || ia_find(t, unit) < 0)
+        return NULL;
+    return ia_other_cap(cur);
+}
+static capu_t *ia_cap_mgr(unsigned mgr)
+{
+    if (!ia_live || !ia_sw_obj || !mgr)
+        return NULL;
+    LONG cur = ia_cur;
+    const ia_tab *t = &ia_tabs[cur & 1];
+    if (!t->n || ia_find_mgr(t, mgr) < 0)
+        return NULL;
+    return ia_other_cap(cur);
+}
+
+static unsigned pad_buttons(int slot)
+{
+    unsigned char g[12];
+    memset(g, 0, sizeof g);
+    return testmode_pad_peek(slot, g) ? (unsigned)*(unsigned short *)g : 0u;
+}
+
+/* sActionCommand::update (vf6): the single reader of the buttons */
+static void FC hook_act(unsigned self)
+{
+    capu_t *c = NULL;
+    if (ia_live && ia_sw_central) {
+        LONG cur = ia_cur;
+        const ia_tab *t = &ia_tabs[cur & 1];
+        capu_t *o = t->n ? ia_other_cap(cur) : NULL;
+        if (o) {
+            int own = capture_own_effective();
+            capu_t *a = NULL;
+            for (int i = 0; i < MAXCAP; i++)
+                if (caps[i].active && caps[i].role == own) {
+                    a = &caps[i];
+                    break;
+                }
+            unsigned ob = pad_buttons(o->pad), ab = a ? pad_buttons(a->pad) : pad_buttons(own);
+            ia_last_other_btn = ob, ia_last_own_btn = ab;
+            if (ia_central_ctx(ob, ab, t->n))
+                c = o;
+        }
+        InterlockedIncrement(&ia_n_central);
+    }
+    if (c) {
+        InterlockedIncrement(&ia_n_central_other);
+        swap_call_ia(orig_act, self, c);
+    } else
+        orig_act(self);
+}
+
+/* the prompt icon of an object / item (its command: objects +0xF3C is a pointer, items have it embedded at +0xFB0; the icon pointer is command+0xE0, uActionIcon3D 0xFEC448 / 2D 0xFEC370) */
+static unsigned ia_icon_of(unsigned unit, int item)
+{
+    unsigned cmd = item ? unit + 0xFB0 : rd32(unit + 0xF3C);
+    if (!cmd || cmd < 0x10000)
+        return 0;
+    unsigned icon = rd32(cmd + 0xE0);
+    if (!icon || icon < 0x10000)
+        return 0;
+    unsigned vt = rd32(icon);
+    return vt == 0xFEC448u || vt == 0xFEC370u ? icon : 0;
+}
+static volatile LONG ia_n_icon_set, ia_n_icon_back;
+static void ia_icon_view(unsigned unit, int item, int other)
+{
+    unsigned icon = ia_icon_of(unit, item);
+    if (!icon)
+        return;
+    unsigned fl = rd32(icon + 0xC), want = ia_icon_flags(fl, other, ia_view ? ia_view : 2u);
+    if (want != fl && wr32(icon + 0xC, want)) {
+        if (other) {
+            if (InterlockedIncrement(&ia_n_icon_set) <= 12)
+                r1_log("interact: the prompt icon %08x of %s %08x is now made for the other human's viewport (flags %08x -> %08x)", icon, item ? "item" : "object", unit, fl, want);
+        } else
+            InterlockedIncrement(&ia_n_icon_back);
+    }
+}
+
+/* ---- LAB diagnostics (`cap ia diag 1`): a timeline of the operated objects' state machines and the own-slot queries of the object / event code that run WITHOUT the thread scope ----
+ * (fix022 sd10: the door of the second human stayed in KnobHandOnPlayerState with phase 1 for ever and the game never called the state's update: who answers what, when) */
+static volatile int ia_diag;
+#define IA_DG_MAX 160
+static struct { unsigned ret, ans; int scoped; } ia_dg_seen[IA_DG_MAX];
+static volatile LONG ia_dg_n;
+static void ia_diag_own(unsigned ret, unsigned ans, int scoped)
+{
+    if (!ia_live || ret < 0x600000u || ret >= 0x690000u)
+        return;
+    LONG n = ia_dg_n;
+    for (LONG i = 0; i < n && i < IA_DG_MAX; i++)
+        if (ia_dg_seen[i].ret == ret && ia_dg_seen[i].ans == ans && ia_dg_seen[i].scoped == scoped)
+            return;
+    LONG k = InterlockedIncrement(&ia_dg_n) - 1;
+    if (k >= IA_DG_MAX)
+        return;
+    ia_dg_seen[k].ret = ret, ia_dg_seen[k].ans = ans, ia_dg_seen[k].scoped = scoped;
+    r1_log("interact-diag: own-slot query from %08x answered %u (%s), thread %lu", ret, ans, scoped ? "scoped" : "real own slot", (unsigned long)GetCurrentThreadId());
+}
+/* the id of the current state of a state manager (what FUN_0049C3E0 returns: the DTI id of the state class, read without calling code) */
+static unsigned ia_sid(unsigned mgr)
+{
+    unsigned st = mgr ? rd32(mgr + 0x14) : 0, vt, fn, dti;
+    unsigned char b = 0;
+    if (st < 0x10000 || (vt = rd32(st)) < 0x10000 || (fn = rd32(vt + 0x10)) < 0x10000 || !r1_safe_read((void *)fn, &b, 1) || b != 0xB8)
+        return 0;
+    dti = rd32(fn + 1);
+    return dti < 0x10000 ? 0 : rd32(dti + 0x1C);
+}
+/* the ticks (uCallThink 0x6C9800) of the watched state managers: [0] in the other human's context, [1] not (= the first human's) */
+static struct { unsigned mgr; volatile LONG n[2]; } ia_dg_watch[4];
+static void ia_diag_think(unsigned mgr, int matched)
+{
+    for (int i = 0; i < 4; i++)
+        if (ia_dg_watch[i].mgr == mgr) {
+            InterlockedIncrement(&ia_dg_watch[i].n[matched ? 0 : 1]);
+            return;
+        }
+}
+/* LAB: `cap ia objs [class filter]` lists the world objects (sArrange +0xBC) and the items (+0xA8) with class, position, serial, kind / owner and the state id */
+static void ia_list_objs(char *out, int size, const char *filter)
+{
+    unsigned sa = rd32(0x11695C4u);
+    int o = snprintf(out, (size_t)size, "sArrange %08x (class filter '%s')", sa, filter && filter[0] ? filter : "-");
+    static const struct { unsigned off; const char *nm; } lists[2] = {{0xBCu, "obj"}, {0xA8u, "item"}};
+    for (int l = 0; l < 2 && sa; l++) {
+        unsigned cnt = rd32(sa + lists[l].off + 4), arr = rd32(sa + lists[l].off + 0x10);
+        if (cnt > 2000 || !arr)
+            continue;
+        for (unsigned i = 0; i < cnt && o < size - 240; i++) {
+            unsigned e = rd32(arr + 4 * i), u = e ? rd32(e + 4) : 0;
+            if (!u || u < 0x10000)
+                continue;
+            char cn[64] = "?";
+            classes_object_name(u, cn, sizeof cn);
+            if (filter && filter[0] && filter[0] != '-' && !strstr(cn, filter))
+                continue;
+            unsigned char spent = 0;
+            if (l == 1)
+                r1_safe_read((void *)(e + 0xD8), &spent, 1);
+            unsigned mgr = l == 0 ? rd32(u + 0xE80) : 0;
+            o += snprintf(out + o, (size_t)(size - o), "\n%s %08x %-24s (%.0f,%.0f,%.0f) cls %08x serial %u kind %u owner %u state %08x spent %u", lists[l].nm, u, cn, (double)rdf_(u + 0x40),
+                          (double)rdf_(u + 0x44), (double)rdf_(u + 0x48), rd32(u + 0xE28), rd32(u + 0xE2C), rd32(u + 0xE30), rd32(u + 0xE7C), mgr ? ia_sid(mgr) : 0u, (unsigned)spent);
+        }
+    }
+}
+/* LAB: `cap ia packs [door unit]`: the motion pack manager (0x1169750: count +0x30, array +0x3C of packs with id +0x14, sub +0x18, state +0x24, 6 = loaded) and the motions of a door (its controller
+ * +0xE88, layers 0 / 1: +0x298 / +0x29C and +0x2A4 / +0x2A8): FUN_006300C0 is true when the packs of both layers are loaded (or the layer has none). */
+static void ia_list_packs(char *out, int size, unsigned door)
+{
+    unsigned mgr = rd32(0x1169750u), cnt = mgr ? rd32(mgr + 0x30) : 0, arr = mgr ? rd32(mgr + 0x3C) : 0;
+    int o = snprintf(out, (size_t)size, "motion pack manager %08x: %u packs, array %08x", mgr, cnt, arr);
+    unsigned ctl = door ? rd32(door + 0xE88) : 0, v[4] = {0, 0, 0, 0};
+    if (ctl)
+        v[0] = rd32(ctl + 0x298), v[1] = rd32(ctl + 0x29C), v[2] = rd32(ctl + 0x2A4), v[3] = rd32(ctl + 0x2A8);
+    o += snprintf(out + o, (size_t)(size - o), "\ndoor %08x motion controller %08x: +298 %d +29C %d +2A4 %d +2A8 %d", door, ctl, (int)v[0], (int)v[1], (int)v[2], (int)v[3]);
+    int hist[9] = {0};
+    for (unsigned i = 0; i < cnt && i < 600 && arr; i++) {
+        unsigned p = rd32(arr + 4 * i);
+        if (!p)
+            continue;
+        unsigned id = rd32(p + 0x14), sub = rd32(p + 0x18), st = rd32(p + 0x24);
+        hist[st < 8 ? st : 8]++;
+        int m = 0;
+        for (int l = 0; l < 2; l++)   /* both orders of (id, sub): which of the two controller fields is the pack id is not settled */
+            if ((v[l] != 0xFFFFFFFFu && id == (v[l] & 0xFFF) && sub == (v[2 + l] & 0xF)) || (v[2 + l] != 0xFFFFFFFFu && id == (v[2 + l] & 0xFFF) && sub == (v[l] & 0xF)))
+                m = 1;
+        if (m && o < size - 120)
+            o += snprintf(out + o, (size_t)(size - o), "\nmatch pack %08x id %u sub %u state %u", p, id, sub, st);
+    }
+    o += snprintf(out + o, (size_t)(size - o), "\nstates: %d/%d/%d/%d/%d/%d/%d/%d (other %d) for states 0..7", hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7], hist[8]);
+}
+/* the stall watchdog (interact1.h ia_stall_step): an object of the other human in KnobHandOn whose phase does not change goes back to Closed (runner request +0x18 := 2) */
+static volatile LONG ia_n_stall;
+static void ia_watchdog(const ia_tab *t, DWORD now)
+{
+    static struct { unsigned mgr; ia_stall_t s; } w[8];
+    for (unsigned i = 0; i < t->n && i < 8; i++) {
+        unsigned m = t->e[i].mgr;
+        if (!m)
+            continue;
+        int k = -1, f = -1;
+        for (int j = 0; j < 8; j++) {
+            if (w[j].mgr == m)
+                k = j;
+            else if (!w[j].mgr && f < 0)
+                f = j;
+        }
+        if (k < 0) {
+            if (f < 0)
+                continue;
+            k = f, w[k].mgr = m, memset(&w[k].s, 0, sizeof w[k].s);
+        }
+        unsigned run = m + 8;
+        if (ia_stall_step(&w[k].s, ia_sid(m) == IA_ID_KNOBHANDON, (int)rd32(run + 0x14), (uint32_t)now, IA_STALL_MS) && rd32(run + 0x18) == 0xFFFFFFFFu && wr32(run + 0x18, 2)) {
+            InterlockedIncrement(&ia_n_stall);
+            r1_log("interact: the door %08x of the other human stood %u ms in KnobHandOn phase %d (its motion resources are not loaded?): sent back to Closed", t->e[i].unit, IA_STALL_MS, (int)rd32(run + 0x14));
+        }
+    }
+}
+static void ia_diag_tick(const ia_tab *t, unsigned ub)
+{
+    static unsigned last[4][16];
+    static volatile LONG nlog;
+    static DWORD last_cnt;
+    DWORD now = GetTickCount();
+    for (unsigned i = 0; i < t->n && i < 4; i++) {
+        unsigned m = t->e[i].mgr;
+        if (!m)
+            continue;
+        ia_dg_watch[i].mgr = m;
+        unsigned u = t->e[i].unit, run = m + 8, bm = rd32(ub + 0xE80);
+        unsigned cur[16] = {ia_sid(m), rd32(u + 0xC), rd32(u + 0xE1C), rd32(run + 0x14), rd32(run + 0x18), ia_sid(bm), rd32(ub + 0xC), rd32(ub + 0xE1C), rd32(m + 0x48), rd32(run + 0x25) & 0xFF,
+                            rd32(m + 0x3C), rd32(m + 0x40), rd32(bm + 0x3C), rd32(bm + 0x48), rd32(u + 0xE30), rd32(u + 0xE7C)};
+        int chg = memcmp(cur, last[i], sizeof cur) != 0, per = (int)(now - last_cnt) >= 2000;
+        if (!chg && !per)
+            continue;
+        memcpy(last[i], cur, sizeof cur);
+        if (InterlockedIncrement(&nlog) > 900)
+            return;
+        r1_log("interact-diag: t=%lu object %08x%s: state %08x idx %d prev %d kind %u owner %u unit+C %08x E1C %08x runner phase %d req %d pending %u run+25 %u ticks other/first %ld/%ld | B: state %08x idx %d pending %u unit+C %08x E1C %08x "
+               "at (%.0f,%.0f,%.0f)",
+               (unsigned long)GetTickCount(), u, chg ? "" : " (periodic)", cur[0], (int)cur[10], (int)cur[11], cur[14], cur[15], cur[1], cur[2], (int)cur[3], (int)cur[4], cur[8], cur[9], (long)ia_dg_watch[i].n[0],
+               (long)ia_dg_watch[i].n[1], cur[5], (int)cur[12], cur[13], cur[6], cur[7], (double)rdf_(ub + 0x40), (double)rdf_(ub + 0x44), (double)rdf_(ub + 0x48));
+    }
+    if ((int)(now - last_cnt) >= 2000)
+        last_cnt = now;
+}
+
+/* the table pass, once per logic pass (game thread): the objects (sArrange+0xBC, class 0x8006xxxx) and items (+0xA8, 0x8004xxxx) within IA_KEEP of the other human, and who is nearest */
+static void ia_scan(void)
+{
+    DWORD now = GetTickCount();
+    if ((int)(now - ia_last_scan) < 80)
+        return;
+    ia_last_scan = now;
+    int want = ia_req && hooks_on && !blocked && (ia_sw_obj || ia_sw_central) && roles[0].en && roles[1].en;
+    LONG cur = ia_cur, nxt = 1 - (cur & 1);
+    if (!want) {
+        if (ia_live || ia_tabs[cur & 1].n) {
+            for (unsigned i = 0; i < ia_tabs[cur & 1].n; i++)   /* the prompt icons go back to the first human's viewport */
+                ia_icon_view(ia_tabs[cur & 1].e[i].unit, ia_tabs[cur & 1].e[i].item, 0);
+            ia_tabs[nxt].n = 0, ia_capidx[nxt] = -1;
+            InterlockedExchange(&ia_cur, nxt);
+            ia_live = 0;
+        }
+        return;
+    }
+    int own = capture_own_effective();
+    unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
+    capu_t *cb = ub ? cap_find(ub) : NULL;
+    int ci = cb && cb->flip && !cb->lost ? (int)(cb - caps) : -1;
+    unsigned sa = rd32(0x11695C4u);
+    static ia_obj objs[256];
+    unsigned n = 0;
+    float pa[3] = {0, 0, 0}, pb[3] = {0, 0, 0};
+    int a_ok = 0, b_ok = ci >= 0 && ub;
+    if (ua)
+        pa[0] = rdf_(ua + 0x40), pa[1] = rdf_(ua + 0x44), pa[2] = rdf_(ua + 0x48), a_ok = 1;
+    if (b_ok) {
+        pb[0] = rdf_(ub + 0x40), pb[1] = rdf_(ub + 0x44), pb[2] = rdf_(ub + 0x48);
+        static const struct { unsigned off, cls; } lists[2] = {{0xBCu, 0x80060000u}, {0xA8u, 0x80040000u}};
+        for (int l = 0; l < 2 && sa && n < 256; l++) {
+            unsigned cnt = rd32(sa + lists[l].off + 4), arr = rd32(sa + lists[l].off + 0x10);
+            if (cnt > 2000 || !arr)
+                continue;
+            for (unsigned i = 0; i < cnt && n < 256; i++) {
+                unsigned e = rd32(arr + 4 * i), u = e ? rd32(e + 4) : 0;
+                if (!u || u < 0x10000)
+                    continue;
+                unsigned char spent = 0;
+                if (l == 1 && r1_safe_read((void *)(e + 0xD8), &spent, 1) && spent)
+                    continue;
+                if ((rd32(u + 0xE28) & 0xF00F0000u) != lists[l].cls)
+                    continue;
+                float x = rdf_(u + 0x40), y = rdf_(u + 0x44), z = rdf_(u + 0x48);
+                float dx = pb[0] - x, dz = pb[2] - z;
+                if (dx * dx + dz * dz > (IA_KEEP + 100.0f) * (IA_KEEP + 100.0f))
+                    continue;
+                objs[n].unit = u, objs[n].mgr = l == 0 ? rd32(u + 0xE80) : 0, objs[n].x = x, objs[n].y = y, objs[n].z = z, objs[n].item = (uint8_t)l;
+                if (objs[n].mgr) {
+                    unsigned sid = ia_sid(objs[n].mgr);
+                    objs[n].busy = sid != 0 && sid != IA_ID_CLOSED;
+                } else
+                    objs[n].busy = 0;
+                n++;
+            }
+        }
+    }
+    ia_build(&ia_tabs[nxt], &ia_tabs[cur & 1], objs, n, pa, a_ok, pb, b_ok);
+    ia_capidx[nxt] = ci;
+    {   /* the prompt icons: the other human's objects show them in HIS viewport, the ones he left go back to the first human's */
+        const ia_tab *ot = &ia_tabs[cur & 1], *nt = &ia_tabs[nxt];
+        for (unsigned i = 0; i < ot->n; i++)
+            if (ia_find(nt, ot->e[i].unit) < 0)
+                ia_icon_view(ot->e[i].unit, ot->e[i].item, 0);
+        for (unsigned i = 0; i < nt->n; i++)
+            ia_icon_view(nt->e[i].unit, nt->e[i].item, 1);
+    }
+    InterlockedExchange(&ia_cur, nxt);
+    ia_live = b_ok;
+    if (!b_ok) {   /* the other human is gone: everything he operated goes back */
+        const ia_tab *ot = &ia_tabs[cur & 1];
+        for (unsigned i = 0; i < ot->n; i++)
+            ia_icon_view(ot->e[i].unit, ot->e[i].item, 0);
+    }
+    if (ia_sw_obj && b_ok)
+        ia_watchdog(&ia_tabs[nxt], now);
+    if (ia_diag && b_ok)
+        ia_diag_tick(&ia_tabs[nxt], ub);
+    InterlockedIncrement(&ia_n_scans);
+    if ((LONG)ia_tabs[nxt].n > ia_max_objs)
+        ia_max_objs = (LONG)ia_tabs[nxt].n;
+}
+
+void capture_set_interact(int on, unsigned view) { ia_req = on != 0, ia_view = on ? view : 0; }
+int capture_interact_active(void) { return ia_live != 0; }
+
+static void ia_status(char *out, int size)
+{
+    LONG cur = ia_cur;
+    const ia_tab *t = &ia_tabs[cur & 1];
+    int o = snprintf(out, (size_t)size, "interact (interact1.h): requested %d (view %u), live %ld, objects %d / central %d (LAB), act hook %s; the other human operates %u objects now; scans %ld, object phases %ld, "
+                     "central updates %ld (in the other human's context %ld), most operated %ld; last buttons other %04x own %04x",
+                     ia_req, ia_view, (long)ia_live, ia_sw_obj, ia_sw_central, hk_act.on ? "on" : "off", t->n, (long)ia_n_scans, (long)ia_n_obj_calls, (long)ia_n_central, (long)ia_n_central_other, (long)ia_max_objs,
+                     ia_last_other_btn, ia_last_own_btn);
+    for (unsigned i = 0; i < t->n && i < 8 && o < size - 100; i++)
+        o += snprintf(out + o, (size_t)(size - o), "\n  object %08x mgr %08x at (%.0f,%.0f,%.0f)", t->e[i].unit, t->e[i].mgr, (double)t->e[i].pos[0], (double)t->e[i].pos[1], (double)t->e[i].pos[2]);
+}
+
 static void FC hook_v8(unsigned unit)
 {
     capu_t *c = cap_scope(unit);
     if (c)
         swap_call(orig_v8, unit, c);
+    else if (ia_live && (c = ia_cap_unit(unit)) != NULL)
+        InterlockedIncrement(&ia_n_obj_calls), swap_call_ia(orig_v8, unit, c);
     else
         orig_v8(unit);
 }
@@ -367,6 +892,8 @@ static void FC hook_v9(unsigned unit)
     capu_t *c = cap_scope(unit);
     if (c)
         swap_call(orig_v9, unit, c);
+    else if (ia_live && (c = ia_cap_unit(unit)) != NULL)
+        InterlockedIncrement(&ia_n_obj_calls), swap_call_ia(orig_v9, unit, c);
     else
         orig_v9(unit);
 }
@@ -375,6 +902,8 @@ static void FC hook_v10(unsigned unit)
     capu_t *c = cap_scope(unit);
     if (c)
         swap_call(orig_v10, unit, c);
+    else if (ia_live && (c = ia_cap_unit(unit)) != NULL)
+        InterlockedIncrement(&ia_n_obj_calls), swap_call_ia(orig_v10, unit, c);
     else
         orig_v10(unit);
 }
@@ -391,8 +920,16 @@ static void FC hook_think(unsigned unit)
         }
     if (c)
         swap_call(orig_think, unit, c);
-    else
+    else if (ia_live && (c = ia_cap_mgr(mgr)) != NULL) {
+        InterlockedIncrement(&ia_n_obj_calls);
+        if (ia_diag)
+            ia_diag_think(mgr, 1);
+        swap_call_ia(orig_think, unit, c);
+    } else {
+        if (ia_diag)
+            ia_diag_think(mgr, 0);
         orig_think(unit);
+    }
 }
 
 /* PadData[k] is built from the raw pad of the current slot: build slot k from pad k */
@@ -428,15 +965,128 @@ static void FC __attribute__((force_align_arg_pointer)) hook_kb(unsigned self)
  * field is written, so the Raid state of the game stays as it was */
 static unsigned FC hook_own(unsigned self)
 {
+    unsigned ans = 0;
+    int scoped = 0, have = 0;
     if (scope_n && !blocked) {   /* scoped answer for the registered threads only: every other thread keeps the real own slot */
         LONG me = (LONG)GetCurrentThreadId();
         for (int i = 0; i < SCOPE_MAX; i++)
-            if (scope_tid[i] == me)
-                return (unsigned)scope_slot[i];
+            if (scope_tid[i] == me) {
+                ans = (unsigned)scope_slot[i], scoped = 1, have = 1;
+                break;
+            }
     }
-    if (own_on && !blocked)
-        return own_slot;
-    return orig_own(self);
+    if (!have)
+        ans = own_on && !blocked ? own_slot : orig_own(self);
+    if (ia_diag)
+        ia_diag_own((unsigned)__builtin_return_address(0), ans, scoped);
+    return ans;
+}
+
+/* LAB diagnostics (`cap ia diag 1` installs them): the door's KnobHandOnPlayerState update [8] 0x62AF90 and request handler [9] 0x6296A0, and the finish of a state (0x49B160: runner+0x24 = 1)
+ * called on the player's PlayerHandKnobState (vtable 0x01032098): who ends it and when */
+static hk_t hk_dg8, hk_dg9, hk_dgf;
+static volatile LONG dg_n8, dg_n9, dg_nf;
+static void FC hook_dg8(unsigned self, unsigned dummy, unsigned door)
+{
+    LONG n = InterlockedIncrement(&dg_n8);
+    if (n <= 8 || n % 3000 == 0)
+        r1_log("interact-diag: KnobHandOn update [8] call #%ld: state %08x door %08x opener slot %d, runner phase %d req %d, thread %lu", (long)n, self, door, (int)rd32(self + 0x10),
+               (int)rd32(rd32(self + 4) + 0x14), (int)rd32(rd32(self + 4) + 0x18), (unsigned long)GetCurrentThreadId());
+    ((void (FC *)(unsigned, unsigned, unsigned))hk_dg8.tramp)(self, dummy, door);
+}
+static void FC hook_dg9(unsigned self, unsigned dummy, unsigned door)
+{
+    LONG n = InterlockedIncrement(&dg_n9);
+    int req = (int)rd32(rd32(self + 4) + 0x18);
+    if (n <= 4 || req != -1)
+        r1_log("interact-diag: KnobHandOn request handler [9] call #%ld: state %08x door %08x req %d, thread %lu", (long)n, self, door, req, (unsigned long)GetCurrentThreadId());
+    ((void (FC *)(unsigned, unsigned, unsigned))hk_dg9.tramp)(self, dummy, door);
+}
+static void FC hook_dgf(unsigned self)
+{
+    if (rd32(self) == 0x01032098u) {
+        LONG n = InterlockedIncrement(&dg_nf);
+        if (n <= 20)
+            r1_log("interact-diag: PlayerHandKnobState %08x is finished by the caller %08x (door serial %08x), thread %lu", self, (unsigned)__builtin_return_address(0), rd32(self + 0x1C),
+                   (unsigned long)GetCurrentThreadId());
+    }
+    ((void (FC *)(unsigned))hk_dgf.tramp)(self);
+}
+/* setKind of the base unit class (0x6CD4E0, thiscall(unit, kind) ret 4) and the owner-slot setter (0x6C9FC0, thiscall(unit, slot) ret 4) of the objects the other human operates: the objects'
+ * "kind" is their NETWORK OWNERSHIP (2 = mastered here, 3 = a copy driven by a remote owner slot +0xE7C); sd12: the door goes 2 -> 3 in the second human's KnobHandOn and the player's
+ * PlayerHandKnobState ends at once (`FUN_006CA000(door)` = kind 0 or 3 ends it) */
+static hk_t hk_dgk;
+static volatile LONG dg_nk;
+static int ia_scope_slot_of_thread(void)
+{
+    LONG me = (LONG)GetCurrentThreadId();
+    for (int i = 0; i < SCOPE_MAX; i++)
+        if (scope_tid[i] == me)
+            return (int)scope_slot[i];
+    return -1;
+}
+static int ia_diag_is_operated(unsigned unit)   /* any world object (class 0x8006xxxx), operated by the other human or not: the stock flow of the first human for the comparison */
+{
+    return (rd32(unit + 0xE28) & 0xF00F0000u) == 0x80060000u;
+}
+static void FC hook_dgk(unsigned self, unsigned dummy, unsigned kind)
+{
+    if (ia_diag_is_operated(self) && InterlockedIncrement(&dg_nk) <= 160)
+        r1_log("interact-diag: setKind(%08x, %u) was %u, owner slot was %u, caller %08x, thread %lu, scope slot %d", self, kind, rd32(self + 0xE30), rd32(self + 0xE7C),
+               (unsigned)__builtin_return_address(0), (unsigned long)GetCurrentThreadId(), ia_scope_slot_of_thread());
+    ((void (FC *)(unsigned, unsigned, unsigned))hk_dgk.tramp)(self, dummy, kind);
+}
+static void ia_diag_hooks(int on);
+/* ---- fix022: the objects the other human operates are OWNED by the human who operates them ----
+ * An object's "kind" is its network ownership: 2 = mastered here, 3 = a copy driven by the owner slot +0xE7C. The state manager's state change (0x49CB70) compares the owner slot with the OWN slot
+ * (FUN_00882D60) and demotes the object to kind 3 when they differ; the door of the second human (own slot answered = his slot in his thread scope, owner slot 0) went 2 -> 3 in
+ * KnobHandOn, FUN_006CA000(door) (kind 0 or 3) then ended the player's PlayerHandKnobState at once and the door waited for it for ever (sd13 live trace: setKind(door, 3) from 0x49CCB7).
+ * Owner slot getter 0x6C9FD0: a thread with an own-slot scope sees a world object (class 0x8006xxxx) owned by its scope slot; the setter 0x6C9FC0 stores the real own slot for such a call.
+ * Every reader of +0xE7C goes through the getter (the only other references: the setter, the constructor 0x6CC23F, a lea at 0x6CE8E4). */
+static hk_t hk_ogt, hk_ost;
+static volatile int ia_sw_owner = 1;
+static volatile LONG ia_n_own_get, ia_n_own_set;
+static int ia_world_object(unsigned unit) { return (rd32(unit + 0xE28) & 0xF00F0000u) == 0x80060000u; }
+static unsigned FC hook_oget(unsigned self)
+{
+    if (ia_sw_owner && scope_n && !blocked && ia_world_object(self)) {
+        int s = ia_scope_slot_of_thread();
+        if (s >= 0) {
+            InterlockedIncrement(&ia_n_own_get);
+            return (unsigned)s;
+        }
+    }
+    return ((unsigned (FC *)(unsigned))hk_ogt.tramp)(self);
+}
+static void FC hook_oset(unsigned self, unsigned dummy, unsigned slot)
+{
+    int s = ia_sw_owner && scope_n && !blocked && ia_world_object(self) ? ia_scope_slot_of_thread() : -1;
+    if (ia_diag && ia_world_object(self) && InterlockedIncrement(&dg_nk) <= 160)
+        r1_log("interact-diag: owner slot of %08x := %u (was %u), kind %u, caller %08x, thread %lu, scope slot %d", self, slot, rd32(self + 0xE7C), rd32(self + 0xE30),
+               (unsigned)__builtin_return_address(0), (unsigned long)GetCurrentThreadId(), s);
+    if (s >= 0 && slot == (unsigned)s) {   /* the human of the scope takes the object: it is recorded as ours (the machine's own slot), what the first human's code expects */
+        InterlockedIncrement(&ia_n_own_set);
+        slot = (unsigned)capture_own_effective();
+    }
+    ((void (FC *)(unsigned, unsigned, unsigned))hk_ost.tramp)(self, dummy, slot);
+}
+static void ia_diag_hooks(int on)
+{
+    static const unsigned char b8[] = {0x83, 0xEC, 0x08, 0x53, 0x56}, b9[] = {0x83, 0xEC, 0x0C, 0x56, 0x8B, 0xF1}, bf[] = {0x8B, 0x41, 0x04, 0xC6, 0x40, 0x24, 0x01},
+                               bk[] = {0x56, 0x8B, 0xF1, 0x83, 0xBE, 0x30, 0x0E, 0x00, 0x00, 0x03};
+    if (on && !hk_dg8.on) {
+        dg_n8 = dg_n9 = dg_nf = dg_nk = 0;
+        hook_install(&hk_dg8, 0x62AF90u, b8, 5, (void *)hook_dg8);
+        hook_install(&hk_dg9, 0x6296A0u, b9, 6, (void *)hook_dg9);
+        hook_install(&hk_dgf, 0x49B160u, bf, 7, (void *)hook_dgf);
+        hook_install(&hk_dgk, 0x6CD4E0u, bk, 10, (void *)hook_dgk);
+        r1_log("interact-diag: hooks %s %s %s %s", hk_dg8.on ? "[8]" : "[8 FAILED]", hk_dg9.on ? "[9]" : "[9 FAILED]", hk_dgf.on ? "finish" : "finish FAILED", hk_dgk.on ? "setKind" : "setKind FAILED");
+    } else if (!on) {
+        hook_remove(&hk_dgk);
+        hook_remove(&hk_dgf);
+        hook_remove(&hk_dg9);
+        hook_remove(&hk_dg8);
+    }
 }
 
 static void __attribute__((thiscall)) hook_setkind(void *self, int v)
@@ -487,6 +1137,19 @@ static int hooks_install(void)
         if (!can_aim)
             r1_log("capture: 0x%X differs from the supported build: the second human's aim gate stays the own human's (stock)", AG1_CANAIM_FN);
     }
+    {   /* fix022, optional: the central action-command update in the other human's context (interact1.h) */
+        static const unsigned char b_act[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0};
+        if (hook_install(&hk_act, IA_FN_ACT, b_act, 6, (void *)hook_act))
+            orig_act = (void (FC *)(unsigned))hk_act.tramp;
+        else
+            r1_log("capture: the action-command hook is NOT installed (bytes differ): the second human's buttons are not read for objects");
+    }
+    {   /* fix022, optional: the objects of the other human are owned by him (the owner slot getter / setter above) */
+        static const unsigned char b_og[] = {0x8B, 0x81, 0x7C, 0x0E, 0x00, 0x00}, b_os[] = {0x8B, 0x44, 0x24, 0x04, 0x89, 0x81, 0x7C, 0x0E, 0x00, 0x00};
+        int g = hook_install(&hk_ogt, 0x6C9FD0u, b_og, 6, (void *)hook_oget), t = hook_install(&hk_ost, 0x6C9FC0u, b_os, 10, (void *)hook_oset);
+        if (!g || !t)
+            r1_log("capture: the owner-slot hooks are NOT installed (getter %d, setter %d): a door of the second human turns into a remote copy", g, t);
+    }
     {   /* optional: without it the capture works as before (only the game's setKind is not seen) */
         static const unsigned char b_kind[] = {0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C};
         if (hook_install(&hk_kind, 0x6A7B40u, b_kind, 6, (void *)hook_setkind))
@@ -500,6 +1163,10 @@ static int hooks_install(void)
 
 static void hooks_remove(void)
 {
+    ia_diag_hooks(0);
+    hook_remove(&hk_ost);
+    hook_remove(&hk_ogt);
+    hook_remove(&hk_act);
     hook_remove(&hk_kind);
     hook_remove(&hk_own);
     hook_remove(&hk_think);
@@ -822,6 +1489,7 @@ void capture_frame(void)
         if (src[s].kind == CAP_REMOTE && src[s].latched)
             publish_remote(s, now);
     apply();
+    ia_scan();
     if (!hooks_on)
         return;
     {   /* pass start: the workers are idle, nothing may hold a swapped slot; repair a leak (a restore that raced) */
@@ -1119,6 +1787,35 @@ void capture_cmd(const char *arg, char *out, int size)
         snprintf(out, size, "keep capture %d (setKind hook %s): setKind calls on slots 0/1 seen %ld, kept %ld, allowed %ld, field fixes %ld; last reset: unit %08x kind %d caller %08x at %lu (now %lu)",
                  keep_capture, hk_kind.on ? "in" : "not in", (long)kind_calls, (long)kind_kept, (long)kind_allowed, (long)field_fixes, kind_last_unit, kind_last_v, kind_last_caller,
                  (unsigned long)kind_last_tick, (unsigned long)GetTickCount());
+    } else if (!strcmp(sub, "ia")) {   /* ia [obj|central|req] [0|1]: fix022, the second human operates the world's objects (interact1.h); no argument = the status */
+        if (!strcmp(a, "packs")) {   /* LAB: the motion packs and the motions of a door (unit address in hex) */
+            ia_list_packs(out, size, (unsigned)strtoul(b, NULL, 16));
+            return;
+        }
+        if (!strcmp(a, "objs")) {   /* LAB: the world objects / items with class, position, ownership and state */
+            ia_list_objs(out, size, b);
+            return;
+        }
+        if (!strcmp(a, "obj") && b[0])
+            ia_sw_obj = atoi(b) != 0;
+        else if (!strcmp(a, "central") && b[0])
+            ia_sw_central = atoi(b) != 0;
+        else if (!strcmp(a, "owner") && b[0])   /* LAB: the owner-slot hooks (the other human's objects are owned by him) on / off (before = 0.2.1 + the object contexts) */
+            ia_sw_owner = atoi(b) != 0;
+        else if (!strcmp(a, "req") && b[0])
+            ia_req = atoi(b) != 0, ia_view = ia_req ? 2u : 0u;   /* LAB: without the split screen's own request (view 2 = viewport 2) */
+        else if (!strcmp(a, "diag") && b[0]) {   /* LAB: the timeline of the operated objects' state machines + the own-slot queries of the object code (log lines "interact-diag:") */
+            ia_dg_n = 0;
+            ia_diag = atoi(b) != 0;
+            ia_diag_hooks(ia_diag);
+        }
+        ia_status(out, size);
+        {
+            size_t l = strlen(out);
+            if (l + 100 < (size_t)size)
+                snprintf(out + l, (size_t)size - l, "\nowner-slot hooks %s (switch %d): getter answers for scoped threads %ld, setter takes %ld; stall watchdog sent %ld door(s) back", hk_ogt.on && hk_ost.on ? "in" : "NOT in",
+                         ia_sw_owner, (long)ia_n_own_get, (long)ia_n_own_set, (long)ia_n_stall);
+        }
     } else if (!strcmp(sub, "raid")) {   /* raid 1|0: pretend a Raid scene (lab proof of the guard: it only REMOVES our hooks) */
         force_raid = atoi(a);
         apply();

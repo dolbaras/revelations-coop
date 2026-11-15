@@ -13,6 +13,11 @@ What it does
   the host's New Game or Continue, both PCs wait for each other at every load and at the end of each cutscene, the sections and the episodes follow each other on both PCs (also from Episode 1 into Episode 2), and at the end of the
   campaign both PCs show the game's own end and each PC closes the co-op session after it. Enemies are run by the host's PC; doors, key items and item pickups are kept in step; a game over is shared and Continue takes both players to the same checkpoint.
   In one part of Episode 2 (the Guest Cabin) the story locks the partner away: there the second player plays HUNK, a character of the game, instead (over the network and in split screen).
+- What a PC shows of the partner in a network game: his character walks, aims, shoots and changes weapons as he does, and plays his door-opening and pickup motions (his
+  motions at levers, valve wheels, shelves and weapon boxes are passed the same way). A lever he pulls moves on your PC too. A locker, corpse box or safe he opens is shown
+  opening on your screen (for you it stays closed with your own loot inside: open it yourself). The key items of every episode and the story flags that the game's objects
+  set are passed to the other PC. Movies (the pre-rendered cutscenes) start together on both PCs ("Waiting for ... to finish loading..." while one PC waits for the other),
+  and a skip needs both players: the first skip press shows "... wants to skip the cutscene" on the partner's screen, and when the partner skips too, the movie ends on both PCs.
 - Downed / revive in a network game (the host's choice in the lobby: off, 30, 60, 120 seconds or no limit; 60 by default): a player whose health runs out lies down and can be
   helped up by the partner before the time runs out; when both are down, it is game over for both.
 - Give to partner (as in Resident Evil 5): in the game's own item screen (BACK on a gamepad) a herb, a grenade or ammunition can be passed to the partner while the
@@ -35,7 +40,7 @@ Install
    "Resident Evil Revelations Co-op" shortcut (desktop, Start menu). Start the game with that shortcut (it starts it through Steam): it also installs a newer version of the
    mod from GitHub first, if there is one (no internet: the game starts as it is). A new version is installed only when its download matches the checksum GitHub gives for it.
 3. In the main menu choose "Co-Op Play" (the fourth entry) to open the co-op lobby; F6 (keyboard) or BACK (gamepad) open it too.
-If you had an older version (0.0.1, 0.0.2, 0.1.0 or 0.2.0): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.0 and 0.2.1): the lobby refuses the other version and says so.
+If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0 or 0.2.1): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.1 and 0.2.2): the lobby refuses the other version and says so.
 
 Network play: Steam friends or IP address
 - "Steam friends": the host starts hosting, the friend joins from the Steam friends list ("Join Game") or from the host's invite. No address and no port forwarding are needed.
@@ -70,12 +75,33 @@ Needs: the Steam version of Resident Evil Revelations, build 13298487 (the insta
 Limits
 - Network play is for one person per PC. In the Guest Cabin part of Episode 2 the second player plays HUNK instead of the partner the story locks away: HUNK appears, walks and shoots there (on two PCs and in split screen) and the end of the part leads both PCs into Episode 3, but the part's own story (its scenes, doors and enemies) was not played through with HUNK; Split screen on one PC works in every part of the story with two playable characters.
 - Not verified with two real PCs in this version: the last boss fight of the campaign played through (its end flow after it is verified), and the section 12-3, which could only be started directly (not by the story's own way); it follows the same rules.
+- Not verified with two real PCs, the network additions of 0.2.2: a lever pulled by the partner moving on the other PC (the parts of the levels with levers load only by the
+  story, which our tests could not drive there; checked by the offline tests only), using a key on the host's PC that the guest picked up (the key's story flag reaching the
+  host was checked, in Episode 12), a weapon box shown opening on the other PC (our test could not open the box), the on-screen line after a lone skip press (the vote itself
+  was checked), a skip pressed on a gamepad (our tests pressed keys of the keyboard; the game's own skip test reads both), and the partner's motions at levers, valve wheels,
+  shelves and weapon boxes (his door and pickup motions were checked).
 - Genesis in split screen: while the second player scans, the screen shows his scanner view in full (the game has one scanner view, so one player scans at a time: the first to start, the other waits); his analysis rate is kept only while the game runs (it starts at 0 again after the game is restarted).
 - Give to partner: an item that is on its way to the partner at the very moment a new section starts is not in that section's first checkpoint, so loading that checkpoint
   again (a game over before the next one) takes it back, like everything else since. Where the story changes the characters with the section (Episode 9 to 10), an item
   still on its way lands with the new character on that PC; it is not lost.
+- Split screen, doors and items: a door or an item is used by the player who stands nearest to it (the other player cannot use it while he is not the nearer one; a door that is opening stays with
+  the player who started it). The prompt of a door or an item (the green button) is drawn in both halves of the screen wherever the door or item is visible, also for the first player.
+  A door needs its opening animation loaded, which the game does around the first player: if the second player opens a door that is far from the first player, the door closes again after
+  6 seconds and the second player is free; try again when the first player is nearer (in our measurements a door was ready when the first player stood about 200 units or nearer for a few
+  seconds, and then stayed ready).
+- Split screen, other things the action button does (doors other than the two we tried (Episodes 3 and 9), crates, wall scanners and hand prints, elevator switches, weapon boxes, ladders): they use the same rule as the doors (the nearest player, his own
+  action button), but they were not seen working for the second player in our tests (the crate did not answer the first player either; the others could not be reached by the test controls); if one of them
+  does not work for the second player, please report it.
 - Joining a running network game is not possible: if one player's game closes or the connection is lost, start a new co-op game from the lobby (Continue picks up the checkpoint).
 - At the first level of a network session the host's character on the guest's screen carries no knife, so a knife attack of the host is not shown there (it counts on the host's PC as usual).
+- Network, the world objects the partner uses: valve wheels (Episodes 5, 6 and 12) and the shelves you push (Episode 2) move only on the PC of the player who uses them (his
+  motion is shown on his character and the story flag is passed on: the game moves the player who turns or pushes, so the other PC cannot replay it); each player rides an
+  elevator himself (a ride loads areas); ducts, vent covers, wire-puzzle covers, sideboards, TVs, toilets, shutters and two-wing doors are not shown on the other PC; a crate
+  breaks on each PC by the hits that PC sees (not checked). A locker, corpse box, safe or weapon box the partner opened looks open on your screen but is still closed for you
+  (your own loot, as before). On ladders, climbs and jumps the partner's character is moved along by the position correction, without the climbing motion.
+- Network, in-engine cutscenes (the ones that are not movies): each PC starts them by its own story and both PCs leave each scene together (the end is waited for); the game
+  has no skip for them, and nothing corrects a drift inside a scene. After a movie both PCs start the next scene within a few hundredths of a second; where a section begins
+  without a movie, its first scene can start about a second apart on the two PCs (a few seconds in the worst cases we measured).
 - Other mods that use dinput8.dll (ASI loaders, fixes): the installer keeps your file in coop-backup and puts the mod's dinput8.dll in its place. If your file is an Ultimate ASI
   Loader (the loader of most ASI mods), the installer also puts a copy of it in the game folder as winmm.dll, so the plugins in your scripts folder keep working. Any other
   dinput8.dll is off until you remove the co-op mod, which puts your files back as they were. Do not rename an ASI loader to dinput8_real.dll: the mod does not load a loader

@@ -69,26 +69,36 @@ static int diff_bytes(const uint8_t *a, const uint8_t *b, int n)
     return d;
 }
 
-/* a tiny interpreter of exactly the instructions of the stub: proves the encoding reads [esp+4], compares with the cell, answers 0 / 1 and pops 4 bytes */
+/* a tiny interpreter of exactly the instructions of the stub (fix022: a slot MASK in the cell): proves the encoding reads [esp+4], tests the bit of the cell, answers 0 / 1 and pops 4 bytes */
 static int run_stub(const uint8_t *code, int len, uint32_t cell_addr, uint32_t cell_val, uint32_t arg, int *pops)
 {
     int i = 0;
     uint32_t eax = 0xDEAD0000u;
-    int zf = 0;
+    int cf = 0;
     if (!(len >= 4 && code[0] == 0x8B && code[1] == 0x44 && code[2] == 0x24 && code[3] == 0x04)) return -1;   /* mov eax,[esp+4] */
     eax = arg, i = 4;
-    if (!(code[i] == 0x3B && code[i + 1] == 0x05)) return -2;                                                 /* cmp eax,[disp32] */
+    if (!(code[i] == 0x83 && code[i + 1] == 0xF8 && code[i + 2] == 0x1F)) return -2;                          /* cmp eax,31 */
+    i += 3;
+    if (!(code[i] == 0x77 && code[i + 1] == 0x10)) return -3;                                                  /* ja no (16 bytes on) */
+    int no_at = i + 2 + 16;
+    i += 2;
+    if (eax > 31) {                                                                                           /* taken: no: xor eax,eax ; ret 4 */
+        if (!(code[no_at] == 0x31 && code[no_at + 1] == 0xC0 && code[no_at + 2] == 0xC2 && code[no_at + 3] == 0x04 && code[no_at + 4] == 0x00)) return -8;
+        *pops = 4;
+        return no_at + 5 == len ? 0 : -9;
+    }
+    if (!(code[i] == 0x0F && code[i + 1] == 0xA3 && code[i + 2] == 0x05)) return -4;                          /* bt [disp32],eax */
     uint32_t d;
-    memcpy(&d, code + i + 2, 4);
-    if (d != cell_addr) return -3;
-    zf = eax == cell_val, i += 6;
-    if (!(code[i] == 0x0F && code[i + 1] == 0x94 && code[i + 2] == 0xC0)) return -4;                           /* sete al */
-    eax = (eax & ~0xFFu) | (uint32_t)zf, i += 3;
-    if (!(code[i] == 0x0F && code[i + 1] == 0xB6 && code[i + 2] == 0xC0)) return -5;                           /* movzx eax,al */
+    memcpy(&d, code + i + 3, 4);
+    if (d != cell_addr) return -5;
+    cf = (int)((cell_val >> eax) & 1u), i += 7;
+    if (!(code[i] == 0x0F && code[i + 1] == 0x92 && code[i + 2] == 0xC0)) return -6;                           /* setc al */
+    eax = (eax & ~0xFFu) | (uint32_t)cf, i += 3;
+    if (!(code[i] == 0x0F && code[i + 1] == 0xB6 && code[i + 2] == 0xC0)) return -7;                           /* movzx eax,al */
     eax &= 0xFF, i += 3;
-    if (!(code[i] == 0xC2 && code[i + 1] == 0x04 && code[i + 2] == 0x00)) return -6;                           /* ret 4 */
+    if (!(code[i] == 0xC2 && code[i + 1] == 0x04 && code[i + 2] == 0x00)) return -10;                          /* ret 4 */
     *pops = 4, i += 3;
-    return i == len ? (int)eax : -7;
+    return i == no_at ? (int)eax : -11;
 }
 
 int main(void)
@@ -175,15 +185,28 @@ int main(void)
     CHECK(diff_bytes(before, m_pick, sizeof m_pick) <= 5 && memcmp(m_pick + off + 5, real_pick + 5, 4) == 0, "pick: only the first 5 bytes of the function changed");
     CHECK(m_pick[off] == 0xE9 && *(int32_t *)(m_pick + off + 1) == (int32_t)(g.stub - (0x881DF0 + 5)), "pick: first bytes are `jmp stub`");
     int pops = 0, len = g1_stub_build(m_heap + 0x40, g.cell);   /* build once more in spare heap bytes to compare with what apply wrote */
-    CHECK(len == 19 && memcmp(m_heap, m_heap + 0x40, 19) == 0, "pick: the stub in memory is the stub built for that cell");
+    CHECK(len == 30 && memcmp(m_heap, m_heap + 0x40, 30) == 0, "pick: the stub in memory is the stub built for that cell");
     uint32_t cellv;
     memcpy(&cellv, m_heap + 32, 4);
-    CHECK(cellv == 1, "pick: the cell holds the own slot (1)");
+    CHECK(cellv == 2, "pick: the cell holds the own slot's bit (slot 1 = 0x2)");
     CHECK(run_stub(m_heap, len, g.cell, cellv, 1, &pops) == 1 && pops == 4, "pick: slot 1 is the owner now (returns 1, ret 4)");
     CHECK(run_stub(m_heap, len, g.cell, cellv, 0, &pops) == 0, "pick: slot 0 is not the owner of a client with own slot 1");
     g1_set_own(&g, &MEM, 0);
     memcpy(&cellv, m_heap + 32, 4);
-    CHECK(cellv == 0 && run_stub(m_heap, len, g.cell, cellv, 0, &pops) == 1 && run_stub(m_heap, len, g.cell, cellv, 1, &pops) == 0, "pick: own slot 0 behaves like the stock game (slot == 0)");
+    CHECK(cellv == 1 && run_stub(m_heap, len, g.cell, cellv, 0, &pops) == 1 && run_stub(m_heap, len, g.cell, cellv, 1, &pops) == 0 && run_stub(m_heap, len, g.cell, cellv, 7, &pops) == 0,
+          "pick: own slot 0 behaves like the stock game (slot == 0)");
+    CHECK(run_stub(m_heap, len, g.cell, cellv, 32, &pops) == 0 && pops == 4 && run_stub(m_heap, len, g.cell, cellv, 0xFFFFFFFFu, &pops) == 0, "pick: a slot beyond the mask is refused, ret 4 all the same");
+    g1_set_extra(&g, &MEM, 2);   /* fix022: the split screen's second human picks up too */
+    memcpy(&cellv, m_heap + 32, 4);
+    CHECK(cellv == 3 && run_stub(m_heap, len, g.cell, cellv, 0, &pops) == 1 && run_stub(m_heap, len, g.cell, cellv, 1, &pops) == 1 && run_stub(m_heap, len, g.cell, cellv, 2, &pops) == 0,
+          "pick: the extra slot adds its bit, the own slot keeps its own");
+    g1_set_own(&g, &MEM, 1);
+    memcpy(&cellv, m_heap + 32, 4);
+    CHECK(cellv == 2 && g.own == 1, "pick: own slot 1 + extra 2 = mask 2 (no change of the value, the own slot is tracked)");
+    g1_set_own(&g, &MEM, 0);
+    g1_set_extra(&g, &MEM, 0);
+    memcpy(&cellv, m_heap + 32, 4);
+    CHECK(cellv == 1, "pick: extra removed again");
     writes = 0;
     g1_set_own(&g, &MEM, 0);
     CHECK(writes == 0, "pick: an unchanged own slot writes nothing");
@@ -192,10 +215,10 @@ int main(void)
     CHECK(g1_revert(&g, &MEM, G1_PICK) == 1 && diff_bytes(before, m_pick, sizeof m_pick) == 0 && g.state[G1_PICK] == G1_OFF, "pick: revert gives back the original bytes");
     g1_set_own(&g, &MEM, 1);
     memcpy(&cellv, m_heap + 32, 4);
-    CHECK(cellv == 0, "pick: the cell is left alone while the patch is off");
+    CHECK(cellv == 1, "pick: the cell is left alone while the patch is off");
     CHECK(g1_apply(&g, &MEM, G1_PICK, 1) == 1 && g.stub == R_HEAP && g.applies[G1_PICK] == 2, "pick: re-apply reuses the stub");
     memcpy(&cellv, m_heap + 32, 4);
-    CHECK(cellv == 1, "pick: re-apply refreshes the own slot");
+    CHECK(cellv == 2, "pick: re-apply refreshes the own slot's bit");
     g1_revert(&g, &MEM, G1_PICK);
 
     for (int i = 0; i < G1_PICK_CHECK; i++) {

@@ -26,7 +26,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SF1_N 380                 /* mirrored ids (the ranges in sf1.c) */
+#if defined(SF1_MODEL_BEFORE_KEYS)
+#define SF1_N 380                 /* TEST ONLY: the 0.2.1 rule (Episode 1 ranges only), so the key test can show that it fails */
+#define SF1_MODEL_BEFORE_OBJ 1
+#elif defined(SF1_MODEL_BEFORE_OBJ)
+#define SF1_N 401                 /* TEST ONLY: keys but no object group */
+#else
+#define SF1_N 490                 /* mirrored ids (the ranges in sf1.c): 380 of Episode 1 + 21 key-item flags + 89 object flags of Episodes 2-12 (sync022) */
+#endif
+#define SF1_N_OBJ0 401            /* indices from here on are the object group: they cross only through sf1_local_obj with the caller filter passed */
+#define SF1_N_EP1 380             /* indices below this are the Episode 1 ranges; from here on the key-item flags (sync022) */
 #define SF1_BYTES ((SF1_N + 7) / 8)
 #define SF1_QUIET_MS 2500u        /* after this PC's human is placed in the epoch (else after the epoch began): no proposals, then the host's digest */
 #define SF1_PLACE_MAX_MS 300000u  /* an epoch whose own human is still unplaced this long (a stuck movie / no unit): the window starts anyway */
@@ -46,7 +55,7 @@ enum {
     SF1_LATER = 3,                /* guest: apply at *due (a held clear) */
 };
 enum sf1_why {
-    SF1_W_NONE = 0, SF1_W_RANGE, SF1_W_SAME, SF1_W_CLEAR, SF1_W_TOUCHED, SF1_W_QUIET, SF1_W_NOEPOCH, SF1_W_ROLE, SF1_W_HOLDFULL, SF1_W_N
+    SF1_W_NONE = 0, SF1_W_RANGE, SF1_W_SAME, SF1_W_CLEAR, SF1_W_TOUCHED, SF1_W_QUIET, SF1_W_NOEPOCH, SF1_W_ROLE, SF1_W_HOLDFULL, SF1_W_FILTER, SF1_W_N
 };
 const char *sf1_why_name(int why);
 
@@ -57,6 +66,7 @@ typedef struct {
     uint32_t digest_tx, digest_rx, digest_set, digest_clear, digest_prop, digest_bad, digest_timeout;
     uint32_t rate_tx, rate_rx, rate_applied;
     uint32_t piece_tx, piece_rx, piece_applied, piece_dup;
+    uint32_t obj_passed, obj_refused, obj_prop_applied, obj_digest_skipped;   /* sync022: the object group */
 } sf1_stats;
 
 typedef struct { uint32_t k[4]; uint32_t cls; uint8_t state; } sf1_piece;   /* state 1 = broken here (own), 2 = applied from the other PC, 3 = both */
@@ -69,6 +79,8 @@ typedef struct {
     uint32_t quiet_ms;            /* the quiet window starts here: the epoch start, or the moment this PC's human was placed (sf1_placed) */
     uint8_t unplaced;             /* sf1_unplaced: the window waits for sf1_placed (at most SF1_PLACE_MAX_MS after the epoch start) */
     int wide;                     /* lab: every id >= 256 crosses (not only the whitelist); the digest still covers the whitelist */
+    int objon;                    /* sync022: the object group crosses at all (`world set sfobj 0|1`, default 1) */
+    uint8_t objp[SF1_BYTES];      /* sync022: object-group ids that crossed (passed the filter here, or were applied from the other PC) in this SESSION */
     uint8_t touched[SF1_BYTES];   /* host: changed here or applied from a proposal in this epoch; guest: the host has spoken about it */
     uint8_t own[SF1_BYTES];       /* guest: set by its own engine in this epoch */
     uint8_t proposed[SF1_BYTES];  /* guest: a proposal was sent in this epoch */
@@ -92,6 +104,10 @@ uint32_t sf1_id_at(unsigned i);
 uint16_t sf1_layout(void);
 /* crosses at all (whitelist, or id >= 256 in the wide lab mode) */
 int sf1_crosses(const sf1_t *s, uint32_t id);
+/* sync022: the key items of every episode and the flag each one sets (FUN_00721F90) as this build's data has them; all of them are in the whitelist */
+typedef struct { uint32_t code; uint32_t flag; const char *name; } sf1_keyitem;
+extern const sf1_keyitem sf1_keyitems[];
+extern const unsigned sf1_nkeyitems;
 
 void sf1_init(sf1_t *s, int role);
 void sf1_epoch(sf1_t *s, unsigned epoch, uint32_t now);           /* same epoch again = no-op */
@@ -99,8 +115,12 @@ int sf1_in_quiet(const sf1_t *s, uint32_t now);
 void sf1_unplaced(sf1_t *s);                                     /* right after sf1_epoch: the own human is not placed yet */
 int sf1_placed(sf1_t *s, uint32_t now);                          /* the own human is placed: 1 = the window starts now (once per epoch) */
 
-/* this PC's engine changed id from old to new (both read from the engine). Returns SF1_SEND or SF1_SKIP; *why = the reason (may be NULL). */
+/* this PC's engine changed id from old to new (both read from the engine). Returns SF1_SEND or SF1_SKIP; *why = the reason (may be NULL). An object-group id is
+ * refused here (SF1_W_FILTER): it needs sf1_local_obj with pass = the glue's caller filter (a proven world-object path acting for this PC's own human). */
 int sf1_local(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int *why);
+int sf1_local_obj(sf1_t *s, uint32_t id, int32_t old, int32_t value, uint32_t now, int pass, int *why);
+int sf1_is_obj(uint32_t id);                                     /* the id is in the object group */
+int sf1_obj_proven(const sf1_t *s, uint32_t id);                 /* ... and crossed in this session */
 /* guest: the host's stream says id = value (a newer version). SF1_APPLY now, or SF1_LATER (held, sf1_tick hands it out), or SF1_SKIP. */
 int sf1_remote_stream(sf1_t *s, uint32_t id, int32_t value, int32_t cur, uint32_t now, int *why);
 /* host: a guest proposal id = value; cur = the host's value. SF1_APPLY or SF1_SKIP. */

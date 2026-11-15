@@ -54,6 +54,10 @@ enum wh_id {
                         player (FUN_0040EEF0: +0xE2C == FUN_0087E1B0), 0 = no floor; called by FUN_004177D0 (cSystem_vf15 0x4178F0) every frame, which then loads the
                         listed parts and unloads the others. Rule (stage1.h, `world set watchstage 0|1`, default 1): each PC sends its own human's codes
                         (CP_W1_STAGE); the PC that WATCHES answers with the watched human's codes (the void of l10e / l11a / l12a / l12b: 257 never streamed there) */
+    WH_MPLAY,        /* sync022 (cut1.h): FUN_00785B30  fastcall(movie player) plain ret: the movie player's update (state +0x2040): the start barrier of a movie and the
+                        skip vote of both players; the hook skips the update while a movie waits for the partner / withholds a lone skip press */
+    WH_MSTOP,        /* sync022 (cut1.h): FUN_00784210  thiscall(movie player) plain ret: the stock stop of a movie; called from the 4 skip tests of the update (and
+                        elsewhere: passed on): a lone skip press becomes this player's vote (the stop is not run, the update's no-skip call FUN_00783F70 is) */
     WH_N_HOOKS,
     WH_C_DAMAGE = WH_N_HOOKS,   /* uCharaBase::Damage 0x6CA830 thiscall(unit; float) ret 4 */
     WH_C_ITEMGONE,   /* FUN_005D7D00: take a world item away  thiscall([0x116AB48]; uItem*) ret 4 */

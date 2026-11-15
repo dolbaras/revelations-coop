@@ -72,10 +72,13 @@ static void revert_all(void)
     g1_revert(&G, &MEM, G1_PICK);
 }
 
+static int split_pick_on;   /* fix022: the pickup patch is on for the split screen (interact1.h), not for a network session */
+
 static void guards_frame(void)
 {
     EnterCriticalSection(&cs);
     int want = g1_want(&G, net1_session_active());
+    int split = capture_interact_active() && G.mode != G1_MODE_OFF;
     if (want && !last_want)
         apply_all();                                  /* off -> on: write, or refuse and say why */
     else if (want && (G.state[G1_EXIT] == G1_ON || G.state[G1_PICK] == G1_ON))
@@ -83,6 +86,22 @@ static void guards_frame(void)
     else if (!want && last_want)
         revert_all();
     last_want = want;
+    /* fix022: in the split screen both humans are local: the pickup patch (only it) is on while the second human operates objects, with both slots in the mask */
+    if (split && !want) {
+        if (G.state[G1_PICK] != G1_ON) {
+            if (g1_apply(&G, &MEM, G1_PICK, own_slot()))
+                split_pick_on = 1;
+        }
+        if (G.state[G1_PICK] == G1_ON)
+            g1_set_extra(&G, &MEM, 3u);
+    } else if (split_pick_on && !want) {
+        g1_set_extra(&G, &MEM, 0u);
+        g1_revert(&G, &MEM, G1_PICK);
+        split_pick_on = 0;
+    } else if (want && split_pick_on) {
+        split_pick_on = 0;   /* a network session took over: its own rule (the mask holds the own slot only) */
+        g1_set_extra(&G, &MEM, 0u);
+    }
     LeaveCriticalSection(&cs);
 }
 

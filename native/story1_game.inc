@@ -19,6 +19,7 @@ int scan1_rate_shared_now(void);   /* scan1.c (notes/scan1.md 2.3): 1 = one team
 typedef unsigned (TC *flagget_fn)(void *self, unsigned id);
 static sf1_t SF;
 static volatile int f_story = 1;     /* the story mirror (E1 + E2 + E6) while the model is bound */
+static volatile int f_sfobj = 1;     /* sync022: the object-group flags cross (sfobj1.h's caller filter; `world set sfobj 0|1`) */
 static volatile int g_sf_wide;       /* lab: every id >= 256 crosses (the hook thread reads it) */
 static unsigned sf_logged, sf_logged_low, sf_apply_logged, piece_logged;
 static uint32_t last_piece_ms;
@@ -41,11 +42,17 @@ static int flag_get(uint32_t id)   /* any thread: the game's getter (takes the f
     return (int)(((flagget_fn)(uintptr_t)wh_sites[WH_C_FLAGGET].addr)((void *)(uintptr_t)mgr, id) & 0xFF);
 }
 static int flag_get0(void *u, uint32_t id) { (void)u; return flag_get(id) > 0; }
+static int kf_blocked(uint32_t id);
 static void flag_apply(uint32_t id, int32_t value, const char *why)
 {
     uint32_t mgr = rd32(WH_FLAGMGR_PTR);
     if (!mgr || !orig_flag) {
         S.ops_noop++;
+        return;
+    }
+    if (kf_blocked(id)) {   /* sync022: a key-item flag this PC's live table did not confirm (or not checked yet) */
+        S.ops_noop++;
+        if (++sf_apply_logged <= 3000) wlog("story: flag %u = %d from the other PC NOT applied (%s): a key-item flag not confirmed by this PC's own table", id, value, why);
         return;
     }
     int old = flag_get(id);
@@ -214,11 +221,59 @@ static void story_send_rate(int kind, int v)
     wlog("story: Genesis rate %s %d sent", kind == SF1_RATE_ABS ? "value" : "rise", v);
 }
 
+/* ---- sync022: the key-item flags of every episode (sf1.c sf1_keyitems) are checked once against the game's live rKeyItem table ([[0x116A344] + 0x2C], read the way
+ * FUN_00721F90 reads it: wh_keyitem_flag). An id whose live flag differs (or cannot be read while the others can) is refused on both paths (this PC's change is
+ * not reported, a remote value is not applied): only ids proven by this PC's own table cross. Logic thread (the hook threads only read kf_bad). */
+static volatile uint8_t kf_bad[SF1_BYTES];
+static int kf_checked;
+static unsigned kf_ok, kf_mis, kf_unread, kf_tries;
+static int kf_blocked(uint32_t id)
+{
+    int i = sf1_index(id);
+    if (i >= SF1_N_EP1 && i < SF1_N_OBJ0 && !kf_checked) return 1;   /* the added key ids cross only after the live check (the Episode 1 ids as before; the object group has its own filter) */
+    return i >= 0 && ((kf_bad[i >> 3] >> (i & 7)) & 1);
+}
+static void keyflag_check(void)
+{
+    if (kf_checked) return;
+    uint32_t mgr = rd32(WH_FLAGMGR_PTR);
+    if (!mgr) return;
+    unsigned ok = 0, mis = 0, unread = 0;
+    uint8_t bad[SF1_BYTES];
+    memset(bad, 0, sizeof bad);
+    for (unsigned k = 0; k < sf1_nkeyitems; k++) {
+        uint32_t live = 0;
+        int i = sf1_index(sf1_keyitems[k].flag);
+        if (!wh_keyitem_flag(&MEM, mgr, sf1_keyitems[k].code, &live)) {
+            unread++;
+            if (i >= 0) bad[i >> 3] |= (uint8_t)(1u << (i & 7));
+            continue;
+        }
+        if (live != sf1_keyitems[k].flag || i < 0) {
+            mis++;
+            if (i >= 0) bad[i >> 3] |= (uint8_t)(1u << (i & 7));
+            wlog("story: key item %08x %s: the live table gives flag %u, this build's data %u: NOT mirrored", (unsigned)sf1_keyitems[k].code, sf1_keyitems[k].name, (unsigned)live,
+                 (unsigned)sf1_keyitems[k].flag);
+        } else {
+            ok++;
+        }
+    }
+    kf_tries++;
+    if (ok + mis == 0) {   /* the episode setup's table is not readable yet: try again at the next level instance */
+        if (kf_tries <= 3) wlog("story: key-item table not readable yet (%u items unread): checked again at the next level", unread);
+        return;
+    }
+    for (unsigned j = 0; j < SF1_BYTES; j++) kf_bad[j] = bad[j];
+    kf_ok = ok, kf_mis = mis, kf_unread = unread, kf_checked = 1;
+    wlog("story: key-item flags of every episode checked against the live table: %u match (mirrored), %u differ, %u unreadable (those are not mirrored)", ok, mis, unread);
+}
+
 /* ---- the hook side (game threads): the old value before the store. Only ids that may cross are read (the getter takes the flag lock) */
 static int story_hook_old(uint32_t id)
 {
     if (!g_active || !f_story || in_ops()) return -2;   /* not reported */
     if (!(sf1_index(id) >= 0 || (g_sf_wide && id >= 256 && id < 0x10000))) return -3;   /* reported for the log only */
+    if (kf_blocked(id)) return -3;   /* sync022: a key-item flag the live table did not confirm */
     int old = flag_get(id);
     if (old < 0) SS.getter_refused++;
     SS.hooked++;
@@ -230,6 +285,7 @@ static void story_bind(void)
 {
     sf1_init(&SF, bound_role == W1_HOST ? SF1_HOST : SF1_GUEST);
     SF.wide = g_sf_wide;
+    SF.objon = f_sfobj;
     w1_set_flag_raw(&N.w, 1);
     npcs = npend = 0;
 }
@@ -251,6 +307,7 @@ static void story_epoch(uint32_t now)
     if (ep == 0xFFFFFFFFu) return;
     if (!SF.epoch_valid || SF.epoch != ep) {
         SF.wide = g_sf_wide;
+        keyflag_check();   /* sync022: once, when the episode setup's table is readable */
         sf1_epoch(&SF, ep, now);
         npcs = npend = 0;
         int placed = own_placed();
@@ -268,7 +325,36 @@ static void story_epoch(uint32_t now)
 }
 
 /* drain: an own change of the engine (old -1 = unknown, -3 = not crossing: logged only) */
-static void story_local(uint32_t id, int old, int32_t value)
+/* sync022 (sfobj1.h): the owner of an object-group flag: the object of the list +0xBC whose +0xF18 range (FUN_0067DB80: +0xF18 + idx, idx 0..3) holds the id */
+static struct { unsigned passed, refused, sent, why[SFO_N]; } SO;
+static struct { uint32_t id, ret, ret2, cls; int why, value; } so_last[8];
+static unsigned so_nlast;
+static int so_owner(uint32_t id, uint32_t *cls)
+{
+    uint32_t sa = sarrange();
+    if (!sa) return 0;
+    unsigned n = wh_list_count(&MEM, sa, WH_LIST_OBJECTS);
+    for (unsigned i = 0; i < n; i++) {
+        wh_entry e;
+        if (!wh_list_at(&MEM, sa, WH_LIST_OBJECTS, i, &e) || !e.unit) continue;
+        int32_t f = (int32_t)rd32(e.unit + 0xF18u);
+        if (f >= 0 && id >= (uint32_t)f && id - (uint32_t)f < 4u) {
+            *cls = wh_unit_class(&MEM, e.unit);
+            return 1;
+        }
+    }
+    return 0;
+}
+static int so_site_ok(uint32_t ret)   /* the 5 bytes before the return address are `call 0x721DE0` (our detour sits at its entry, not at the call sites) */
+{
+    uint8_t b[5];
+    if (!MEM.read(MEM.user, ret - 5, b, 5) || b[0] != 0xE8) return 0;
+    int32_t rel;
+    memcpy(&rel, b + 1, 4);
+    return ret + (uint32_t)rel == 0x721DE0u;
+}
+
+static void story_local(uint32_t id, int old, int32_t value, uint32_t ret, uint32_t ret2, int have2)
 {
     if (old == -3) {
         if (++sf_logged_low <= 200) wlog("scenario flag %u = %d (local, not mirrored)", id, value);
@@ -276,8 +362,24 @@ static void story_local(uint32_t id, int old, int32_t value)
     }
     if (!story_on() || old == -2) return;
     SS.local++;
-    int why = 0;
-    int d = sf1_local(&SF, id, old, value, cs_now(bound_cs), &why);
+    int why = 0, pass = 0;
+    if (sf1_is_obj(id)) {   /* sync022: the double filter (the id set is sf1's object group; here the caller and the owner) */
+        uint32_t cls = 0;
+        int have_owner = so_owner(id, &cls);
+        int f = sfo_filter(ret, ret2, have2, cls, have_owner);
+        if (f == SFO_PASS && !so_site_ok(ret)) f = SFO_NOT_OBJECT_PATH;
+        pass = f == SFO_PASS && f_sfobj;
+        SF.objon = f_sfobj;
+        if (f >= 0 && f < SFO_N) SO.why[f]++;
+        if (pass) SO.passed++;
+        else SO.refused++;
+        so_last[so_nlast % 8].id = id, so_last[so_nlast % 8].ret = ret, so_last[so_nlast % 8].ret2 = ret2, so_last[so_nlast % 8].cls = cls, so_last[so_nlast % 8].why = f_sfobj ? f : -1,
+        so_last[so_nlast % 8].value = value, so_nlast++;
+        if (SO.passed + SO.refused <= 300)
+            wlog("story: object flag %u %d -> %d stored by %08x (caller of the setter %08x%s), owner %s %08x: %s%s", id, old, value, (unsigned)ret, (unsigned)ret2, have2 ? "" : " unread",
+                 have_owner ? "class" : "none", (unsigned)cls, f == SFO_PASS ? "an object path" : "REFUSED: ", f == SFO_PASS ? (f_sfobj ? "" : " (sfobj off: not crossed)") : sfo_why[f]);
+    }
+    int d = sf1_local_obj(&SF, id, old, value, cs_now(bound_cs), pass, &why);
     if (d == SF1_SEND) {
         if (SF.role == SF1_HOST) {
             if (w1_local_flag(&N.w, id, value)) S.flags_sent++, SS.sent++;
@@ -318,6 +420,10 @@ static void hitx_rx(const uint8_t *b, unsigned len);                  /* hitx1_g
 static void watchcam_rx(const uint8_t *b, unsigned len);              /* watch1_game.inc (rev1 live 14) */
 static void motion_rx(const uint8_t *b, unsigned len);                /* motion1_game.inc (rev1 live 14) */
 static void bag_rx(const uint8_t *b, unsigned len);                   /* bag1_game.inc (rev1 live 14) */
+static void lever_rx(const uint8_t *b, unsigned len);                 /* objsync1_game.inc (sync022 W1) */
+static void pmot_rx(const uint8_t *b, unsigned len);                  /* pmot1_game.inc (sync022 P5-P10) */
+static void cut_rx(const uint8_t *b, unsigned len);                   /* cut1_game.inc (sync022 movies) */
+static void lid_rx(const uint8_t *b, unsigned len);                   /* lid1_game.inc (sync022 W2 / W3) */
 
 static void op_ext(void *u, unsigned sub, const uint8_t *b, unsigned len)
 {
@@ -352,6 +458,22 @@ static void op_ext(void *u, unsigned sub, const uint8_t *b, unsigned len)
     }
     if (sub == CP_W1_BAG) {   /* rev1 live 14: the partner's guns for his puppet here (bag1.h, bag1_game.inc) */
         if (bound) bag_rx(b, len);
+        return;
+    }
+    if (sub == CP_W1_OBJ) {   /* sync022 W1: a lever the partner pulled (objsync1.h, objsync1_game.inc) */
+        if (bound) lever_rx(b, len);
+        return;
+    }
+    if (sub == CP_W1_PMOT) {   /* sync022: the partner's interaction motion for his puppet here (pmot1.h, pmot1_game.inc) */
+        if (bound) pmot_rx(b, len);
+        return;
+    }
+    if (sub == CP_W1_CUT) {   /* sync022: the partner's movie READY / skip vote (cut1.h, cut1_game.inc) */
+        if (bound) cut_rx(b, len);
+        return;
+    }
+    if (sub == CP_W1_LID) {   /* sync022: the partner opened / closed a box: its copy here shows the motion (lid1.h, lid1_game.inc) */
+        if (bound) lid_rx(b, len);
         return;
     }
     if (!story_on()) return;
@@ -525,9 +647,12 @@ static void piece_pass(uint32_t now)
 }
 
 /* after the model's frame, while PLAYING */
+static uint32_t kf_last_ms;
 static void story_pass(uint32_t now)
 {
     if (!story_on() || !SF.epoch_valid) return;
+    SF.objon = f_sfobj;
+    if (!kf_checked && (int32_t)(now - kf_last_ms) >= 2000) kf_last_ms = now, keyflag_check();   /* sync022: until the table is readable */
     if (SF.role == SF1_HOST && sf1_digest_due(&SF, now)) {
         uint8_t b[W1_EXT_MAX];
         unsigned n = H.state[WH_C_FLAGGET] == WH_ON ? sf1_digest_build(&SF, flag_get0, NULL, b, sizeof b) : 0;
@@ -557,9 +682,18 @@ static void story_status(char *out, int size)
     sf1_summary(&SF, sum, sizeof sum);
     snprintf(out, (size_t)size,
              "story mirror %s (world set story 0|1; wide %d), flag getter %s, rate here %d:\n  %s\n  glue: hooked %u (getter refused %u), own changes %u, stream sent %u, proposals %u; applied: stream %u, proposals %u, digest %u, held %u; proposals refused %u; "
-             "rate sent %u written %u (unreadable %u); pieces seen %u announced %u applied %u (pending %u, expired %u, refused %u)",
+             "rate sent %u written %u (unreadable %u); pieces seen %u announced %u applied %u (pending %u, expired %u, refused %u); key-item flags (sync022): %s, %u match, %u differ, %u unreadable",
              f_story ? "ON" : "off", g_sf_wide, wh_state_name(H.state[WH_C_FLAGGET]), rate_read(), sum, SS.hooked, SS.getter_refused, SS.local, SS.sent, SS.props, SS.applied_stream, SS.applied_prop, SS.applied_digest, SS.held_applied,
-             SS.refused_prop, SS.rate_sent, SS.rate_written, SS.rate_unreadable, SS.pieces_seen, SS.pieces_announced, SS.pieces_applied, SS.pieces_pending, SS.pieces_expired, SS.pieces_refused);
+             SS.refused_prop, SS.rate_sent, SS.rate_written, SS.rate_unreadable, SS.pieces_seen, SS.pieces_announced, SS.pieces_applied, SS.pieces_pending, SS.pieces_expired, SS.pieces_refused,
+             kf_checked ? "checked" : "NOT checked yet (not mirrored)", kf_ok, kf_mis, kf_unread);
+    size_t oo = strlen(out);
+    oo += (size_t)snprintf(out + oo, (size_t)size - oo, "\n  object flags (sfobj %d): stores passed %u, refused %u (not an object path %u, scan %u, setter caller unread %u, hand print %u, lever %u, enemy %u)",
+                           f_sfobj, SO.passed, SO.refused, SO.why[SFO_NOT_OBJECT_PATH], SO.why[SFO_SCAN], SO.why[SFO_NOSTACK], SO.why[SFO_HANDPRINT], SO.why[SFO_LEVER], SO.why[SFO_ENEMY]);
+    for (unsigned k = so_nlast > 8 ? so_nlast - 8 : 0; k < so_nlast && oo + 120 < (size_t)size; k++) {
+        const unsigned j = k % 8;
+        oo += (size_t)snprintf(out + oo, (size_t)size - oo, "\n    flag %u = %d by %08x / %08x class %08x: %s", so_last[j].id, so_last[j].value, (unsigned)so_last[j].ret, (unsigned)so_last[j].ret2, (unsigned)so_last[j].cls,
+                               so_last[j].why < 0 ? "sfobj off" : so_last[j].why == SFO_PASS ? "crossed" : sfo_why[so_last[j].why]);
+    }
     size_t o = strlen(out);
     for (unsigned p = 0; p < npcs && o + 120 < (size_t)size; p++) {
         uint32_t unit = 0;

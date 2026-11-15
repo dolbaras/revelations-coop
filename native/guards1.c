@@ -35,16 +35,21 @@ static void hex_(char *out, size_t size, const uint8_t *b, int n)
         out[size - 1] = 0;
 }
 
-/* mov eax,[esp+4] ; cmp eax,[cell] ; sete al ; movzx eax,al ; ret 4  (thiscall with one stack argument, the slot; eax is the result, ecx is not touched) */
+/* fix022: the cell is a MASK of the slots that may pick things up (bit n = slot n): the own slot's bit in a network game, both bits in a split screen (the second human picks up too).
+ *   mov eax,[esp+4] ; cmp eax,31 ; ja no ; bt [cell],eax ; setc al ; movzx eax,al ; ret 4 ; no: xor eax,eax ; ret 4
+ * (thiscall with one stack argument, the slot; eax is the result, ecx is not touched) */
 int g1_stub_build(uint8_t *out, uint32_t cell)
 {
-    static const uint8_t head[] = {0x8B, 0x44, 0x24, 0x04, 0x3B, 0x05};
-    static const uint8_t tail[] = {0x0F, 0x94, 0xC0, 0x0F, 0xB6, 0xC0, 0xC2, 0x04, 0x00};
+    static const uint8_t head[] = {0x8B, 0x44, 0x24, 0x04, 0x83, 0xF8, 0x1F, 0x77, 0x10, 0x0F, 0xA3, 0x05};
+    static const uint8_t tail[] = {0x0F, 0x92, 0xC0, 0x0F, 0xB6, 0xC0, 0xC2, 0x04, 0x00, 0x31, 0xC0, 0xC2, 0x04, 0x00};
     memcpy(out, head, sizeof head);
     memcpy(out + sizeof head, &cell, 4);
     memcpy(out + sizeof head + 4, tail, sizeof tail);
     return (int)(sizeof head + 4 + sizeof tail);
 }
+
+/* the cell value for an own slot and the extra slots */
+static uint32_t cell_value(const g1_t *g, uint32_t own) { return (own < 32 ? 1u << own : 0u) | g->extra; }
 
 void g1_jmp_build(uint8_t out[5], uint32_t from, uint32_t to)
 {
@@ -155,11 +160,12 @@ static int pick_stub_ready(g1_t *g, const g1_mem *m, uint32_t own)
     uint8_t code[32];
     uint32_t cell = blk + 32;
     int n = g1_stub_build(code, cell);
-    if (!m->write(m->user, blk, code, (uint32_t)n) || !m->write(m->user, cell, &own, 4)) {
+    uint32_t cv = cell_value(g, own);
+    if (!m->write(m->user, blk, code, (uint32_t)n) || !m->write(m->user, cell, &cv, 4)) {
         refuse(g, m, G1_PICK, G1_ERROR, "cannot fill the stub");
         return 0;
     }
-    g->stub = blk, g->cell = cell, g->own = own;
+    g->stub = blk, g->cell = cell, g->own = own, g->cellv = cv;
     return 1;
 }
 
@@ -186,11 +192,12 @@ static int pick_apply(g1_t *g, const g1_mem *m, uint32_t own)
     }
     if (!pick_stub_ready(g, m, own))
         return 0;
-    if (!m->write(m->user, g->cell, &own, 4)) {   /* the cell first, then the jump */
+    uint32_t cv = cell_value(g, own);
+    if (!m->write(m->user, g->cell, &cv, 4)) {   /* the cell first, then the jump */
         refuse(g, m, G1_PICK, G1_ERROR, "cannot write the own slot cell");
         return 0;
     }
-    g->own = own;
+    g->own = own, g->cellv = cv;
     uint8_t jmp[5];
     g1_jmp_build(jmp, G1_PICK_ADDR, g->stub);
     if (!m->write(m->user, G1_PICK_ADDR, jmp, 5)) {
@@ -198,7 +205,7 @@ static int pick_apply(g1_t *g, const g1_mem *m, uint32_t own)
         return 0;
     }
     g->state[G1_PICK] = G1_ON, g->why[G1_PICK][0] = 0, g->applies[G1_PICK]++;
-    logf_(m, "guards: pickup patch written: %08x jmp %08x (slot == own slot %u instead of slot == 0)", G1_PICK_ADDR, g->stub, (unsigned)own);
+    logf_(m, "guards: pickup patch written: %08x jmp %08x (slot in the mask %08x [own slot %u] instead of slot == 0)", G1_PICK_ADDR, g->stub, (unsigned)cv, (unsigned)own);
     return 1;
 }
 
@@ -237,12 +244,22 @@ int g1_revert(g1_t *g, const g1_mem *m, int which)
 
 void g1_set_own(g1_t *g, const g1_mem *m, uint32_t own)
 {
-    if (g->state[G1_PICK] != G1_ON || !g->cell || own == g->own)
+    uint32_t cv = cell_value(g, own);
+    if (g->state[G1_PICK] != G1_ON || !g->cell || (own == g->own && cv == g->cellv))
         return;
-    if (m->write(m->user, g->cell, &own, 4)) {
-        logf_(m, "guards: pickup own slot %u -> %u", (unsigned)g->own, (unsigned)own);
-        g->own = own;
+    if (m->write(m->user, g->cell, &cv, 4)) {
+        logf_(m, "guards: pickup own slot %u -> %u (mask %08x -> %08x)", (unsigned)g->own, (unsigned)own, (unsigned)g->cellv, (unsigned)cv);
+        g->own = own, g->cellv = cv;
     }
+}
+
+/* fix022: more slots that may pick things up (the split screen's second human): the bits are added to the own slot's; 0 = none */
+void g1_set_extra(g1_t *g, const g1_mem *m, uint32_t extra)
+{
+    if (extra == g->extra)
+        return;
+    g->extra = extra;
+    g1_set_own(g, m, g->own);
 }
 
 int g1_probe(const g1_t *g, const g1_mem *m, int which, char *out, size_t size)

@@ -1,4 +1,4 @@
-/* The pickup stub of native/guards1.c EXECUTED as 32-bit code (the game is a 32-bit process): thiscall with one stack argument, the callee pops it, eax = slot == [cell], ecx untouched.
+/* The pickup stub of native/guards1.c EXECUTED as 32-bit code (the game is a 32-bit process): thiscall with one stack argument, the callee pops it, eax = bit <slot> of the mask [cell] (fix022), ecx untouched.
  * Also a jump placed over a function with the same prologue and a call through it. Build: sh tests/build.sh (target x86-windows-gnu). */
 #include <stdio.h>
 #include <stdint.h>
@@ -37,19 +37,36 @@ int main(void)
     uint32_t *cell = (uint32_t *)(blk + 32);
     CHECK(blk != NULL, "executable block");
     int n = g1_stub_build(blk, (uint32_t)(uintptr_t)cell);
-    CHECK(n == 19, "stub length 19");
+    CHECK(n == 30, "stub length 30");
     own_fn f = (own_fn)(void *)blk;
     unsigned dl, ecx;
     for (unsigned own = 0; own < 2; own++) {
-        *cell = own;
+        *cell = 1u << own;
         int ok = 1;
         for (unsigned slot = 0; slot < 4; slot++) {
             unsigned r = call_checked(blk, 0x12345678, slot, &dl, &ecx);
             if (r != (slot == own ? 1u : 0u) || dl != 0 || ecx != 0x12345678) ok = 0;
         }
-        CHECK(ok, own ? "stub, own slot 1: true only for slot 1, argument popped, ecx kept" : "stub, own slot 0: true only for slot 0 (the stock answer), argument popped, ecx kept");
+        CHECK(ok, own ? "stub, mask 2 (own slot 1): true only for slot 1, argument popped, ecx kept" : "stub, mask 1 (own slot 0): true only for slot 0 (the stock answer), argument popped, ecx kept");
     }
-    *cell = 1;
+    *cell = 3;   /* the split screen: both humans pick up */
+    {
+        int ok = 1;
+        for (unsigned slot = 0; slot < 4; slot++) {
+            unsigned r = call_checked(blk, 0x12345678, slot, &dl, &ecx);
+            if (r != (slot < 2 ? 1u : 0u) || dl != 0 || ecx != 0x12345678) ok = 0;
+        }
+        CHECK(ok, "stub, mask 3 (the split screen): true for slots 0 and 1 only, argument popped, ecx kept");
+        ok = 1;
+        unsigned odd[] = {31u, 32u, 33u, 0x80000000u, 0xFFFFFFFFu};
+        *cell = 0xFFFFFFFFu;
+        for (unsigned k = 0; k < 5; k++) {
+            unsigned r = call_checked(blk, 0x12345678, odd[k], &dl, &ecx);
+            if (r != (odd[k] == 31u ? 1u : 0u) || dl != 0 || ecx != 0x12345678) ok = 0;
+        }
+        CHECK(ok, "stub: a slot above 31 is refused (no shift beyond the dword), the argument is popped all the same");
+    }
+    *cell = 2;
     CHECK(f((void *)1, 1) == 1 && f((void *)1, 0) == 0, "stub through a C thiscall pointer");
 
     /* a function standing where 0x881DF0 stands: the same 9 first bytes, then `ret 4` (never reached after the jump) */
@@ -59,7 +76,7 @@ int main(void)
     uint8_t jmp[5];
     g1_jmp_build(jmp, (uint32_t)(uintptr_t)fn, (uint32_t)(uintptr_t)blk);
     memcpy(fn, jmp, 5);
-    *cell = 1;
+    *cell = 2;
     CHECK(call_checked(fn, 7, 1, &dl, &ecx) == 1 && dl == 0, "a function patched with `jmp stub` answers slot == own slot (1)");
     CHECK(call_checked(fn, 7, 0, &dl, &ecx) == 0 && dl == 0, "... and false for slot 0");
     printf("%d checks, %d failed\n", checks, fails);

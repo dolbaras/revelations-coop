@@ -824,6 +824,12 @@ static void strip_show(int kind, const char *name, unsigned ms)
     g_strip_until = (GetTickCount() + ms) | 1;
 }
 
+/* sync022 (cut1_game.inc, any thread): a movie strip with the partner's name, shown by the next session pass: 1 = waiting for the partner's movie, 2 = the partner wants
+ * to skip, 3 = this player wants to skip and waits for the partner */
+static volatile int g_cut_kind;
+static volatile unsigned g_cut_ms;
+void menu_strip_cut(int kind, unsigned ms) { g_cut_ms = ms, g_cut_kind = kind; }
+
 /* once per pass: what the network session means for the title menu and the levels: the guest hold, the strip, the automatic end at the title, the guest's
  * return to the title after the host is gone. Returns the strip to draw (L1G_NONE = none) in *st. */
 /* allep1: the strip at an end of co-op by RB_EK_* (rolebarrier1.h): 1 = the campaign is over, 3 = a part that is no section; local = this PC passed it too */
@@ -848,6 +854,11 @@ static void session_watch(int idle, l1_strip_in *st)
     int insession = running && in.started;   /* also a host whose partner has left (the link waits again): back at the title the session ends all the same */
     int level = level_present();
     if (insession && level) g_played = 1;
+    if (g_cut_kind) {   /* sync022: a movie strip asked by cut1_game.inc */
+        int ck = g_cut_kind;
+        g_cut_kind = 0;
+        strip_show(ck == 1 ? L1G_CUT_WAIT : ck == 2 ? L1G_CUT_PARTNER_SKIP : L1G_CUT_SELF_SKIP, in.last_peer[0] ? in.last_peer : in.peer_name, g_cut_ms ? g_cut_ms : 600);
+    }
     if (!insession) g_played = 0, g_title_idle_since = 0, g_role_seen = -1;
     /* rev1 live 16: the host's title Continue of a co-op save put the save's roles back (lk_force_roles): the line on both PCs, this PC's character named */
     if (started && !g_played && (in.role == 0 || in.role == 1)) {

@@ -653,6 +653,7 @@ static void teardown(const char *why)
     if (mx.on)
         menu_leave(why);
     testmode_pad_merge(0);
+    capture_set_interact(0, 0);
     hud_destroy(why);
     restore_views();
     if (active)
@@ -724,6 +725,7 @@ void split_frame(void)
     /* The demo scheduler (cutscenes) and the title put their own camera object on viewport 0 (0x891E07 keeps the old one and restores it afterwards); the pause menu, the
      * game over screen and the item menu are GUI units the engine draws in EVERY viewport (squeezed into both halves). Whole view meanwhile; the split comes back by itself. */
     if (gui || cutscene || solo) {
+        capture_set_interact(0, 0);   /* fix022: whole view (menu, cutscene, solo part): the object table of the second human is not kept */
         if (!suspended) {
             suspended = gui ? SPLIT_SUSP_GUI : cutscene ? SPLIT_SUSP_CAMERA : SPLIT_SUSP_SOLO;
             n_susp++;
@@ -742,6 +744,7 @@ void split_frame(void)
         suspended = 0;
         r1_log("split: gameplay view again, split resumes");
     }
+    capture_set_interact(1, VP_SECOND);   /* fix022 (interact1.h): both humans are local and in play: the second one operates the objects he is nearest to */
     int fix = 0;
     if (rd32(v2 + 4) != mgr1)
         wr32(v2 + 4, mgr1), fix++;

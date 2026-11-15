@@ -521,6 +521,18 @@ static const char *const T[L1T_COUNT][L1_LANGS] = {
                           "Seu salvamento continua em uma parte que o cooperativo em rede não pode compartilhar. Escolha “$3”, ou “$2” com outro salvamento.",
                           "您的存档接下来是网络协力无法共享的部分。请选择“$3”，或用其他存档选择“$2”。",
                           "您的存檔接下來是網路協力無法共享的部分。請選擇「$3」，或用其他存檔選擇「$2」。"},
+    /* sync022: the cutscene skip vote (no stock text of the game says it: no "skip" string in any *_eng.gmd) */
+    [L1T_CUT_PARTNER_SKIP] = {"%s wants to skip the cutscene. Skip it as well to skip it together.", "%s veut passer la cinématique. Passez-la aussi pour la passer ensemble.",
+                              "%s vuole saltare la scena. Saltala anche tu per saltarla insieme.",
+                              "%s möchte die Zwischensequenz überspringen. Überspringen Sie sie ebenfalls, um sie gemeinsam zu überspringen.",
+                              "%s quiere saltar la cinemática. Sáltala tú también para saltarla juntos.", "%sがムービーのスキップを希望しています。あなたもスキップすると一緒にスキップします。",
+                              "%s хочет пропустить заставку. Пропустите её тоже, чтобы пропустить вместе.", "%s chce pominąć przerywnik. Pomiń go również, aby pominąć go razem.",
+                              "%s wil de tussenfilm overslaan. Sla hem ook over om hem samen over te slaan.", "%s quer saltar a cena. Salte-a também para a saltarem juntos.",
+                              "%s quer pular a cena. Pule-a também para pularem juntos.", "%s想跳过过场动画。您也选择跳过即可一起跳过。", "%s想跳過過場動畫。您也選擇跳過即可一起跳過。"},
+    [L1T_CUT_SELF_SKIP] = {"Waiting for %s to skip as well...", "En attente que %s passe aussi la cinématique...", "In attesa che anche %s salti la scena...",
+                           "Warten, bis %s ebenfalls überspringt...", "Esperando a que %s también la salte...", "%sのスキップを待っています...", "Ждём, когда %s тоже пропустит...",
+                           "Czekanie, aż %s również pominie...", "Wachten tot %s ook overslaat...", "À espera de que %s também salte...", "Esperando %s pular também...",
+                           "正在等待%s也选择跳过...", "正在等待%s也選擇跳過..."},
 };
 
 /* ---- the game's own texts (Coop_<lang>.gmd) ---- */
