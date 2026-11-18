@@ -177,15 +177,20 @@ GitHub never reports a pre-release as "latest", so a pre-release is never instal
 | First full release | `0.1.0` (tag `v0.1.0`, NOT a pre-release) | higher than any `0.0.N`, so every tester who installed a pre-release is updated by the shortcut at the next start |
 | Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release) | published 2026-11-12 from public commit `58a0d02`: network co-op over all episodes (no setting), give to partner, the Genesis for the second player, HUNK in 2-2, the split aim fix; `R1_VERSION` in `native/r1.h` is `0.2.0` |
 | Fix release | `0.2.1` (tag `v0.2.1`, NOT a pre-release) | published 2026-11-13 from public commit `de5e123`: the zone hand-over of an enemy between the PCs, the partner's real guns on the puppet, the guest's start kit, the start of the shared world with the own level, the save panel, the guns of the host's save for an unarmed guest, the fall-out guard of enemy copies (`rguard`); `R1_VERSION` in `native/r1.h` is `0.2.1` |
-| Fix release | `0.2.2` (tag `v0.2.2`, NOT a pre-release, Latest) | published 2026-11-15 from public commit `5f5fc9b`: split screen: the second player's own action button (doors, items, every object); network: the key-item flags of every episode, the object flags of Episodes 2-12, levers, the partner's door / pickup motions, lockers and weapon boxes as a picture, movies start together and are skipped only by both players, the stale stock freeze of the partner's character released; `R1_VERSION` in `native/r1.h` is `0.2.2` |
-| Fix release | `0.2.3` (tag `v0.2.3`, NOT a pre-release) | PREPARED 2026-11-18, NOT published (needs the owner's word): split screen: the second player's shots follow his own camera (`native/aimray1.h`), movies / in-engine cutscenes in the whole view (`native/split.c` scene rule), the exe+1396 guard in the split screen; `R1_VERSION` in `native/r1.h` is `0.2.3` |
+| Fix release | `0.2.2` (tag `v0.2.2`, NOT a pre-release) | published 2026-11-15 from public commit `5f5fc9b`: split screen: the second player's own action button (doors, items, every object); network: the key-item flags of every episode, the object flags of Episodes 2-12, levers, the partner's door / pickup motions, lockers and weapon boxes as a picture, movies start together and are skipped only by both players, the stale stock freeze of the partner's character released; `R1_VERSION` in `native/r1.h` is `0.2.2` |
+| Fix release | `0.2.3` (tag `v0.2.3`, NOT a pre-release, Latest) | published 2026-11-18 from public commit `ca6112d`: split screen: the second player's shots follow his own camera (`native/aimray1.h`), movies / in-engine cutscenes in the whole view (`native/split.c` scene rule), the exe+1396 guard in the split screen; `R1_VERSION` in `native/r1.h` is `0.2.3` |
 
 Rules: never publish a full release with a version below `0.1.0`; never mark `v0.1.0` or higher as a pre-release while it should reach players; no "RC" wording anywhere (title,
 notes, tag message, README). Both players need the same package: the network hello carries the mod version (`R1_VERSION`) and refuses another one with a reason; a release that
 changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
 
-## 0.2.3 (fix release; prepared 2026-11-18, not published)
+## 0.2.3 (fix release; published 2026-11-18)
 
+- **Published:** tag `v0.2.3` (full release, Latest) on public commit `ca6112d`, 2026-11-18. Assets: `revelations-coop-0.2.3.zip` sha256 `f0916859...`, `revelations-coop-setup-0.2.3.exe` sha256 `0794e716...`, `dinput8.dll` in the zip `7677b4bd...` (the DLL of the final regression).
+- **Checks after the publication (2026-11-18):**
+  - The release is neither a draft nor a pre-release, and each asset's `digest` equals the local SHA-256. `releases/latest` = `v0.2.3`.
+  - `tests\test_installer.ps1 -Online`: 286 of 286.
+  - The real update through the real feed (no `-Feed`) on a stand-in folder: the published 0.2.2 launcher logged `installed 0.2.2, latest v0.2.3`, `downloaded 786436 bytes`, `checksum ok F0916859...`, `installer exit 0`; `version.txt` read 0.2.3 and the installed `dinput8.dll` was `7677b4bd...`. A second start installed nothing. The uninstall put the stand-in back byte for byte.
 - **Number:** `0.2.3`, split-screen fixes of a player's report (2026-11-17): the second player's shots missed (his shot ray was built from the first player's camera:
   `native/aimray1.h`, the three loads of the camera root in FUN_005EBC10 / FUN_005EE350 / FUN_005EFAC0 call a stub that hands his weapons a stand-in root with manager 1 and
   viewport 2's size) and cutscenes stayed split (`native/split.c` scene rule: the movie player's state, a scene-manager slot running a `demo\` resource together with the
