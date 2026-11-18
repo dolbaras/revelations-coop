@@ -39,7 +39,8 @@ typedef struct {
 
 enum { SPLIT_SIDE_BY_SIDE = 0, SPLIT_TOP_BOTTOM = 1 };
 enum { SPLIT_BLOCK_NONE = 0, SPLIT_BLOCK_RAID = 1 };
-enum { SPLIT_SUSP_NONE = 0, SPLIT_SUSP_CAMERA = 1 /* cutscene / title camera on viewport 0 */, SPLIT_SUSP_GUI = 2 /* pause, game over, item menu */, SPLIT_SUSP_SOLO = 3 /* the other human's character does not exist (a solo part of the story) */ };
+enum { SPLIT_SUSP_NONE = 0, SPLIT_SUSP_CAMERA = 1 /* cutscene / title camera on viewport 0 */, SPLIT_SUSP_GUI = 2 /* pause, game over, item menu */, SPLIT_SUSP_SOLO = 3 /* the other human's character does not exist (a solo part of the story) */,
+       SPLIT_SUSP_SCENE = 4 /* fix023: the engine runs a movie or an in-engine cutscene (manager 0 stays on viewport 0) */ };
 
 typedef struct {
     int requested;         /* split_enable(1) was called */
@@ -74,5 +75,6 @@ void split_status_text(char *out, int size);
 
 /* tests: replace the address table before split_init (offline harness) */
 void split_test_set_addrs(const split_addr_t *a);
+void split_test_set_scene_cells(unsigned fsm_cell, unsigned pcs_cell);   /* fix023: the cells of sFsmManager / sPcsManager (offline harness) */
 
 #endif

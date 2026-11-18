@@ -20,19 +20,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "r1.h"
 #include "capture.h"
 #include "split.h"
 #include "solo1.h"
 #include "mapptn1.h"
+#include "aimray1.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
 
 static split_addr_t AD = {0x11E00B8u, 0x1169394u, 0x1169108u, 0x1169398u, 0x1169120u, 0x11E0184u, 0x7AFFB0u, 0x7AFFE0u, 0x7B06D0u, 0x7BA440u, 0x7BA470u, 0x7BA4F0u, 0x9B5280u, 0x11859D0u};
+static int harness;   /* split_test_set_addrs was called: fake memory, no code is written (the aim ray's decision still runs) */
 
-void split_test_set_addrs(const split_addr_t *a) { AD = *a; }
+void split_test_set_addrs(const split_addr_t *a) { AD = *a; harness = 1; }
 
 #define VP_STRIDE 0x190u
 #define VP_BASE 0x30u
@@ -647,9 +650,176 @@ static void menu_frame(int gui)
         menu_leave("no menu opened");
 }
 
+/* ====================================================================== the second human's aim ray (fix023, aimray1.h) ====================================================================== */
+/* Every human's shot ray was made from camera manager 0 (the first human's view): the second human's shots went where the first human looked. The three loads of the
+ * sCamera pointer in the aim functions call a stub that hands the second human's weapons a stand-in camera root (manager 1, viewport 2's size) while the split's
+ * gameplay view is up. The stub bytes are written once, on the game thread between two frames (no weapon code runs then), at the first gameplay pass of a split:
+ * a game without a split keeps the stock bytes. */
+static int am_r(void *u, uint32_t a, void *out, uint32_t n) { (void)u; return r1_safe_read((void *)(size_t)a, out, n); }
+static int am_w(void *u, uint32_t a, const void *p, uint32_t n)
+{
+    (void)u;
+    DWORD old;
+    if (!VirtualProtect((void *)(size_t)a, n, PAGE_EXECUTE_READWRITE, &old))
+        return 0;
+    memcpy((void *)(size_t)a, p, n);
+    VirtualProtect((void *)(size_t)a, n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void *)(size_t)a, n);
+    return 1;
+}
+static uint32_t am_alloc(void *u, uint32_t n)
+{
+    (void)u;
+    static uint8_t *blk;
+    static uint32_t used;
+    if (!blk && !(blk = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)))
+        return 0;
+    if (used + n > 4096)
+        return 0;
+    uint32_t a = (uint32_t)(size_t)(blk + used);
+    used += (n + 15u) & ~15u;
+    return a;
+}
+static void am_log(void *u, const char *line) { (void)u; r1_log("%s", line); }
+static const ar1_mem AM = {am_r, am_w, am_alloc, am_log, NULL};
+static int aim_tried;   /* the stub bytes were attempted once (a refusal is logged with its reason and not retried every pass) */
+
+static void aim_view(int on, unsigned r, unsigned mgr1)
+{
+    if (!on) {
+        ar1_set_view(&ar1_g, 0, 0, 0, 0, 0);
+        return;
+    }
+    unsigned v2 = vp_addr(r, VP_SECOND);
+    int w = (int)rd32(v2 + 0x20) - (int)rd32(v2 + 0x18), h = (int)rd32(v2 + 0x24) - (int)rd32(v2 + 0x1C);
+    ar1_set_view(&ar1_g, 1, mgr1, capture_own_effective(), w, h);
+    if (!aim_tried && !harness && ar1_g.enabled) {
+        aim_tried = 1;
+        ar1_apply(&ar1_g, &AM, (uint32_t)(size_t)ar1_choose);
+    }
+}
+
+/* ====================================================================== the engine's scene state (fix023) ====================================================================== */
+/* Player report 2026-11-17: "the cutscenes do not appear in full screen but remain in split-screen". The old rule (viewport 0 shows another camera than manager 0)
+ * never fired in any lab log; the whole views of the lab came from the GUI rule (pause / game over managers running during loads and level-start movies). So the
+ * split also asks the engine what runs:
+ *   MOVIE  the movie player (sFsmManager [0x1169114], its state +0x2040: 2 delay, 3 preparing, 4 first frames, 5 playing, 6 / 7 the end; cut1.h)
+ *   SCENE  an in-engine cutscene: a slot of the scene manager (sPcsManager [0x116A34C], 16 slots: unit +0x284 + 4 i, ended byte +0x1EC + i) running a resource
+ *          whose name starts with "demo\" (FsmStartPcsDemo of the story; "game\scene\..." scripts are background loops: rain, waves, draw-off)
+ *   CAMERA manager 0's current camera behaviour (list [+0xE4], index +0xCC) is an event camera (cPcsCamera / cMotionCamera)
+ * scene_mask (LAB `split scenerule <mask>`): 1 MOVIE, 2 SCENE alone, 4 CAMERA alone, 8 SCENE and CAMERA together. A cutscene slot counts for at most
+ * scene_demo_cap_ms after it started (a "demo\" resource that keeps running while the game is played cannot hold the whole view for good); the whole view
+ * ends scene_hold_ms after the last signal (back-to-back scenes, a skip with START: no flicker, no stuck view). */
+static unsigned sc_fsm_cell = 0x1169114u, sc_pcs_cell = 0x116A34Cu;
+static unsigned scene_mask = 0x9, scene_hold_ms = 400, scene_demo_cap_ms = 240000;
+static struct { unsigned unit; int demo; DWORD t0; char name[48]; } sc_slot[16];
+static DWORD sc_last_seen;
+static int sc_on;
+static unsigned n_sc_movie, n_sc_demo, n_sc_cam, n_sc_capped;
+void split_test_set_scene_cells(unsigned fsm_cell, unsigned pcs_cell) { sc_fsm_cell = fsm_cell, sc_pcs_cell = pcs_cell; }
+
+static int sc_name(unsigned addr, char *out, int size)
+{
+    out[0] = 0;
+    if (addr < 0x10000)
+        return 0;
+    char tmp[64];
+    memset(tmp, 0, sizeof tmp);
+    if (!r1_safe_read((void *)(size_t)addr, tmp, sizeof tmp - 1))
+        return 0;
+    int n = 0;
+    while (n < (int)sizeof tmp - 1 && tmp[n] >= 0x20 && tmp[n] < 0x7F)
+        n++;
+    if (n < 3 || (n < (int)sizeof tmp - 1 && tmp[n] != 0))
+        return 0;
+    snprintf(out, (size_t)size, "%.*s", n, tmp);
+    return 1;
+}
+/* the slot's resource name. FUN_008916E0 0x891868: `lea ecx,[unit+0x30]; push 0; push 0; push res; push record; call 0xA25480`, which stores the resource at
+ * [[unit+0x3C] + 8] (its first 0xD0 entry); the name is inline at res+8 (the barrier hook's '@8', e.g. "demo\d0\11_020_0\11_020_0_main"). Live f23d: the four
+ * running slots of 1-2 read "game\scene\12\12_00\12_00_s200_scannertu...", "...50_70_may...", "demo\d0\12_029_0\12_029_0_main", "demo\d0\12_092_0\12_092_0_main"
+ * (the two demos were armed during gameplay: a running "demo\" slot alone is NOT a cutscene on screen). */
+static int sc_slot_name(unsigned pcs, unsigned i, char *out, int size)
+{
+    unsigned unit = rd32(pcs + 0x284 + 4 * i), arr = unit ? rd32(unit + 0x3C) : 0, res = arr ? rd32(arr + 8) : 0;
+    if (res && sc_name(res + 8, out, size))
+        return 1;
+    snprintf(out, (size_t)size, "? unit %08x res %08x", unit, res);
+    return 0;
+}
+static int sc_is_cutscene_name(const char *n) { return (n[0] == 'd' || n[0] == 'D') && (n[1] == 'e' || n[1] == 'E') && (n[2] == 'm' || n[2] == 'M') && (n[3] == 'o' || n[3] == 'O') && (n[4] == '\\' || n[4] == '/'); }
+
+/* the signals of this pass: bit 1 MOVIE, 2 SCENE, 4 CAMERA; *what = the first running cutscene's name */
+static unsigned scene_signals(unsigned mgr0, const char **what)
+{
+    unsigned s = 0;
+    DWORD now = GetTickCount();
+    unsigned fm = rd32(sc_fsm_cell), mst = fm ? rd32(fm + 0x2040) : 0;
+    if (mst >= 2 && mst <= 7)
+        s |= 1;
+    unsigned pcs = rd32(sc_pcs_cell);
+    for (unsigned i = 0; i < 16; i++) {
+        unsigned u = pcs ? rd32(pcs + 0x284 + 4 * i) : 0;
+        if (!u) {
+            sc_slot[i].unit = 0;
+            continue;
+        }
+        if (u != sc_slot[i].unit) {   /* a new scene in this slot: its name once */
+            sc_slot[i].unit = u, sc_slot[i].t0 = now;
+            sc_slot[i].demo = sc_slot_name(pcs, i, sc_slot[i].name, sizeof sc_slot[i].name) && sc_is_cutscene_name(sc_slot[i].name);
+        }
+        if (sc_slot[i].demo && !rd8(pcs + 0x1EC + i)) {
+            if (now - sc_slot[i].t0 < scene_demo_cap_ms) {
+                if (!(s & 2))
+                    *what = sc_slot[i].name;
+                s |= 2;
+            } else if (sc_slot[i].demo == 1) {
+                sc_slot[i].demo = 2;   /* logged once: it no longer counts */
+                n_sc_capped++;
+                r1_log("split: the cutscene '%s' has run for %u s: it no longer holds the whole view", sc_slot[i].name, scene_demo_cap_ms / 1000);
+            }
+        }
+    }
+    unsigned idx = mgr0 ? rd32(mgr0 + 0xCC) : 0xFFFFFFFFu, cnt = mgr0 ? rd32(mgr0 + 0xD8) : 0, arr = mgr0 ? rd32(mgr0 + 0xE4) : 0;
+    if (idx < cnt && idx < 16 && arr) {
+        char cn[64];
+        unsigned cb = rd32(arr + 4 * idx);
+        if (cb && classes_object_name(cb, cn, sizeof cn) && (!strcmp(cn, "cPcsCamera") || !strcmp(cn, "cMotionCamera")))
+            s |= 4;
+    }
+    return s;
+}
+
+static int scene_rule(unsigned mgr0, const char **why)
+{
+    const char *what = "";
+    unsigned s = scene_signals(mgr0, &what);
+    DWORD now = GetTickCount();
+    int hit = ((scene_mask & 1) && (s & 1)) || ((scene_mask & 2) && (s & 2)) || ((scene_mask & 4) && (s & 4)) || ((scene_mask & 8) && (s & 6) == 6);
+    if (hit) {
+        if (!sc_on) {
+            if (s & 1) n_sc_movie++;
+            if (s & 2) n_sc_demo++;
+            if (s & 4) n_sc_cam++;
+        }
+        sc_on = 1, sc_last_seen = now;
+        static char line[96];
+        snprintf(line, sizeof line, "%s%s%s%s", (s & 1) && (scene_mask & 1) ? "a movie " : "", s & 2 ? "an in-engine cutscene '" : "", s & 2 ? what : "", s & 2 ? "' " : "");
+        if ((s & 4) && (scene_mask & 12))
+            snprintf(line + strlen(line), sizeof line - strlen(line), "(event camera)");
+        *why = line;
+    } else if (sc_on && now - sc_last_seen >= scene_hold_ms) {
+        sc_on = 0;
+    }
+    return sc_on;
+}
+
+static void scene_log_pass(void);   /* fix023 LAB (below, with the probes) */
+
 /* ====================================================================== viewports ====================================================================== */
 static void teardown(const char *why)
 {
+    aim_view(0, 0, 0);
     if (mx.on)
         menu_leave(why);
     testmode_pad_merge(0);
@@ -671,23 +841,27 @@ void split_frame(void)
     n_pass++;
     if (!inited)
         return;
+    scene_log_pass();
     mm_screen(0, 0);
     if (raid_active()) {
         if (active || have_saved || hud.cp || mx.on)
             teardown("Raid detected");
         blocked = SPLIT_BLOCK_RAID;
+        aim_view(0, 0, 0);
         return;
     }
     blocked = SPLIT_BLOCK_NONE;
     if (!want_on || !r) {
         if (active || have_saved || hud.cp || mx.on)
             teardown(want_on ? "no camera root" : "switched off");
+        aim_view(0, 0, 0);
         return;
     }
     unsigned mgr0 = rd32(r + 0xCE0), mgr1 = rd32(r + 0xCE4);
     if (!mgr0 || !mgr1 || !is_cam_mgr(mgr0) || !is_cam_mgr(mgr1)) {   /* no episode loaded (yet / any more): the split waits, nothing of it may stay switched on */
         if (active || have_saved || hud.cp || mx.on)
             teardown("no gameplay cameras (title / loading)");
+        aim_view(0, 0, 0);
         return;
     }
     remember(r);
@@ -723,21 +897,31 @@ void split_frame(void)
     if (mx.on)
         gui = gui ? gui : 3;   /* the second human's menu is about to open: whole view from the first pass on (own slot flips, the cameras would swap sides) */
     /* The demo scheduler (cutscenes) and the title put their own camera object on viewport 0 (0x891E07 keeps the old one and restores it afterwards); the pause menu, the
-     * game over screen and the item menu are GUI units the engine draws in EVERY viewport (squeezed into both halves). Whole view meanwhile; the split comes back by itself. */
-    if (gui || cutscene || solo) {
+     * game over screen and the item menu are GUI units the engine draws in EVERY viewport (squeezed into both halves). Whole view meanwhile; the split comes back by itself.
+     * fix023: also while the engine's own scene state says a movie or an in-engine cutscene runs (scene_rule below: the movie player, the scene manager's cutscene
+     * slots, manager 0's event camera), which leave viewport 0 on manager 0 (the player report of 2026-11-17: "cutscenes ... remain in split-screen"). */
+    const char *scene_why = "";
+    int scene = !gui && !cutscene ? scene_rule(mgr0, &scene_why) : 0;
+    if (gui || cutscene || scene || solo) {
         capture_set_interact(0, 0);   /* fix022: whole view (menu, cutscene, solo part): the object table of the second human is not kept */
-        if (!suspended) {
-            suspended = gui ? SPLIT_SUSP_GUI : cutscene ? SPLIT_SUSP_CAMERA : SPLIT_SUSP_SOLO;
-            n_susp++;
-            r1_log("split: whole view (%s)", gui ? "pause / game over / item menu" : cutscene ? "cutscene or other camera on viewport 0" : "the other human has no character (solo part)");
-        }
-        if ((gui == 1 || (!gui && cutscene)) && (hud.cp || hud.mm))   /* the doors to a load: the second HUD set must not be alive when the engine tears the area down */
+        int why = gui ? SPLIT_SUSP_GUI : cutscene ? SPLIT_SUSP_CAMERA : scene ? SPLIT_SUSP_SCENE : SPLIT_SUSP_SOLO;
+        static DWORD why_logged;
+        if (!suspended || (suspended != why && GetTickCount() - why_logged >= 2000)) {   /* (a reason that flickers is logged at most every 2 s) */
+            if (!suspended)
+                n_susp++;
+            suspended = why, why_logged = GetTickCount();
+            r1_log("split: whole view (%s%s)", gui ? "pause / game over / item menu" : cutscene ? "cutscene or other camera on viewport 0" : scene ? "scene: " : "the other human has no character (solo part)",
+                   scene && !gui && !cutscene ? scene_why : "");
+        } else if (suspended != why)
+            suspended = why;
+        if ((gui == 1 || (!gui && (cutscene || scene))) && (hud.cp || hud.mm))   /* the doors to a load: the second HUD set must not be alive when the engine tears the area down */
             hud_destroy(gui == 1 ? "pause / game over screen opened" : "cutscene");
-        if (gui == 1 || (!gui && cutscene))
+        if (gui == 1 || (!gui && (cutscene || scene)))
             hud_unstable();
         wr8(v2 + 0x10, 0);
         wr8(v0 + 0x13, sv.mode0);
         wr8(v2 + 0x13, sv.mode);
+        aim_view(0, 0, 0);   /* fix023: whole view: every human's ray from the stock camera root (viewport 2 is off) */
         return;
     }
     if (suspended) {
@@ -777,6 +961,7 @@ void split_frame(void)
         wrf(mgr1 + 0x3C, fov_req);
     }
     mm_screen(1, vertical);
+    aim_view(1, r, mgr1);   /* fix023: the second human's weapons aim through manager 1 / viewport 2 (aimray1.h) */
     if (hud_req)
         hud_frame(mgr0, mgr1);
     else if (hud.cp || hud.mm)
@@ -791,6 +976,9 @@ int split_init(void)
     inited = 1;
     lt_add_frame_cb(split_frame);
     char ev[16];
+    ar1_init(&ar1_g, AD.camroot_ptr, !(r1_env("REV1_SPLIT_AIM", ev, sizeof ev) && ev[0] == '0'));   /* fix023: REV1_SPLIT_AIM=0 = the stock aim ray (lab A / B) */
+    if (!ar1_g.enabled)
+        r1_log("split: REV1_SPLIT_AIM=0: the second human's shots follow the first human's view (the stock aim ray, lab)");
     if (r1_env("REV1_SPLIT", ev, sizeof ev) && ev[0] && ev[0] != '0') {   /* REV1_SPLIT=v|h|1: start with the split screen requested (tests, owner demos with two pads) */
         layout_req = ev[0] == 'h' ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE;
         want_on = 1;
@@ -828,7 +1016,7 @@ void split_status_text(char *out, int size)
     split_state_t s;
     split_get_state(&s);
     snprintf(out, (size_t)size, "split %s%s%s: layout %s, second HUD %s (cockpit %08x minimap %08x, %u builds, %u blocks zero-filled, minimap cell swaps %u), menu exchange %s (%u so far); passes %u, re-asserted %u, whole-view episodes %u; vp2 camera %08x",
-             want_on ? "ON" : "off", blocked == SPLIT_BLOCK_RAID ? " (blocked: Raid)" : "", suspended ? (suspended == SPLIT_SUSP_GUI ? " (whole view: menu)" : suspended == SPLIT_SUSP_SOLO ? " (whole view: no second character)" : " (whole view: cutscene)") : "",
+             want_on ? "ON" : "off", blocked == SPLIT_BLOCK_RAID ? " (blocked: Raid)" : "", suspended ? (suspended == SPLIT_SUSP_GUI ? " (whole view: menu)" : suspended == SPLIT_SUSP_SOLO ? " (whole view: no second character)" : suspended == SPLIT_SUSP_SCENE ? " (whole view: scene)" : " (whole view: cutscene)") : "",
              layout_req == SPLIT_SIDE_BY_SIDE ? "side by side" : "top/bottom", hud_req ? (hud.cp ? "up" : "waiting") : "off", hud.cp, hud.mm, n_builds, n_zeroed, n_mm_swaps, mx.on ? "OPEN" : "idle", n_mx, n_pass, n_reasserted,
              n_susp, last_cam2);
 }
@@ -906,6 +1094,100 @@ static int hud_probe(char *out, int size)
     return 1;
 }
 
+/* fix023 LAB (read-only): the two camera managers' eye / target / up and each human's current weapon: its clip and the rays FUN_005EFE50 made last
+ * (muzzle +0x12E0, shot start +0x12F0, end +0x1300, the camera ray's near point +0x1360, end +0x1370, direction +0x1380) */
+static void v3(unsigned a, float *o) { o[0] = rdf(a), o[1] = rdf(a + 4), o[2] = rdf(a + 8); }
+static int aim_probe(char *out, int size)
+{
+    int o = 0;
+#define P(...) do { if (o < size - 1) o += snprintf(out + o, (size_t)(size - o), __VA_ARGS__); } while (0)
+    unsigned r = root();
+    if (!r) {
+        snprintf(out, (size_t)size, "no sCamera");
+        return 1;
+    }
+    float e[3], t[3], u[3];
+    for (unsigned k = 0; k < 2; k++) {
+        unsigned m = rd32(r + 0xCE0 + 4 * k);
+        v3(m + 0x90, e), v3(m + 0xB0, t), v3(m + 0xA0, u);
+        P("mgr%u %08x target %08x eye(%.0f,%.0f,%.0f) at(%.0f,%.0f,%.0f) up(%.2f,%.2f,%.2f) fov %.1f aspect %.3f cam %d flags138 %08x\n", k, m, rd32(m + 0x74), e[0], e[1], e[2], t[0], t[1], t[2],
+          u[0], u[1], u[2], rdf(m + 0x8C), rdf(m + 0x38), (int)rd32(m + 0xCC), rd32(m + 0x138));
+    }
+    for (unsigned k = 0; k < 3; k += 2) {
+        unsigned v = vp_addr(r, k);
+        P("vp%u active %u cam %08x rect (%d,%d)-(%d,%d)\n", k, rd8(v + 0x10), rd32(v + 4), (int)rd32(v + 0x18), (int)rd32(v + 0x1C), (int)rd32(v + 0x20), (int)rd32(v + 0x24));
+    }
+    for (unsigned s = 0; s < 2; s++) {
+        unsigned unit = unit_by_slot(s), pack = unit ? rd32(unit + 0xFE8) : 0, cur = pack ? rd32(pack + 0xD4) : 0xF, wp = pack && cur < 12 ? rd32(pack + 4 + 4 * cur) : 0;
+        char cn[96], wn[96];
+        cname(unit, cn, sizeof cn), cname(wp, wn, sizeof wn);
+        unsigned ls = unit ? rd32(unit + 0xFFC) : 0;   /* the rays live in the human's uLaserSight (unit+0xFFC): the callers of FUN_005EFE50 load ecx = [unit+0xFFC] */
+        P("slot %u %08x %s kind %u pos(%.0f,%.0f,%.0f) yaw %.1f hp %.0f | weapon[%u] %08x %s clip %d | sight %08x owner %08x\n", s, unit, cn, unit ? rd32(unit + 0xE30) : 0,
+          rdf(unit + 0x40), rdf(unit + 0x44), rdf(unit + 0x48), 2.0 * atan2(rdf(unit + 0x54), rdf(unit + 0x5C)) * 57.29578, rdf(unit + 0xE38), cur, wp, wn,
+          wp ? (int)rd32(wp + 0xF7C) : -1, ls, ls ? rd32(ls + 0x13C8) : 0);
+        if (ls) {
+            float a[3], b[3], c[3], d[3], f[3], g[3];
+            v3(ls + 0x12E0, a), v3(ls + 0x12F0, b), v3(ls + 0x1300, c), v3(ls + 0x1360, d), v3(ls + 0x1370, f), v3(ls + 0x1380, g);
+            P("   muzzle(%.0f,%.0f,%.0f) shot (%.0f,%.0f,%.0f)->(%.0f,%.0f,%.0f) camray (%.0f,%.0f,%.0f)->(%.0f,%.0f,%.0f) dir(%.3f,%.3f,%.3f)\n", a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
+              d[0], d[1], d[2], f[0], f[1], f[2], g[0], g[1], g[2]);
+        }
+    }
+    P("aim fix %s (stubs %s), view %s, calls %u, second-view answers %u", ar1_g.enabled ? "on" : "OFF", ar1_state_name(ar1_g.state), ar1_g.snap.on ? "up" : "off", (unsigned)ar1_g.n_calls,
+      (unsigned)ar1_g.n_second);
+#undef P
+    return 1;
+}
+
+/* fix023 LAB (read-only): the engine's scene state next to the split's own rule: viewport 0's camera, manager 0's current camera behaviour (+0xCC into the list
+ * [+0xE4], count +0xD8) and its flags +0x138, the movie player (sFsmManager [0x1169114]: state +0x2040, name +0x2064), the in-engine scene manager (sPcsManager
+ * [0x116A34C]: 16 slots, unit +0x284 + 4 i, ended byte +0x1EC + i, record [+0x23C] + i * 0x1370 whose resource's name is at +8), the cockpit managers' flags. */
+static int scene_line(char *out, int size, int brief)
+{
+    int o = 0;
+#define P(...) do { if (o < size - 1) o += snprintf(out + o, (size_t)(size - o), __VA_ARGS__); } while (0)
+    unsigned r = root(), mgr0 = r ? rd32(r + 0xCE0) : 0, vcam = r ? rd32(r + 0x30 + 4) : 0, idx = mgr0 ? rd32(mgr0 + 0xCC) : 0xFFFFFFFFu;
+    unsigned cnt = mgr0 ? rd32(mgr0 + 0xD8) : 0, arr = mgr0 ? rd32(mgr0 + 0xE4) : 0, cb = idx < cnt && arr ? rd32(arr + 4 * idx) : 0;
+    char c1[64], c2[64], nm[72];
+    cname(vcam, c1, sizeof c1), cname(cb, c2, sizeof c2);
+    P("vp0 %s%s cam %d %s fl138 %08x", vcam == mgr0 ? "mgr0" : "OTHER ", vcam == mgr0 ? "" : c1, (int)idx, c2, mgr0 ? rd32(mgr0 + 0x138) : 0);
+    unsigned fm = rd32(sc_fsm_cell), mst = fm ? rd32(fm + 0x2040) : 0;
+    nm[0] = 0;
+    if (fm && mst >= 2 && mst <= 7)
+        sc_name(fm + 0x2064, nm, sizeof nm);
+    P(" | movie st %u %s", mst, nm);
+    unsigned pcs = rd32(sc_pcs_cell);
+    P(" | pcs cur %d", pcs ? (int)rd32(pcs + 0x28) : -1);
+    for (unsigned i = 0; pcs && i < 16; i++) {
+        unsigned u = rd32(pcs + 0x284 + 4 * i);
+        if (!u)
+            continue;
+        sc_slot_name(pcs, i, nm, sizeof nm);
+        P(" [%u%s %s]", i, rd8(pcs + 0x1EC + i) ? " ended" : "", nm);
+    }
+    unsigned ck = rd32(AD.cockpit_ptr), cp = ck ? rd32(ck + 0x28) : 0;
+    P(" | cockpit %08x gui %d", cp ? rd32(cp + 0xC) : 0, gui_running());
+    if (!brief)
+        P(" | split %s", suspended == SPLIT_SUSP_CAMERA ? "whole(camera)" : suspended == SPLIT_SUSP_GUI ? "whole(gui)" : suspended == SPLIT_SUSP_SOLO ? "whole(solo)" : active ? "SPLIT" : "off");
+#undef P
+    return 1;
+}
+static int scene_log_on;   /* LAB `split scenelog 1`: one log line whenever the scene state's line changes (split-scene: ...), at most 4000 lines */
+static unsigned scene_log_n;
+static void scene_log_pass(void)
+{
+    static char last[600];
+    char now[600];
+    if (!scene_log_on || scene_log_n >= 4000)
+        return;
+    scene_line(now, sizeof now, 0);
+    if (strcmp(now, last)) {
+        snprintf(last, sizeof last, "%s", now);
+        r1_log("split-scene: %s", now);
+        if (++scene_log_n == 4000)
+            r1_log("split-scene: 4000 lines: the scene log stops");
+    }
+}
+
 void split_cmd(const char *arg, char *out, int size)
 {
     char sub[32] = "", a1[32] = "", a2[32] = "", a3[32] = "";
@@ -924,6 +1206,30 @@ void split_cmd(const char *arg, char *out, int size)
         if (a1[0])
             mm_swap_on = atoi(a1) != 0;
         snprintf(out, (size_t)size, "second minimap cell swap %s (%u swaps so far)", mm_swap_on ? "ON" : "OFF (old behaviour)", n_mm_swaps);
+    } else if (!strcmp(sub, "aim")) {   /* fix023 (aimray1.h): split aim [0|1] = the second human's aim ray from his own view (1, default) or the stock one (0, LAB A / B) */
+        if (a1[0])
+            ar1_g.enabled = atoi(a1) != 0;
+        snprintf(out, (size_t)size, "aim ray of the second human: %s; stubs %s%s%s; view %s (manager 1 %08x, own %u, %d x %d); calls %u, second-view answers %u (last weapon %08x owner %08x)",
+                 ar1_g.enabled ? "HIS OWN VIEW" : "stock (the first human's view)", ar1_state_name(ar1_g.state), ar1_g.why[0] ? ": " : "", ar1_g.why,
+                 ar1_g.snap.on ? "up" : "off", (unsigned)ar1_g.snap.mgr1, (unsigned)ar1_g.snap.own, (int)ar1_g.snap.w, (int)ar1_g.snap.h, (unsigned)ar1_g.n_calls,
+                 (unsigned)ar1_g.n_second, (unsigned)ar1_g.last_weapon, (unsigned)ar1_g.last_owner);
+    } else if (!strcmp(sub, "scene")) {   /* fix023 LAB (read-only): the engine's scene state (split scene) / its change log (split scenelog 0|1) */
+        scene_line(out, size, 0);
+    } else if (!strcmp(sub, "scenerule")) {   /* fix023 LAB: split scenerule [<mask> [<hold ms> [<cap s>]]]: 1 movie, 2 cutscene slot, 4 event camera, 8 cutscene slot and event camera */
+        if (a1[0])
+            scene_mask = (unsigned)strtoul(a1, NULL, 0);
+        if (a2[0])
+            scene_hold_ms = (unsigned)atoi(a2);
+        if (a3[0])
+            scene_demo_cap_ms = 1000u * (unsigned)atoi(a3);
+        snprintf(out, (size_t)size, "scene rule mask %u (1 movie, 2 cutscene slot, 4 event camera, 8 slot + camera), hold %u ms, cutscene cap %u s; now %s; entries: movie %u, cutscene %u, camera %u, capped %u",
+                 scene_mask, scene_hold_ms, scene_demo_cap_ms / 1000, sc_on ? "ON" : "off", n_sc_movie, n_sc_demo, n_sc_cam, n_sc_capped);
+    } else if (!strcmp(sub, "scenelog")) {
+        if (a1[0])
+            scene_log_on = atoi(a1) != 0, scene_log_n = 0;
+        snprintf(out, (size_t)size, "scene log %s (%u lines)", scene_log_on ? "ON" : "off", scene_log_n);
+    } else if (!strcmp(sub, "aimprobe")) {   /* fix023 LAB (read-only): both managers' eye / target and each human's current weapon's rays */
+        aim_probe(out, size);
     } else if (!strcmp(sub, "fov")) {   /* split fov <degrees | 0>: experiment, see fov_req */
         fov_req = (float)atof(a1);
         snprintf(out, (size_t)size, fov_req > 1.0f ? "vertical FOV %.1f written into both camera managers every pass (stock: manager 0 %.1f, manager 1 %.1f)" : "FOV left to the engine (stock now: manager 0 %.1f, manager 1 %.1f)", fov_req > 1.0f ? fov_req : rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE4) + 0x3C));

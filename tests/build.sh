@@ -72,6 +72,13 @@ ENET="${ENET:-../../../../tools/enet/enet-1.3.18}"
 ./build/test_mapptn1.exe
 "$ZIG" cc -target x86-windows-gnu -O0 -g -Wall -o build/test_mapptn1_x86.exe test_mapptn1_x86.c ../native/mapptn1.c
 ./build/test_mapptn1_x86.exe
+# fix023: the second human's aim ray in the split screen (aimray1.c: who gets manager 1 / viewport 2's size, the three sites and their stubs, all or none,
+# the build facts in the image). 32-bit target: the decision reads 32-bit object addresses.
+"$ZIG" cc -target x86-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_aimray1.exe test_aimray1.c ../native/aimray1.c
+./build/test_aimray1.exe
+# fix023: the split screen module (split.c) in the lab harness of stage 5 (fake memory, fake engine calls): views, HUD set, menus, whole-view rules, the aim view
+"$ZIG" cc -target x86-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_split1.exe test_split1.c -I../native ../native/mapptn1.c ../native/aimray1.c -luser32 -lkernel32
+./build/test_split1.exe > build/test_split1.out || { cat build/test_split1.out; echo "FAIL: test_split1"; exit 1; }; tail -1 build/test_split1.out
 # the engine hooks of the world (world1_hooks.c: table of sites with the bytes of the build, x86 length decoder, trampolines executed as 32-bit code, apply / revert / refusals on fake memory, sArrange list readers)
 "$ZIG" cc -target x86-windows-gnu -O0 -g -Wall -Wno-unused-function -o build/test_world1_game.exe test_world1_game.c ../native/world1_hooks.c ../native/guards1.c
 ./build/test_world1_game.exe

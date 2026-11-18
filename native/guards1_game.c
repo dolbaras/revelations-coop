@@ -16,6 +16,7 @@
 #include "capture.h"
 #include "net1.h"
 #include "guards1.h"
+#include "split.h"
 
 static g1_t G;
 static int inited, last_want;
@@ -73,6 +74,11 @@ static void revert_all(void)
 }
 
 static int split_pick_on;   /* fix022: the pickup patch is on for the split screen (interact1.h), not for a network session */
+/* fix023: the exe+1396 guard is on for the split screen too. The kill record of a hit with flag 0x80 asks the OWN slot's human (the first human) for his knife
+ * (item 10) and asserts when he has none (sRankManagerResult.cpp:0x97F, stage6 rows 75 / 85 / 88: three crashes, each a kill by the SECOND human). With
+ * the second human's shots now hitting what he aims at, his kills are common: the guard (the JZ goes to the null test instead of the assert) is written once
+ * while a split screen is up and taken out when it ends (a network session keeps its own rule). */
+static int split_exit_on, split_exit_refused;
 
 static void guards_frame(void)
 {
@@ -101,6 +107,21 @@ static void guards_frame(void)
     } else if (want && split_pick_on) {
         split_pick_on = 0;   /* a network session took over: its own rule (the mask holds the own slot only) */
         g1_set_extra(&G, &MEM, 0u);
+    }
+    split_state_t ss;
+    split_get_state(&ss);
+    if (ss.active && !want && G.mode != G1_MODE_OFF) {
+        if (!split_exit_on && !split_exit_refused && G.state[G1_EXIT] != G1_ON) {
+            if (g1_apply(&G, &MEM, G1_EXIT, own_slot())) {
+                split_exit_on = 1;
+                r1_log("guards: split screen: the exe+1396 guard is on (the second human's kills with a first human who has no knife)");
+            } else
+                split_exit_refused = 1;
+        }
+    } else if (split_exit_on) {
+        if (!want)
+            g1_revert(&G, &MEM, G1_EXIT);
+        split_exit_on = 0;
     }
     LeaveCriticalSection(&cs);
 }
