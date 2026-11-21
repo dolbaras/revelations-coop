@@ -178,17 +178,22 @@ GitHub never reports a pre-release as "latest", so a pre-release is never instal
 | Second full release | `0.2.0` (tag `v0.2.0`, NOT a pre-release) | published 2026-11-12 from public commit `58a0d02`: network co-op over all episodes (no setting), give to partner, the Genesis for the second player, HUNK in 2-2, the split aim fix; `R1_VERSION` in `native/r1.h` is `0.2.0` |
 | Fix release | `0.2.1` (tag `v0.2.1`, NOT a pre-release) | published 2026-11-13 from public commit `de5e123`: the zone hand-over of an enemy between the PCs, the partner's real guns on the puppet, the guest's start kit, the start of the shared world with the own level, the save panel, the guns of the host's save for an unarmed guest, the fall-out guard of enemy copies (`rguard`); `R1_VERSION` in `native/r1.h` is `0.2.1` |
 | Fix release | `0.2.2` (tag `v0.2.2`, NOT a pre-release, Latest) | published 2026-11-15 from public commit `5f5fc9b`: split screen: the second player's own action button (doors, items, every object); network: the key-item flags of every episode, the object flags of Episodes 2-12, levers, the partner's door / pickup motions, lockers and weapon boxes as a picture, movies start together and are skipped only by both players, the stale stock freeze of the partner's character released; `R1_VERSION` in `native/r1.h` is `0.2.2` |
-| Fix release | `0.2.3` (tag `v0.2.3`, NOT a pre-release, Latest) | published 2026-11-18 from public commit `ca6112d`: split screen: the second player's shots follow his own camera (`native/aimray1.h`), movies / in-engine cutscenes in the whole view (`native/split.c` scene rule), the exe+1396 guard in the split screen; `R1_VERSION` in `native/r1.h` is `0.2.3` |
-| Fix release | `0.2.4` (tag `v0.2.4`, NOT a pre-release) | PREPARED 2026-11-20, NOT published (needs the owner's word): network play with the keyboard and the mouse (world-frame pad records, protocol 4), the lobby's address field; `R1_VERSION` in `native/r1.h` is `0.2.4` |
+| Fix release | `0.2.3` (tag `v0.2.3`, NOT a pre-release) | published 2026-11-18 from public commit `ca6112d`: split screen: the second player's shots follow his own camera (`native/aimray1.h`), movies / in-engine cutscenes in the whole view (`native/split.c` scene rule), the exe+1396 guard in the split screen; `R1_VERSION` in `native/r1.h` is `0.2.3` |
+| Fix release | `0.2.4` (tag `v0.2.4`, NOT a pre-release, Latest) | published 2026-11-21 from public commit `6a2a01f`: network play with the keyboard and the mouse (world-frame pad records, protocol 4), the lobby's address field; `R1_VERSION` in `native/r1.h` is `0.2.4` |
 
 Rules: never publish a full release with a version below `0.1.0`; never mark `v0.1.0` or higher as a pre-release while it should reach players; no "RC" wording anywhere (title,
 notes, tag message, README). Both players need the same package: the network hello carries the mod version (`R1_VERSION`) and refuses another one with a reason; a release that
 changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
 
-## 0.2.4 (fix release; prepared 2026-11-20, not published)
+## 0.2.4 (fix release; published 2026-11-21)
 
 - **Number:** `0.2.4`, player reports #1 (network, keyboard / mouse: "characters teleport, nothing synced"; the address field: Backspace) and #2 (split screen, Episode 1 after the scene 11_10c_0: open, not reproduced in the lab; `notes/p2-fix024.md`). `CP_PROTO_VERSION` and `CP_PROTO_MIN` 4: a CP_PAD of a keyboard / mouse player ends with the frame byte CP_PAD_FRAME_WORLD (the records carry the world move of the human, aim, the shot pulse, run); a gamepad player's CP_PAD is the protocol-3 packet byte for byte. 0.2.3 and 0.2.4 refuse each other at the hello (version string and protocol).
-- **Before publishing:** `lab\publish-0.2.4-checklist.md` and the owner's word.
+- **Published:** tag `v0.2.4` (full release, Latest) on public commit `6a2a01f`, 2026-11-21. Assets: `revelations-coop-0.2.4.zip` sha256 `79cdb75b...`, `revelations-coop-setup-0.2.4.exe` sha256 `24317b13...`, `dinput8.dll` in the zip `3cf041a3...` (the DLL of the final regression).
+- **Checks after the publication (2026-11-21):**
+  - The release is neither a draft nor a pre-release, and each asset's `digest` equals the local SHA-256. `releases/latest` = `v0.2.4`.
+  - `tests	est_installer.ps1 -Online`: 286 of 286.
+  - The real update through the real feed (no `-Feed`) on a stand-in folder: the published 0.2.3 launcher logged `installed 0.2.3, latest v0.2.4`, `downloaded 809352 bytes`, `checksum ok 79CDB75B...`, `installer exit 0`; `version.txt` read 0.2.4 and the installed `dinput8.dll` was `3cf041a3...`. A second start installed nothing. The uninstall put the stand-in back byte for byte (19 of 19).
+- **Before publishing:** `lab\publish-0.2.4-checklist.md`.
 
 ## 0.2.3 (fix release; published 2026-11-18)
 
