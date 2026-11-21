@@ -184,7 +184,7 @@ int main(void)
     /* 2b. CP_PAD (version 3): number, version gate constants, byte vector, delta coding sizes, malformed */
     {
         CHECK(CP_PAD == 0x52 && CP_WORLD == 0x51 && CP_STATE == 0x50);
-        CHECK(CP_PROTO_VERSION == 3 && CP_PROTO_MIN == 3);   /* version 2 peers do not know CP_PAD: refused at HELLO (tests/test_session.c) */
+        CHECK(CP_PROTO_VERSION == 4 && CP_PROTO_MIN == 4);   /* version 2 peers do not know CP_PAD, version 3 not its frame byte (fix024): refused at HELLO (tests/test_session.c) */
         CHECK(!strcmp(cp_type_name(CP_PAD), "PAD"));
         cp_msg m;
         memset(&m, 0, sizeof m);

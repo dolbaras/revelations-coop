@@ -40,7 +40,7 @@ Install
    "Resident Evil Revelations Co-op" shortcut (desktop, Start menu). Start the game with that shortcut (it starts it through Steam): it also installs a newer version of the
    mod from GitHub first, if there is one (no internet: the game starts as it is). A new version is installed only when its download matches the checksum GitHub gives for it.
 3. In the main menu choose "Co-Op Play" (the fourth entry) to open the co-op lobby; F6 (keyboard) or BACK (gamepad) open it too.
-If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0, 0.2.1 or 0.2.2): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.2 and 0.2.3): the lobby refuses the other version and says so.
+If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0, 0.2.1, 0.2.2 or 0.2.3): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.3 and 0.2.4): the lobby refuses the other version and says so.
 
 Network play: Steam friends or IP address
 - "Steam friends": the host starts hosting, the friend joins from the Steam friends list ("Join Game") or from the host's invite. No address and no port forwarding are needed.
@@ -96,6 +96,8 @@ Limits
   uses the whole screen while the game drives the camera for it. The game's short scripted moments during play (lines of dialogue, a character who waits, a shake of
   the camera) keep the split screen. The short loading screen before a movie in the middle of play (a few seconds) is shown in the first player's half.
   A tutorial page of the game (for example the Genesis manual at the start of Episode 1-2) is shown in the first player's half; the first player turns its pages.
+- Network play with the keyboard and the mouse: the partner sees your character walk, aim, shoot, reload, swing the knife and change the weapon as motions. Turning on the spot with
+  the mouse while aiming and the quick turn are not shown as motions (his character turns only when it walks).
 - Joining a running network game is not possible: if one player's game closes or the connection is lost, start a new co-op game from the lobby (Continue picks up the checkpoint).
 - At the first level of a network session the host's character on the guest's screen carries no knife, so a knife attack of the host is not shown there (it counts on the host's PC as usual).
 - Network, the world objects the partner uses: valve wheels (Episodes 5, 6 and 12) and the shelves you push (Episode 2) move only on the PC of the player who uses them (his

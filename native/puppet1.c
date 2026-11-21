@@ -26,6 +26,47 @@ void p1_tx_init(p1_tx *t, const p1_tx_cfg *c)
     if (t->cfg.redundancy > CP_PAD_MAX_REC) t->cfg.redundancy = CP_PAD_MAX_REC;
 }
 
+void p1_tx_set_frame(p1_tx *t, uint8_t frame)
+{
+    if (frame == t->frame) return;
+    t->frame = frame;
+    t->n = 0;   /* the next step numbers a new record in the new frame */
+}
+
+#ifndef P1_RIGHT_X
+#define P1_RIGHT_X(yaw) (-cosf(yaw))   /* the camera's right in world x / z for its yaw (forward = (sin, cos)): F24K2 live (key D with forward (0.934, -0.357)
+                                        moved 204 u along (0.357, 0.934) = (-cos, sin) and 35 u forward) */
+#define P1_RIGHT_Z(yaw) sinf(yaw)
+#endif
+void p1_world_from_stick(int lx, int ly, float yaw, float *wx, float *wz)
+{
+    float fx = sinf(yaw), fz = cosf(yaw), rx = P1_RIGHT_X(yaw), rz = P1_RIGHT_Z(yaw);
+    *wx = (float)ly * fx + (float)lx * rx;
+    *wz = (float)ly * fz + (float)lx * rz;
+}
+void p1_stick_from_world(float wx, float wz, float yaw, int16_t *lx, int16_t *ly)
+{
+    float fx = sinf(yaw), fz = cosf(yaw), rx = P1_RIGHT_X(yaw), rz = P1_RIGHT_Z(yaw);
+    float det = rx * fz - rz * fx;   /* the basis (right, forward) is orthonormal: det = +-1 */
+    float x = (wx * fz - wz * fx) / det, y = (rx * wz - rz * wx) / det;
+    float len = sqrtf(x * x + y * y);
+    if (len > 32767.0f) x *= 32767.0f / len, y *= 32767.0f / len;
+    *lx = (int16_t)lrintf(x), *ly = (int16_t)lrintf(y);
+}
+
+float p1_frame_update(float est, float wx, float wz, float dx, float dz, float gain, float min_step)
+{
+    float wl = wx * wx + wz * wz, dl = dx * dx + dz * dz;
+    if (wl < 1.0f || dl < min_step * min_step) return est;
+    float err = atan2f(dx, dz) - atan2f(wx, wz);
+    while (err > 3.14159265f) err -= 6.2831853f;
+    while (err < -3.14159265f) err += 6.2831853f;
+    est += gain * err;   /* world angle = frame - stick angle: the puppet off by err means the frame is off by err the same way */
+    while (est > 3.14159265f) est -= 6.2831853f;
+    while (est < -3.14159265f) est += 6.2831853f;
+    return est;
+}
+
 void p1_tx_restart(p1_tx *t)
 {
     t->n = 0, t->seq = 0, t->have_send = 0, t->last_send = 0, t->last_flags = 0;
@@ -62,7 +103,7 @@ int p1_tx_step(p1_tx *t, uint32_t now, const cp_pad_rec *cur, uint16_t flags, cp
     }
     if (!send) return 0;
     memset(out, 0, sizeof *out);
-    out->flags = flags, out->seq = t->seq, out->t_ms = t->hist[0].t;
+    out->flags = flags, out->seq = t->seq, out->t_ms = t->hist[0].t, out->frame = t->frame;
     int n = t->n < t->cfg.redundancy ? t->n : t->cfg.redundancy;
     out->count = (uint8_t)n;
     for (int i = 0; i < n; i++) {
@@ -95,6 +136,16 @@ void p1_rx_init(p1_rx *r, const p1_rx_cfg *c, p1_sink sink)
 static void push_rec(p1_rx *r, const cp_pad_rec *rec, uint32_t ts)
 {
     uint32_t seq = ++r->out_seq;
+    cp_pad_rec c = *rec;
+    if (r->frame == CP_PAD_FRAME_WORLD) {   /* fix024: the world move -> this puppet's stick against its camera now */
+        float yaw = 0;
+        r->st.world_recs++;
+        if (r->sink.cam_yaw && r->sink.cam_yaw(r->sink.user, &yaw)) p1_stick_from_world((float)rec->lx, (float)rec->ly, yaw, &c.lx, &c.ly);
+        else c.lx = 0, c.ly = 0, r->st.world_nocam++;
+        r->last_wx = (float)rec->lx, r->last_wz = (float)rec->ly;
+        c.rx = 0, c.ry = 0;
+    }
+    rec = &c;
     int ok = r->sink.push ? r->sink.push(r->sink.user, rec, seq, ts) : 0;
     if (ok) r->st.pushed++;
     else r->st.rejected++;
@@ -158,7 +209,7 @@ void p1_rx_packet(p1_rx *r, uint32_t now, const cp_pad *pkt, unsigned cur_epoch)
         newest = r->ext_hi + (uint32_t)delta;
         if (delta > 0) r->ext_hi = newest;
     }
-    if (delta >= 0) r->pkt_flags = pkt->flags;
+    if (delta >= 0) r->pkt_flags = pkt->flags, r->frame = pkt->frame;
     int first_new = 1;
     uint32_t t_rec[CP_PAD_MAX_REC];
     t_rec[0] = pkt->t_ms;
@@ -290,18 +341,18 @@ void p1_rx_status(const p1_rx *r, char *out, size_t size)
     if (!size) return;
     snprintf(out, size,
              "rx: link %s, pad %s, hold %04x, epoch %u | packets %u records %u repeat %u late %u lost %u wrong-epoch %u | pushed %u rejected %u neutral %u held-dropped %u | stalls %u lost-link %u resumes %u | "
-             "latency +%.0f ms (max +%u) | position: samples %u mean %.1f max %.1f, tp %u (resume %u flag %u jump %u hard %u soft %u), soft ticks %u",
+             "latency +%.0f ms (max +%u) | position: samples %u mean %.1f max %.1f, tp %u (resume %u flag %u jump %u hard %u soft %u), soft ticks %u | frame %u, world records %u (no camera %u)",
              p1_link_name(r->link), p1_mode_name(r->mode), r->hold_flags, r->epoch, r->st.packets, r->st.records, r->st.keepalive_or_dup, r->st.late, r->st.lost, r->st.wrong_epoch, r->st.pushed, r->st.rejected,
              r->st.neutral_pushes, r->st.held_dropped, r->st.stalls, r->st.losts, r->st.resumes, (double)r->lat_ewma, r->lat_max, r->st.corr_samples,
              r->st.corr_samples ? (double)(r->st.err_sum / (float)r->st.corr_samples) : 0.0, (double)r->st.err_max, r->st.tp_total, r->st.tp_resume, r->st.tp_flag, r->st.tp_jump, r->st.tp_hard, r->st.tp_soft,
-             r->st.soft_ticks);
+             r->st.soft_ticks, (unsigned)r->frame, r->st.world_recs, r->st.world_nocam);
 }
 
 void p1_tx_status(const p1_tx *t, char *out, size_t size)
 {
     if (!size) return;
-    snprintf(out, size, "tx: packets %u records %u keepalives %u, seq %u, redundancy %d, keepalive %d ms, stick eps %d", t->packets, t->records, t->keepalives, t->seq, t->cfg.redundancy, t->cfg.keepalive_ms,
-             t->cfg.stick_eps);
+    snprintf(out, size, "tx: packets %u records %u keepalives %u, seq %u, redundancy %d, keepalive %d ms, stick eps %d, frame %u", t->packets, t->records, t->keepalives, t->seq, t->cfg.redundancy, t->cfg.keepalive_ms,
+             t->cfg.stick_eps, (unsigned)t->frame);
 }
 
 /* ================================================================== position correction */

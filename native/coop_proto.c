@@ -196,6 +196,7 @@ static int w_pad(W *w, const cp_pad *d)
         if (m & PM_RY) w16(w, (uint16_t)r->ry);
         prev = *r;
     }
+    if (d->frame) w8(w, d->frame);   /* fix024: only a world-frame sender adds the byte */
     return 1;
 }
 static void r_pad(R *r, cp_pad *d)
@@ -221,6 +222,7 @@ static void r_pad(R *r, cp_pad *d)
         d->rec[i] = c;
         prev = c;
     }
+    if (!r->err && r->pos < r->len) d->frame = (uint8_t)r8(r);   /* fix024: the frame byte (absent = the pad frame) */
 }
 
 /* ---- messages ---- */

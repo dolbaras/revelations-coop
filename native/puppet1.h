@@ -35,6 +35,7 @@ typedef struct {
     uint32_t last_send;
     uint16_t last_flags;
     uint32_t records, packets, keepalives;  /* statistics */
+    uint8_t frame;                          /* fix024: CP_PAD_FRAME_* of the records (p1_tx_set_frame) */
 } p1_tx;
 
 void p1_tx_defaults(p1_tx_cfg *c);
@@ -42,6 +43,18 @@ void p1_tx_init(p1_tx *t, const p1_tx_cfg *c);    /* c NULL = defaults */
 void p1_tx_restart(p1_tx *t);                     /* a new level instance: the history and the sequence start again (the receiver resets with the epoch) */
 /* One call per logic frame with the sender's pad now. Returns 1 when `out` must be sent (pid and epoch are filled by cs_send_pad). */
 int p1_tx_step(p1_tx *t, uint32_t now_ms, const cp_pad_rec *cur, uint16_t flags, cp_pad *out);
+/* fix024: the frame of the next records (a gamepad: CP_PAD_FRAME_PAD; a keyboard / mouse player: CP_PAD_FRAME_WORLD). A change starts the history again, so one packet
+ * never mixes records of two frames. */
+void p1_tx_set_frame(p1_tx *t, uint8_t frame);
+
+/* fix024: the stick <-> world conversion of the world frame. cam_yaw = atan2(forward x, forward z) of the camera that the stick is read against (eye -> target);
+ * stick up (+ly) moves along the camera's forward, stick right (+lx) along its right (P1_RIGHT_X / P1_RIGHT_Z below, checked live). Lengths are kept (0..32767). */
+void p1_world_from_stick(int lx, int ly, float cam_yaw, float *wx, float *wz);
+void p1_stick_from_world(float wx, float wz, float cam_yaw, int16_t *lx, int16_t *ly);
+/* fix024: the frame the puppet's stick is really read in is learned from the puppet's own motion (f24kbm2 2026-11-20: a fixed frame ~132 deg off both
+ * camera managers' yaws). w = the world direction last commanded, d = the puppet's position change of the pass. Returns the new frame yaw: est moves by
+ * gain * (angle(d) - angle(w)) when the puppet really walked (|d| >= min_step) along a commanded move; otherwise est is returned unchanged. */
+float p1_frame_update(float est, float wx, float wz, float dx, float dz, float gain, float min_step);
 
 /* ================================================================== receiver */
 #define P1_HOLD_MASK (CP_SF_DEAD | CP_SF_DOWN | CP_SF_LOADING | CP_SF_CUTSCENE | CP_SF_PAUSED | CP_SF_HELD)   /* HELD (ep1-solo E11): the sender's human is held by an enemy (grab1.h) */
@@ -61,6 +74,7 @@ enum { P1_MODE_RUN = 0, P1_MODE_NEUTRAL = 1 /* pad forced neutral, position stil
 typedef struct {
     int (*push)(void *user, const cp_pad_rec *rec, uint32_t seq, uint32_t ts_ms);
     void *user;
+    int (*cam_yaw)(void *user, float *yaw);   /* fix024: the yaw of the camera the PUPPET's stick is read against (world-frame records); NULL / 0 = unknown: neutral move */
 } p1_sink;
 
 #define P1_PENDING 16
@@ -85,6 +99,8 @@ typedef struct {
     struct { cp_pad_rec r; uint32_t seq, t; } pend[P1_PENDING];
     int npend;
     cp_pad_rec latest;      /* newest record seen (resumed when a hold ends) */
+    uint8_t frame;          /* fix024: CP_PAD_FRAME_* of the newest packet (every push converts a world-frame record with the camera of that moment) */
+    float last_wx, last_wz; /* fix024: the world move of the newest world-frame record pushed (0, 0 = none / not moving) */
     int have_latest;
     /* link / hold */
     uint32_t last_rx;       /* local time of the last accepted packet */
@@ -112,6 +128,7 @@ typedef struct {
         uint32_t stalls, losts, resumes;
         uint32_t tp_total, tp_resume, tp_flag, tp_jump, tp_hard, tp_soft, soft_ticks;
         uint32_t corr_samples; float err_sum, err_max;
+        uint32_t world_recs, world_nocam;   /* fix024: world-frame records pushed, of them without a camera (move dropped) */
     } st;
 } p1_rx;
 

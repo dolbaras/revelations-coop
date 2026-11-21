@@ -13,8 +13,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CP_PROTO_VERSION 3u   /* layout of the messages below (2: STATE grew from 40 to 60 bytes, stage 5; 3: CP_PAD, the partner's pad record for the Revelations 1 puppet) */
-#define CP_PROTO_MIN 3u       /* oldest version this build still talks: a version 2 peer does not know CP_PAD (it would drop the pad records silently and the puppet would stand), so it is refused at HELLO by the version gate */
+#define CP_PROTO_VERSION 4u   /* layout of the messages below (2: STATE grew from 40 to 60 bytes, stage 5; 3: CP_PAD, the partner's pad record for the Revelations 1 puppet;
+                                 4 (fix024): CP_PAD may end with a frame byte: the records of a keyboard / mouse sender carry a WORLD move vector) */
+#define CP_PROTO_MIN 4u       /* oldest version this build still talks: a version 2 peer does not know CP_PAD (it would drop the pad records silently and the puppet would stand), so it is refused at HELLO by the version gate */
 #define CP_MAGIC 0x50433152u  /* bytes 'R' '1' 'C' 'P' */
 #define CP_MAX_PLAYERS 4
 #define CP_NAME_MAX 24
@@ -210,7 +211,10 @@ typedef struct {
     uint8_t count;          /* 1..CP_PAD_MAX_REC */
     uint8_t dt[CP_PAD_MAX_REC];   /* dt[0] unused (0) */
     cp_pad_rec rec[CP_PAD_MAX_REC];
+    uint8_t frame;          /* fix024: CP_PAD_FRAME_PAD (0, not on the wire: a gamepad sender's packet is byte for byte the protocol-3 one) or CP_PAD_FRAME_WORLD: lx / ly of
+                               every record = the move direction in WORLD x / z (x 32767, length = how far the stick is pushed), rx / ry unused; written as one byte after the records */
 } cp_pad;
+enum { CP_PAD_FRAME_PAD = 0, CP_PAD_FRAME_WORLD = 1 };
 
 typedef struct {
     uint8_t pid;

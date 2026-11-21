@@ -156,6 +156,116 @@ static int sink_push(void *u, const cp_pad_rec *rec, uint32_t seq, uint32_t ts)
     return capture_push_remote((int)g_sink_pad, (const r1_input_t *)rec, seq, ts);
 }
 
+/* fix024 (report #1, variant A: keyboard / mouse players over the network) ------------------------------------------------------------------------------------
+ * A camera manager's yaw: atan2(forward x, forward z) of eye (+0x90) -> target (+0xB0) (the frame the human's stick is read against). */
+static int cam_yaw_of(unsigned mgr, float *yaw)
+{
+    if (!mgr) return 0;
+    float fx = rdf(mgr + 0xB0) - rdf(mgr + 0x90), fz = rdf(mgr + 0xB8) - rdf(mgr + 0x98);
+    if (fx * fx + fz * fz < 1.0f) return 0;
+    *yaw = atan2f(fx, fz);
+    return 1;
+}
+/* the receiver: the camera manager the puppet's stick is read against: the one that follows it (+0x74 = its target unit), else the manager of its unit slot
+ * (f24kbm1 2026-11-20: in a network game no manager targets the puppet: 3531 of 3531 world records found none; manager 1 is the second slot's and is not
+ * updated there, so its pose is the one its stick is read against); none = no world move this pass */
+static unsigned g_pup_for_cam;
+static int g_pup_slot = 1, g_cam_force = -1;
+static uint32_t g_cam_found, g_cam_slot, g_cam_missing, g_frame_learn;
+/* f24kbm2 (2026-11-20): with manager 0 / 1 / automatic the puppet walked 132-180 deg off the guest's way; the five legs fit ONE fixed world frame (mean error
+ * 13 deg) that is neither manager's yaw. So the frame is learned from the puppet's own walk (p1_frame_update, every pass it walked along a command);
+ * the first camera found only seeds it. g_frame_mode 1 = learned (default), 0 = the camera as found (LAB `net pad set frame 0`). */
+static int g_frame_mode = 1, g_frame_have;
+static float g_frame_est;
+static int cam_lookup(float *yaw);
+static int sink_cam_yaw(void *u, float *yaw)
+{
+    (void)u;
+    if (g_frame_mode && g_frame_have) { *yaw = g_frame_est; return 1; }
+    if (!cam_lookup(yaw)) return 0;
+    if (g_frame_mode) g_frame_est = *yaw, g_frame_have = 1;
+    return 1;
+}
+static int cam_lookup(float *yaw)
+{
+    unsigned root = rd32(CAMROOT_PTR);
+    if (root && g_cam_force >= 0) {
+        unsigned mgr = rd32(root + 0xCE0 + 4u * (unsigned)g_cam_force);
+        if (mgr && cam_yaw_of(mgr, yaw)) { g_cam_slot++; return 1; }
+    }
+    if (root && g_pup_for_cam && g_cam_force < 0) {
+        for (int k = 0; k < 2; k++) {
+            unsigned mgr = rd32(root + 0xCE0 + 4u * (unsigned)k);
+            if (mgr && rd32(mgr + 0x74) == g_pup_for_cam && cam_yaw_of(mgr, yaw)) { g_cam_found++; return 1; }
+        }
+        if (g_pup_slot == 0 || g_pup_slot == 1) {
+            unsigned mgr = rd32(root + 0xCE0 + 4u * (unsigned)g_pup_slot);
+            if (mgr && cam_yaw_of(mgr, yaw)) { g_cam_slot++; return 1; }
+        }
+    }
+    g_cam_missing++;
+    return 0;
+}
+/* the sender: a keyboard / mouse player (the engine's keyboard mode, sGamePad +0x874) sends what his human DOES: the world move (the position change of the pass,
+ * full length while it moves), aim (+0x1151), the shot pulse (+0x1590 bit 0, held 150 ms so that one numbered record carries it), run (+0x1150 -> left stick click). */
+static uint32_t g_cp_reload, g_cp_knife, g_cp_wchg, g_cp_sub;   /* the copy's own state starts (receiver side) */
+static uint32_t g_kb_records, g_kb_shots, g_kb_reload, g_kb_knife, g_kb_wchg, g_kb_sub, g_kb_face;
+static int g_kb_actions = 1, g_kb_facing = 0;   /* LAB `net pad set kbact|kbface 0|1`: the action pulses / the aim facing vector (mouse look; OFF by default: unproven, and R1 failed twice with it on) of a keyboard / mouse sender */
+/* fix024 (owner: the partner's copy must PLAY the keyboard / mouse player's motions): the sender's upper-body state tells what he does. The classes are the stock Upper:: states
+ * (vtables, vtables-rev1.txt); the copy's own state machine runs from the record's buttons exactly as for a gamepad sender, so a PULSE of the matching button starts the same state
+ * there: reload = X (0x4000), the knife = RT without LT (scheme 0 melee, engine-map 8d), weapon change = D-pad left (two guns toggle), the sub weapon = RB.
+ * The records are optional extras of the same CP_PAD records (buttons / lt / rt fields): a 0.2.3 peer reads them as the pad buttons they are. */
+#define UPPER_VT_CHANGEWEAPON 0x1064F84u
+#define UPPER_VT_RELOAD       0x1064FB4u
+#define UPPER_VT_KNIFE        0x1064FE4u
+#define UPPER_VT_SUBATTACK    0x1065014u
+enum { KA_RELOAD, KA_KNIFE, KA_WCHG, KA_SUB, KA_N };
+static int kbm_record(unsigned own, uint32_t now, cp_pad_rec *out)
+{
+    static float prev[3];
+    static unsigned prev_unit, prev_vt;
+    static uint32_t shot_until, act_until[KA_N];
+    unsigned gpad = rd32(R1_GAMEPAD_PTR);
+    if (!gpad || !rd32(gpad + 0x874) || !own) { prev_unit = 0; prev_vt = 0; return 0; }
+    float cur[3] = {rdf(own + 0x40), rdf(own + 0x44), rdf(own + 0x48)};
+    int moving = 0;
+    memset(out, 0, sizeof *out);
+    if (prev_unit == own) {
+        float dx = cur[0] - prev[0], dz = cur[2] - prev[2], d = sqrtf(dx * dx + dz * dz);
+        if (d > 0.3f && d < 60.0f) out->lx = (int16_t)lrintf(dx / d * 32767.0f), out->ly = (int16_t)lrintf(dz / d * 32767.0f), moving = 1;   /* (a jump of 60+ units is a teleport, not a walk) */
+    }
+    memcpy(prev, cur, sizeof cur), prev_unit = own;
+    int aim = rd8(own + 0x1151) != 0;
+    if (aim) out->lt = 255;
+    if (aim && !moving && g_kb_facing) {   /* mouse look: the human turns on the spot while aiming; the aim state turns the copy toward its stick (half deflection) */
+        float yaw = rdf(own + 0x1180);
+        out->lx = (int16_t)lrintf(sinf(yaw) * 20000.0f), out->ly = (int16_t)lrintf(cosf(yaw) * 20000.0f);
+        g_kb_face++;
+    }
+    if (rd32(own + 0x1590) & 1u) {
+        if ((int32_t)(shot_until - now) <= 0) g_kb_shots++;
+        shot_until = now + 150u;
+    }
+    if ((int32_t)(shot_until - now) > 0) out->rt = 255;
+    if (rd8(own + 0x1150)) out->buttons |= XINPUT_GAMEPAD_LEFT_THUMB;
+    if (g_kb_actions) {
+        unsigned st = rd32(own + 0xF80), vt = st ? rd32(st) : 0;
+        if (vt != prev_vt) {   /* a rising edge of the sender's state: one 150 ms pulse of the matching button */
+            if (vt == UPPER_VT_RELOAD) act_until[KA_RELOAD] = now + 150u, g_kb_reload++;
+            else if (vt == UPPER_VT_KNIFE) act_until[KA_KNIFE] = now + 150u, g_kb_knife++;
+            else if (vt == UPPER_VT_CHANGEWEAPON) act_until[KA_WCHG] = now + 150u, g_kb_wchg++;
+            else if (vt == UPPER_VT_SUBATTACK) act_until[KA_SUB] = now + 150u, g_kb_sub++;
+            prev_vt = vt;
+        }
+        if ((int32_t)(act_until[KA_RELOAD] - now) > 0) out->buttons |= XINPUT_GAMEPAD_X;
+        if ((int32_t)(act_until[KA_WCHG] - now) > 0) out->buttons |= XINPUT_GAMEPAD_DPAD_LEFT;
+        if ((int32_t)(act_until[KA_SUB] - now) > 0) out->buttons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        if ((int32_t)(act_until[KA_KNIFE] - now) > 0) out->lt = 0, out->rt = 255;   /* melee = RT while LT is NOT held */
+    }
+    g_kb_records++;
+    return 1;
+}
+
 static int unit_get(void *u, float pos[3], float *yaw)
 {
     unsigned unit = unit_by_slot((unsigned)(size_t)u);
@@ -369,6 +479,7 @@ void puppet_frame(void)
     }
 
     unsigned own = unit_by_slot((unsigned)role), pup = unit_by_slot((unsigned)(1 - role));
+    g_pup_for_cam = pup, g_pup_slot = 1 - role;
     uint16_t flags = scene_flags(own);
     if (downed1_own_down()) flags |= CP_SF_DOWN;   /* the own human lies (downed rule, network mode): the partner holds his puppet of him (no pad drive, no position correction) */
     {   /* ep1-solo E11: the own human is held by an enemy (+0xE34 of the grab states): the partner holds his puppet of him (the break-free waggle is no walk) */
@@ -393,6 +504,18 @@ void puppet_frame(void)
                        g_pos_prev[1], g_pos_prev[2], cur[0], cur[1], cur[2], d, g_frames, g_rx.st.tp_total);
             }
         }
+        {   /* fix024: what the copy's own upper-body state machine started (rising edges of the Reload / Knife / ChangeWeapon / SubAttack state): the proof that the motions arrive */
+            static unsigned cp_prev_vt, cp_prev_unit;
+            unsigned stp = pup ? rd32(pup + 0xF80) : 0, vtp = stp ? rd32(stp) : 0;
+            if (pup != cp_prev_unit) cp_prev_unit = pup, cp_prev_vt = vtp;
+            else if (vtp != cp_prev_vt) {
+                if (vtp == UPPER_VT_RELOAD) g_cp_reload++;
+                else if (vtp == UPPER_VT_KNIFE) g_cp_knife++;
+                else if (vtp == UPPER_VT_CHANGEWEAPON) g_cp_wchg++;
+                else if (vtp == UPPER_VT_SUBATTACK) g_cp_sub++;
+                cp_prev_vt = vtp;
+            }
+        }
         if (pup && g_unlock) {
             unsigned f3c = rd32(pup + 0xF3C);
             if (f3c & 0x100000u) wr32(pup + 0xF3C, f3c & ~0x100000u), g_unlock_n++;
@@ -404,6 +527,12 @@ void puppet_frame(void)
                 r1_log("puppet-watch: pass %u t+%lu pos (%.2f, %.2f, %.2f) d(%.2f, %.2f)%s mode %x flags %08x F3C %08x%s F44 %08x stick(%.2f, %.2f) aim %u ctl %u", g_frames, (unsigned long)(now - g_watch_start), cur[0], cur[1], cur[2],
                        dx, dz, g_tp_this_pass ? " OUR-TP" : "", rd32(pup + 0xF08), rd32(pup + 0xE1C), rd32(pup + 0xF3C), (rd32(pup + 0xF3C) & 0x100000u) ? " INPUT-BAN" : "", rd32(pup + 0xF44), rdf(pup + 0x1138), rdf(pup + 0x113C), rd8(pup + 0x1151), rd32(rd32(rd32(pup + 0xE80) + 0x38) + 0x34));
         }
+        if (pup && g_pos_have && !g_tp_this_pass && g_frame_mode && g_frame_have && g_rx.frame == CP_PAD_FRAME_WORLD) {   /* fix024: learn the stick frame */
+            float e0 = g_frame_est;
+            g_frame_est = p1_frame_update(g_frame_est, g_rx.last_wx, g_rx.last_wz, cur[0] - g_pos_prev[0], cur[2] - g_pos_prev[2], 0.08f, 1.0f);
+            if (g_frame_est != e0) g_frame_learn++;
+        }
+        if (!pup) g_frame_have = 0;   /* a new puppet unit (level change): seed again */
         if (pup) memcpy(g_pos_prev, cur, sizeof cur), g_pos_have = 1;
         else g_pos_have = 0;
         g_tp_this_pass = 0;
@@ -414,7 +543,11 @@ void puppet_frame(void)
     if (cs) {
         cp_pad_rec cur;
         memset(&cur, 0, sizeof cur);
-        if (!testmode_pad_peek(0, &cur)) memset(&cur, 0, sizeof cur);
+        if (kbm_record(own, now, &cur)) p1_tx_set_frame(&g_tx, CP_PAD_FRAME_WORLD);   /* fix024: keyboard / mouse */
+        else {
+            p1_tx_set_frame(&g_tx, CP_PAD_FRAME_PAD);   /* a gamepad: the record and the packet exactly as before */
+            if (!testmode_pad_peek(0, &cur)) memset(&cur, 0, sizeof cur);
+        }
         cp_pad pk;
         if (p1_tx_step(&g_tx, now, &cur, (uint16_t)(flags & CP_PAD_FLAGS_MASK), &pk)) cs_send_pad(cs, &pk);
         p1_snapshot sn;
@@ -498,7 +631,7 @@ void puppet_install(void)
      * started network session, so the split screen and the solo game are untouched. REV1_PUPPET=0 switches it off (lab A/B). */
     if (!(r1_env("REV1_PUPPET", v, sizeof v) && v[0] == '0')) {
         ensure_init();
-        p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL});
+        p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL, sink_cam_yaw});
         p1_tx_init(&g_tx, &g_txc);
         g_on = 1;
         r1_log("puppet: on (default; REV1_PUPPET=0 switches it off): it binds the roles when a network session plays");
@@ -528,8 +661,13 @@ void puppet_cmd(const char *arg, char *out, int size)
         char a[500], b[300];
         p1_rx_status(&g_rx, a, sizeof a);
         p1_tx_status(&g_tx, b, sizeof b);
-        char c[200] = "";
+        char c[700] = "";
         if (g_last_corr.action) snprintf(c, sizeof c, " | last correction: action %d reason %d err %.1f/%.1f", g_last_corr.action, g_last_corr.reason, g_last_corr.err_xz, g_last_corr.err_y);
+        {   /* fix024: the keyboard / mouse sender and the puppet camera of world-frame records */
+            size_t n = strlen(c);
+            snprintf(c + n, sizeof c - n, " | kbm: records %u shots %u reload %u knife %u wchg %u sub %u face %u (act %d face %d), the copy started reload %u knife %u wchg %u sub %u, puppet camera found %u by slot %u missing %u (camsrc %d), frame %s %.0f deg (learn steps %u)", g_kb_records, g_kb_shots, g_kb_reload, g_kb_knife, g_kb_wchg, g_kb_sub, g_kb_face, g_kb_actions, g_kb_facing, g_cp_reload, g_cp_knife, g_cp_wchg, g_cp_sub, g_cam_found, g_cam_slot, g_cam_missing, g_cam_force,
+                     g_frame_mode ? "learned" : "camera", g_frame_have ? (double)(g_frame_est * 57.29578f) : 0.0, g_frame_learn);
+        }
         char gd[300], pd[320] = "";
         {
             unsigned gpad = rd32(R1_GAMEPAD_PTR);   /* Pad[k] = sGamePad+0x3C+0x2CC*k: +4 active, +5 assigned, +7 kind (0 unassigned, 2 DirectInput, 4 XInput), +0xC scan flags, +0x10 XInput user */
@@ -583,7 +721,7 @@ void puppet_cmd(const char *arg, char *out, int size)
                  g_gui_flags, g_gui_stuck, g_ignorepause, gv && g_ignorepause ? " (the flag is ignored)" : "", gd, xi, kb, ch, pd, g_keep0 < 0 ? "auto" : g_keep0 ? "on" : "off", g_keep0_on ? " (neutral pad on user 0 active)" : "", g_rearm_on ? "RUNNING" : "off", g_foreign_n, fo, g_auto_on ? "RUNNING" : "off", g_auto_count, a, b, c, g_last_tp[0] ? " | last tp: " : "", g_last_tp);
     } else if (!strcmp(sub, "on")) {
         g_solo = !strcmp(rest, "solo");
-        p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL});
+        p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL, sink_cam_yaw});
         p1_tx_init(&g_tx, &g_txc);
         g_epoch_seen = 0xFFFFFFFFu, g_on = 1;
         snprintf(out, (size_t)size, "puppet ON%s: the partner's pad records drive the second human (pad slot %u), %s", g_solo ? " (solo: records from `net pad inject`)" : "", g_sink_pad,
@@ -597,7 +735,7 @@ void puppet_cmd(const char *arg, char *out, int size)
         int lt = 0, rt = 0, lx = 0, ly = 0, rx = 0, ry = 0;
         sscanf(rest, "%15s %d %d %d %d %d %d", bt, &lt, &rt, &lx, &ly, &rx, &ry);
         cp_pad_rec r = {(uint16_t)strtoul(bt, NULL, 16), (uint8_t)lt, (uint8_t)rt, (int16_t)lx, (int16_t)ly, (int16_t)rx, (int16_t)ry};
-        if (!g_on) p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL});
+        if (!g_on) p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL, sink_cam_yaw});
         inject_flags_and_rec(&r);
         snprintf(out, (size_t)size, "packet %u injected: buttons %04x lt %d rt %d L(%d,%d) R(%d,%d)%s", g_inject_seq, r.buttons, r.lt, r.rt, r.lx, r.ly, r.rx, r.ry, g_on ? "" : " (puppet is off: only counted)");
     } else if (!strcmp(sub, "state")) {
@@ -634,7 +772,7 @@ void puppet_cmd(const char *arg, char *out, int size)
             return;
         }
         if (ms > 600000) ms = 600000;
-        if (!g_on) p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL});
+        if (!g_on) p1_rx_init(&g_rx, &g_rxc, (p1_sink){sink_push, NULL, sink_cam_yaw});
         g_auto_rec = (cp_pad_rec){(uint16_t)strtoul(bt, NULL, 16), (uint8_t)lt, (uint8_t)rt, (int16_t)lx, (int16_t)ly, (int16_t)rx, (int16_t)ry};
         g_auto_count = 0;
         g_auto_until = GetTickCount() + (uint32_t)ms;
@@ -688,7 +826,7 @@ void puppet_cmd(const char *arg, char *out, int size)
         char k[16] = "";
         int v = 0;
         if (sscanf(rest, "%15s %d", k, &v) != 2) {
-            snprintf(out, (size_t)size, "usage: net pad set keepalive|eps|redundancy|soft|hard|jump|neutral|ignorepause|keep0|kbskip|unlock <n>");
+            snprintf(out, (size_t)size, "usage: net pad set keepalive|eps|redundancy|soft|hard|jump|neutral|ignorepause|keep0|kbskip|unlock|camsrc|frame|kbact|kbface <n>");
             return;
         }
         if (!strcmp(k, "keepalive")) g_txc.keepalive_ms = v, g_tx.cfg.keepalive_ms = v;
@@ -699,6 +837,10 @@ void puppet_cmd(const char *arg, char *out, int size)
         else if (!strcmp(k, "jump")) g_cc.jump_xz = (float)v;
         else if (!strcmp(k, "neutral")) g_rxc.neutral_ms = v, g_rx.cfg.neutral_ms = v;
         else if (!strcmp(k, "ignorepause")) g_ignorepause = v != 0;
+        else if (!strcmp(k, "kbact")) g_kb_actions = v != 0;   /* fix024 LAB: the reload / knife / weapon pulses of a keyboard / mouse sender */
+        else if (!strcmp(k, "kbface")) g_kb_facing = v != 0;   /* fix024 LAB: the aim facing vector of a keyboard / mouse sender */
+        else if (!strcmp(k, "camsrc")) g_cam_force = v < -1 ? -1 : v > 1 ? 1 : v, g_frame_have = 0;   /* fix024 LAB: the puppet's stick camera = manager v (0 / 1), -1 = automatic */
+        else if (!strcmp(k, "frame")) g_frame_mode = v != 0, g_frame_have = 0;   /* fix024 LAB: 1 = the learned frame (default), 0 = the camera as found */
         else if (!strcmp(k, "kbskip")) {
             g_kbskip = v < 0 ? -1 : v != 0;
             if (g_roles_bound) kbskip_bind();   /* effective at once */

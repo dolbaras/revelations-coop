@@ -491,6 +491,12 @@ void l1_event_in(l1_t *l, const l1_event *e)
             l->changed = 1;
         }
         break;
+    case L1E_CLEAR:   /* fix024: Delete empties the address */
+        if (rows[l->sel].action == A_NET_ADDR && l->s.join_addr[0]) {
+            l->s.join_addr[0] = 0;
+            l->changed = 1;
+        }
+        break;
     case L1E_HOVER:
         if (e->row >= 0 && e->row < n && selectable(rows[e->row].action)) l->sel = e->row;
         break;

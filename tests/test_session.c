@@ -247,11 +247,12 @@ static void test_refusals(void)
     CHECK(cs_host(h.s, "sim", 2, 0, err, sizeof err));
 
     struct { const char *what; uint16_t ver, minv; int tag; int expect; } cases[] = {
-        {"too new", 5, 4, 1, CP_REF_VERSION},
+        {"too new", 6, 5, 1, CP_REF_VERSION},
         {"too old", 0, 0, 1, CP_REF_VERSION},
         {"version 1 (40 byte states)", 1, 1, 1, CP_REF_VERSION},
         {"version 2 (no CP_PAD, the puppet would stand)", 2, 2, 1, CP_REF_VERSION},
-        {"wrong build", 3, 3, 2, CP_REF_BUILD},
+        {"version 3 (no CP_PAD frame byte: a keyboard player's world moves read as sticks; fix024)", 3, 3, 1, CP_REF_VERSION},
+        {"wrong build", 4, 4, 2, CP_REF_BUILD},
     };
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         Node r;
@@ -299,7 +300,7 @@ static void test_refusals(void)
         step(30);
         cp_msg m;
         memset(&m, 0, sizeof m);
-        m.type = CP_HELLO, m.u.hello.version = 3, m.u.hello.min_version = 3, m.u.hello.want_char = CP_CHAR_NONE;   /* a newer peer that still speaks 3 would be accepted the same way */
+        m.type = CP_HELLO, m.u.hello.version = 4, m.u.hello.min_version = 4, m.u.hello.want_char = CP_CHAR_NONE;   /* a newer peer that still speaks 4 would be accepted the same way */
         snprintf(m.u.hello.name, sizeof m.u.hello.name, "NoTag");
         uint8_t buf[CP_MAX_PACKET];
         cn_send(r.raw, 0, CP_CH_CONTROL, 1, buf, cp_encode(&m, buf, sizeof buf));

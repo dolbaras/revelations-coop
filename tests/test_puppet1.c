@@ -137,6 +137,123 @@ static void test_sender(void)
     CHECK(cp_encode(&m, buf, sizeof buf) > 0);
 }
 
+/* fix024 (report #1, variant A): keyboard / mouse senders send WORLD-frame records; the receiver turns them into the puppet's stick against its own camera */
+static float g_cam_yaw; static int g_have_cam;
+static int cam_yaw_cb(void *u, float *yaw) { (void)u; if (!g_have_cam) return 0; *yaw = g_cam_yaw; return 1; }
+static void test_world_frame(void)
+{
+    /* conversion: round trips at many yaws and directions; the length is kept */
+    for (int a = -180; a <= 180; a += 15)
+        for (int d = 0; d < 360; d += 30) {
+            float yaw = (float)a * 3.14159265f / 180.0f;
+            int lx = (int)lrintf(20000.0f * sinf((float)d * 3.14159265f / 180.0f)), ly = (int)lrintf(20000.0f * cosf((float)d * 3.14159265f / 180.0f));
+            float wx, wz;
+            int16_t bx, by;
+            p1_world_from_stick(lx, ly, yaw, &wx, &wz);
+            CHECK(fabsf(sqrtf(wx * wx + wz * wz) - 20000.0f) < 2.0f);
+            p1_stick_from_world(wx, wz, yaw, &bx, &by);
+            CHECK(abs(bx - lx) <= 1 && abs(by - ly) <= 1);
+        }
+    /* stick up = the camera's forward: yaw 0 looks along +z, yaw 90 deg along +x */
+    float wx, wz;
+    p1_world_from_stick(0, 30000, 0.0f, &wx, &wz);
+    CHECK(fabsf(wx) < 1.0f && fabsf(wz - 30000.0f) < 1.0f);
+    p1_world_from_stick(0, 30000, 1.5707963f, &wx, &wz);
+    CHECK(fabsf(wx - 30000.0f) < 1.0f && fabsf(wz) < 1.0f);
+    /* the same world move seen by a receiver camera turned by 90 deg: the stick turns the other way */
+    int16_t lx, ly;
+    p1_stick_from_world(0.0f, 30000.0f, 1.5707963f, &lx, &ly);
+    CHECK(ly == 0 && abs(lx) == 30000);
+    p1_stick_from_world(1e6f, 0.0f, 0.0f, &lx, &ly);   /* clamped to the stick's range */
+    CHECK(abs(lx) <= 32767 && abs(ly) <= 32767 && (abs(lx) >= 32766 || abs(ly) >= 32766));
+
+    /* the wire: a pad-frame packet is byte for byte protocol 3 (no frame byte); a world-frame one has one byte more and decodes back */
+    p1_tx t;
+    p1_tx_init(&t, NULL);
+    cp_pad out;
+    cp_pad_rec r;
+    memset(&r, 0, sizeof r);
+    r.lx = 1234, r.ly = -2345, r.buttons = 0x1000;
+    CHECK(p1_tx_step(&t, 0, &r, 0, &out) && out.frame == CP_PAD_FRAME_PAD);
+    cp_msg m, d;
+    uint8_t buf[CP_MAX_PACKET];
+    m.type = CP_PAD, m.u.pad = out;
+    size_t n0 = cp_encode(&m, buf, sizeof buf);
+    CHECK(n0 == 12 + 1 + 2 + 2 + 2);   /* type pid epoch flags seq t count | mask buttons lx ly */
+    CHECK(cp_decode(buf, n0, &d) && d.type == CP_PAD && d.u.pad.frame == CP_PAD_FRAME_PAD && d.u.pad.rec[0].lx == 1234);
+    p1_tx_set_frame(&t, CP_PAD_FRAME_WORLD);
+    CHECK(t.n == 0);
+    r.lx = 21000, r.ly = 7000;
+    CHECK(p1_tx_step(&t, 5, &r, 0, &out) && out.frame == CP_PAD_FRAME_WORLD && out.count == 1);
+    m.u.pad = out;
+    size_t n1 = cp_encode(&m, buf, sizeof buf);
+    CHECK(n1 == n0 + 1);
+    CHECK(cp_decode(buf, n1, &d) && d.u.pad.frame == CP_PAD_FRAME_WORLD && d.u.pad.rec[0].lx == 21000 && d.u.pad.rec[0].ly == 7000);
+    p1_tx_set_frame(&t, CP_PAD_FRAME_WORLD);   /* the same frame again: the history stays */
+    CHECK(t.n == 1);
+
+    /* the receiver: world records become the stick for the puppet's camera; no camera = no move (buttons kept) */
+    static Sink sk;
+    memset(&sk, 0, sizeof sk);
+    p1_sink sink = {sink_push, &sk, cam_yaw_cb};
+    p1_rx rx;
+    p1_rx_init(&rx, NULL, sink);
+    g_have_cam = 1, g_cam_yaw = 1.5707963f;   /* the puppet's camera looks along +x */
+    cp_pad pk;
+    memset(&pk, 0, sizeof pk);
+    pk.epoch = 1, pk.seq = 1, pk.t_ms = 100, pk.count = 1, pk.frame = CP_PAD_FRAME_WORLD;
+    pk.rec[0].lx = 30000, pk.rec[0].ly = 0, pk.rec[0].buttons = 0x0200, pk.rec[0].rt = 255, pk.rec[0].rx = 999;   /* the sender moves along world +x, fires */
+    p1_rx_packet(&rx, 100, &pk, 1);
+    p1_rx_tick(&rx, 101, 1, 0);
+    CHECK(sk.n >= 1);
+    cp_pad_rec *o = &sk.rec[sk.n - 1];
+    CHECK(o->ly == 30000 && o->lx == 0 && o->rx == 0 && o->buttons == 0x0200 && o->rt == 255);   /* along the camera's forward */
+    CHECK(rx.st.world_recs >= 1 && rx.st.world_nocam == 0);
+    g_have_cam = 0;
+    pk.seq = 2, pk.t_ms = 120;
+    p1_rx_packet(&rx, 120, &pk, 1);
+    p1_rx_tick(&rx, 121, 1, 0);
+    o = &sk.rec[sk.n - 1];
+    CHECK(o->lx == 0 && o->ly == 0 && o->buttons == 0x0200 && rx.st.world_nocam >= 1);
+    /* a gamepad sender's records pass unchanged (the frame byte absent) */
+    g_have_cam = 1;
+    pk.seq = 3, pk.t_ms = 140, pk.frame = CP_PAD_FRAME_PAD, pk.rec[0].rx = 999;
+    p1_rx_packet(&rx, 140, &pk, 1);
+    p1_rx_tick(&rx, 141, 1, 0);
+    o = &sk.rec[sk.n - 1];
+    CHECK(o->lx == 30000 && o->ly == 0 && o->rx == 999);
+
+    /* the frame learner: a puppet whose stick is read in a frame 132 deg off the seed converges, walking with the commands (f24kbm2) */
+    {
+        float truth = -2.3038f, est = 0.0f;   /* -132 deg; the seed = a camera yaw of 0 */
+        int ok_after = -1;
+        for (int step = 0; step < 400; step++) {
+            float a = (float)(step % 7) * 0.9f;                 /* the guest's world direction changes now and then */
+            float wx = 30000.0f * sinf(a), wz = 30000.0f * cosf(a);
+            int16_t lx, ly;
+            p1_stick_from_world(wx, wz, est, &lx, &ly);        /* the receiver's stick with the current estimate */
+            float px, pz;
+            p1_world_from_stick(lx, ly, truth, &px, &pz);     /* the engine reads that stick in the true frame */
+            float n = sqrtf(px * px + pz * pz);
+            est = p1_frame_update(est, wx, wz, px / n * 2.0f, pz / n * 2.0f, 0.08f, 1.0f);
+            float e = est - truth;
+            while (e > 3.14159265f) e -= 6.2831853f;
+            while (e < -3.14159265f) e += 6.2831853f;
+            if (ok_after < 0 && fabsf(e) < 0.05f) ok_after = step;
+        }
+        float e = est - truth;
+        while (e > 3.14159265f) e -= 6.2831853f;
+        while (e < -3.14159265f) e += 6.2831853f;
+        CHECK(fabsf(e) < 0.02f);
+        CHECK(ok_after >= 0 && ok_after < 120);   /* within ~2 s of walking at 60 passes / s */
+        /* no walk, no command, a tiny step: unchanged */
+        CHECK(p1_frame_update(0.7f, 0, 0, 2, 0, 0.08f, 1.0f) == 0.7f);
+        CHECK(p1_frame_update(0.7f, 100, 0, 0.2f, 0, 0.08f, 1.0f) == 0.7f);
+        /* the world record is remembered for the learner */
+        CHECK(rx.last_wx == 30000.0f && rx.last_wz == 0.0f);
+    }
+}
+
 /* The main simulation. */
 typedef struct {
     int loss, dup, reorder, base, jitter, seconds;
@@ -566,6 +683,7 @@ static void test_state_fill(void)
 int main(void)
 {
     test_sender();
+    test_world_frame();
     run_profile("clean", 0, 0, 0, 20, 0, 0.999);
     run_profile("lan", 0, 0, 0, 5, 8, 0.999);
     run_profile("loss5", 5, 5, 5, 40, 15, 0.995);

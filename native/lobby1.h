@@ -146,7 +146,7 @@ typedef struct {
 } l1_env;
 
 /* ---- input ---- */
-enum { L1E_NONE = 0, L1E_UP, L1E_DOWN, L1E_LEFT, L1E_RIGHT, L1E_OK, L1E_BACK, L1E_CLICK, L1E_HOVER, L1E_CHAR, L1E_BACKSPACE };
+enum { L1E_NONE = 0, L1E_UP, L1E_DOWN, L1E_LEFT, L1E_RIGHT, L1E_OK, L1E_BACK, L1E_CLICK, L1E_HOVER, L1E_CHAR, L1E_BACKSPACE, L1E_CLEAR };   /* L1E_CLEAR (fix024): Delete empties the address */
 typedef struct { int kind; int row; int ch; } l1_event;   /* ch: the typed character for L1E_CHAR (printable ASCII) */
 
 /* ---- what to draw ---- */
@@ -235,6 +235,7 @@ void l1_strip_text(const l1_strip_in *in, int lang, char *out, size_t size, int 
 typedef struct {
     unsigned char up, down, left, right, enter, space, esc, f6;   /* keyboard, 1 = down */
     unsigned char backspace;                                      /* keyboard, 1 = down (auto repeat) */
+    unsigned char del;                                            /* keyboard Delete, 1 = down (fix024: empties the join address) */
     unsigned char typed[8];                                       /* printable ASCII typed since the last poll, 0-terminated (the glue fills it from the characters of the window) */
     unsigned short pad_buttons[2];                                /* XInput wButtons of physical users 0 and 1 (0 when not connected) */
     short lx[2], ly[2];                                           /* left stick */
@@ -251,6 +252,7 @@ int l1_input_poll(l1_input *in, const l1_raw *raw, unsigned now_ms, int open, l1
 /* typed characters of the game window (WM_CHAR, queued by the glue under its own lock): printable ASCII only, the rest is dropped */
 typedef struct { unsigned char buf[32]; int head, count; } l1_typed;
 void l1_typed_push(l1_typed *q, unsigned ch);                      /* 0x20..0x7E kept; a full queue drops the newest */
+int l1_typed_paste(l1_typed *q, const char *text);                  /* fix024 (Ctrl+V): the clipboard text, spaces / tabs / line ends left out; returns the characters queued */
 int l1_typed_take(l1_typed *q, unsigned char out[8]);              /* moves up to 7 characters into out, 0-terminated; returns the number moved */
 
 l1_t *l1_new(void);

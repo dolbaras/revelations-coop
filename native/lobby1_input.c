@@ -6,7 +6,7 @@
 
 #include "lobby1.h"
 
-enum { I_UP, I_DOWN, I_LEFT, I_RIGHT, I_ENTER, I_SPACE, I_ESC, I_F6, I_PUP, I_PDN, I_PLF, I_PRT, I_PA, I_PB, I_PBACK, I_BS, I_COUNT };
+enum { I_UP, I_DOWN, I_LEFT, I_RIGHT, I_ENTER, I_SPACE, I_ESC, I_F6, I_PUP, I_PDN, I_PLF, I_PRT, I_PA, I_PB, I_PBACK, I_BS, I_DEL, I_COUNT };
 
 void l1_input_reset(l1_input *in) { memset(in, 0, sizeof *in); }
 
@@ -16,6 +16,19 @@ void l1_typed_push(l1_typed *q, unsigned ch)
     if (q->count >= (int)sizeof q->buf) return;
     q->buf[(q->head + q->count) % (int)sizeof q->buf] = (unsigned char)ch;
     q->count++;
+}
+
+int l1_typed_paste(l1_typed *q, const char *text)
+{
+    int n = 0;
+    for (const unsigned char *p = (const unsigned char *)text; p && *p; p++) {
+        if (*p <= 0x20 || *p > 0x7E) continue;   /* an address has no blanks; line ends, tabs and non-ASCII bytes are left out */
+        int before = q->count;
+        l1_typed_push(q, *p);
+        if (q->count == before) break;            /* the queue is full: the rest of the text is dropped */
+        n++;
+    }
+    return n;
 }
 
 int l1_typed_take(l1_typed *q, unsigned char out[8])
@@ -63,6 +76,7 @@ int l1_input_poll(l1_input *in, const l1_raw *raw, unsigned now, int open, l1_ev
     down[I_PB] = (b & 0x2000) != 0;
     down[I_PBACK] = (b & 0x0020) != 0;
     down[I_BS] = raw->backspace;
+    down[I_DEL] = raw->del;
     if (!in->init) {   /* the first poll after a reset: whatever is held now (the opening key) does not count until it was released once */
         in->init = 1;
         in->armed = 0;
@@ -100,6 +114,7 @@ int l1_input_poll(l1_input *in, const l1_raw *raw, unsigned now, int open, l1_ev
     if (f6) PUSH(L1E_BACK);
     if (pback) PUSH(L1E_BACK);
     if (edge_or_repeat(in, I_BS, down[I_BS], now, 1)) PUSH(L1E_BACKSPACE);
+    if (edge_or_repeat(in, I_DEL, down[I_DEL], now, 0)) PUSH(L1E_CLEAR);
     for (int i = 0; i < 8 && raw->typed[i]; i++) {   /* characters: no edge logic, each one is typed once */
         unsigned char c = raw->typed[i];
         if (c >= 0x20 && c < 0x7F && n < max) ev[n].kind = L1E_CHAR, ev[n].row = 0, ev[n].ch = c, n++;

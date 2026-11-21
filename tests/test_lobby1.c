@@ -1093,6 +1093,63 @@ static void test_typed_queue(void)
     CHECK(q.count == 32);
     CHECK(l1_typed_take(&q, out) == 7 && !strcmp((const char *)out, "0123456"));
     CHECK(q.count == 25);
+    /* fix024 (player report #1): Ctrl+V pastes the clipboard text, blanks / line ends / non-ASCII left out, bounded by the queue */
+    memset(&q, 0, sizeof q);
+    CHECK(l1_typed_paste(&q, " 192.168.0.10:28410\r\n") == 18 && q.count == 18);
+    CHECK(l1_typed_take(&q, out) == 7 && !strcmp((const char *)out, "192.168"));
+    CHECK(l1_typed_take(&q, out) == 7 && !strcmp((const char *)out, ".0.10:2"));
+    CHECK(l1_typed_take(&q, out) == 4 && !strcmp((const char *)out, "8410"));
+    CHECK(l1_typed_paste(&q, "") == 0 && l1_typed_paste(&q, NULL) == 0 && l1_typed_paste(&q, "\t \xE9") == 0 && q.count == 0);
+    CHECK(l1_typed_paste(&q, "1234567890123456789012345678901234567890") == 32 && q.count == 32);
+}
+
+/* fix024 (player report #1): Backspace and Delete reach the join address; Delete empties it, only on the address row */
+static void test_addr_edit_keys(void)
+{
+    l1_input in;
+    l1_raw r;
+    l1_event evs[8];
+    int want = 0, n;
+    l1_input_reset(&in);
+    memset(&r, 0, sizeof r);
+    n = l1_input_poll(&in, &r, 100, 1, evs, 8, &want);
+    r.del = 1;
+    n = l1_input_poll(&in, &r, 200, 1, evs, 8, &want);
+    CHECK(n == 1 && evs[0].kind == L1E_CLEAR);
+    n = l1_input_poll(&in, &r, 900, 1, evs, 8, &want);   /* no auto repeat for Delete */
+    CHECK(n == 0);
+    r.del = 0;
+    n = l1_input_poll(&in, &r, 950, 1, evs, 8, &want);
+    CHECK(n == 0);
+    l1_t *l = l1_new();
+    l1_settings s = {0, L1_LEAD, L1_LAYOUT_SIDE, 0};
+    l1_env env = mkenv(0, 2);
+    env.net_rows = 1;
+    l1_open(l, &s, &env);
+    hover(l, 0);
+    ev(l, L1E_RIGHT), ev(l, L1E_RIGHT), ev(l, L1E_RIGHT);   /* Mode: Off -> Split -> Host -> Join */
+    l1_settings_get(l, &s);
+    int join = s.net_mode == L1N_JOIN;
+    CHECK(join);
+    hover(l, 1);
+    type_str(l, "fedfrfradxx");
+    l1_settings_get(l, &s);
+    CHECK(!strcmp(s.join_addr, "fedfrfradxx"));
+    ev(l, L1E_BACKSPACE), ev(l, L1E_BACKSPACE);
+    l1_settings_get(l, &s);
+    CHECK(!strcmp(s.join_addr, "fedfrfrad"));
+    hover(l, 0);
+    ev(l, L1E_CLEAR);   /* not on the address row: nothing */
+    l1_settings_get(l, &s);
+    CHECK(!strcmp(s.join_addr, "fedfrfrad"));
+    hover(l, 1);
+    ev(l, L1E_CLEAR);
+    l1_settings_get(l, &s);
+    CHECK(s.join_addr[0] == 0);
+    type_str(l, "10.0.0.5:28410");
+    l1_settings_get(l, &s);
+    CHECK(!strcmp(s.join_addr, "10.0.0.5:28410"));
+    l1_free(l);
 }
 
 /* the stub of the network glue (menu.c net_request): Start -> error state, Disconnect -> idle; the model keeps asking for Start after an error */
@@ -1423,6 +1480,7 @@ static void test_sharing(void)
 int main(void)
 {
     test_typed_queue();
+    test_addr_edit_keys();
     test_net_stub();
     test_texts();
     test_persons();

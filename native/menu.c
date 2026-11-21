@@ -511,6 +511,7 @@ static void read_raw(l1_raw *raw, int *pads, int want_pads)
     raw->up = (unsigned char)key_down(VK_UP, fg), raw->down = (unsigned char)key_down(VK_DOWN, fg), raw->left = (unsigned char)key_down(VK_LEFT, fg);
     raw->right = (unsigned char)key_down(VK_RIGHT, fg), raw->enter = (unsigned char)key_down(VK_RETURN, fg), raw->space = (unsigned char)key_down(VK_SPACE, fg);
     raw->esc = (unsigned char)key_down(VK_ESCAPE, fg), raw->f6 = (unsigned char)key_down(VK_F6, fg);
+    raw->backspace = (unsigned char)key_down(VK_BACK, fg), raw->del = (unsigned char)key_down(VK_DELETE, fg);   /* fix024 (player report #1): Backspace was never read */
     int n = 0;
     for (int u = 0; u < 2 && want_pads; u++) {   /* polling an unplugged XInput user is slow: only while the title menu waits or the lobby is open */
         XINPUT_GAMEPAD gp;
@@ -552,7 +553,22 @@ static int mouse_events(l1_event *ev, int max, unsigned now)
  * The window procedure only queues the character (l1_typed_push: printable ASCII), the game thread takes it in menu_frame and hands it to the model as raw.typed. */
 static LRESULT CALLBACK chr_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == WM_CHAR) {
+    if (msg == WM_CHAR && wp == 0x16) {   /* fix024: Ctrl+V pastes the clipboard's text into the address (blanks left out) */
+        char clip[96];
+        clip[0] = 0;
+        if (OpenClipboard(w)) {
+            HANDLE h = GetClipboardData(CF_TEXT);
+            const char *p = h ? (const char *)GlobalLock(h) : NULL;
+            if (p) {
+                lstrcpynA(clip, p, (int)sizeof clip);
+                GlobalUnlock(h);
+            }
+            CloseClipboard();
+        }
+        EnterCriticalSection(&g_chl);
+        l1_typed_paste(&g_typed, clip);
+        LeaveCriticalSection(&g_chl);
+    } else if (msg == WM_CHAR) {
         EnterCriticalSection(&g_chl);
         l1_typed_push(&g_typed, (unsigned)wp);
         LeaveCriticalSection(&g_chl);
