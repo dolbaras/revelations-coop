@@ -560,7 +560,7 @@ void probe_install(void)
 {
     net1_cfg nc;
     memset(&nc, 0, sizeof nc);
-    nc.transport = "enet", nc.threaded = 1, nc.exe_sha = r1_exe_ok() ? r1_exe_sha() : NULL, nc.log = net_log_sink;   /* the exe tag is the SHA-256 of the supported build: a host refuses a join from another build */
+    nc.transport = "enet", nc.threaded = 1, nc.exe_sha = r1_exe_ok() ? r1_net_sha() : NULL, nc.log = net_log_sink;   /* the exe tag is the SHA-256 of the supported build: a host refuses a join from another build */
     net1_configure(&nc);
     lt_add_frame_cb(probe_frame);
     capture_init();

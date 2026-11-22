@@ -24,6 +24,7 @@
 
 #include "r1.h"
 #include "chain_logic.h"
+#include "variants.h"
 
 typedef HRESULT (WINAPI *DirectInput8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID *, LPUNKNOWN);
 static DirectInput8Create_t real_DirectInput8Create;
@@ -31,6 +32,7 @@ static char log_path[MAX_PATH];
 static CRITICAL_SECTION log_lock;
 static int exe_ok;
 static char exe_sha[65];
+static int gate_consented;
 
 void r1_log(const char *fmt, ...)
 {
@@ -64,6 +66,31 @@ int r1_env(const char *name, char *out, int size)
 
 int r1_exe_ok(void) { return exe_ok; }
 const char *r1_exe_sha(void) { return exe_sha; }
+const char *r1_net_sha(void) { return gate_consented ? exe_sha : R1_NET_TAG_SHA; }
+int r1_gate_consented(void) { return gate_consented; }
+
+/* The player's consent for an exe of no known build: <exe folder>\coop\anyexe.txt holds a line "sha256=<this exe's hash>" (written by the installer after asking). Plain file calls: we are inside DllMain. */
+static int consent_for(const char *sha)
+{
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+    char *slash = strrchr(path, '\\');
+    if (!n || !slash || slash - path + 18 >= MAX_PATH) return 0;
+    strcpy(slash + 1, "coop\\anyexe.txt");
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    char buf[1024];
+    DWORD got = 0;
+    int ok = 0;
+    if (ReadFile(f, buf, sizeof buf - 1, &got, NULL)) {
+        buf[got] = 0;
+        for (char *p = buf; (p = strstr(p, "sha256=")) != NULL; p += 7) {
+            if (_strnicmp(p + 7, sha, 64) == 0) { ok = 1; break; }
+        }
+    }
+    CloseHandle(f);
+    return ok;
+}
 
 int r1_safe_read(const void *addr, void *out, unsigned size)
 {
@@ -453,13 +480,23 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             real_CreateMutexA = (CreateMutexA_t)r1_patch_iat("KERNEL32.dll", "CreateMutexA", (void *)hook_CreateMutexA);
             r1_log("multi: REV1_MULTI=1, CreateMutexA hook %s", real_CreateMutexA ? "installed" : "NOT installed (import not found)");
         }
-        if (hash_exe(exe_sha))
+        const char *gate_why = "";
+        if (hash_exe(exe_sha)) {
             exe_ok = strcmp(exe_sha, R1_EXE_SHA256) == 0;
-        if (!exe_ok && r1_env("REV1_ANYEXE", v, sizeof v) && v[0] == '1') {
+            if (!exe_ok) {
+                for (int i = 0; i < R1_N_VARIANTS; i++)
+                    if (strcmp(exe_sha, r1_variants[i].sha256) == 0) { gate_why = r1_variants[i].id; break; }
+                if (!gate_why[0] && consent_for(exe_sha)) { exe_ok = 1; gate_consented = 1; }
+            }
+        }
+        if (!exe_ok && !gate_why[0] && r1_env("REV1_ANYEXE", v, sizeof v) && v[0] == '1') {
             exe_ok = 1;
             r1_log("gate: REV1_ANYEXE=1, hooks installed on an unsupported exe");
         }
-        r1_log("gate: exe sha256 %s -> %s", exe_sha[0] ? exe_sha : "(unreadable)", exe_ok ? "supported build 13298487" : "UNSUPPORTED, forwarding only");
+        if (gate_why[0] && !exe_ok)
+            r1_log("gate: this exe is the known build %s, which needs its own dinput8.dll (this one is for %s): forwarding only", gate_why, R1_BUILD_ID);
+        r1_log("gate: exe sha256 %s -> %s", exe_sha[0] ? exe_sha : "(unreadable)",
+               exe_ok ? (gate_consented ? "UNKNOWN build, running by the player's consent (every check fails closed)" : R1_BUILD_LABEL) : "UNSUPPORTED, forwarding only");
         if (exe_ok) {
             testmode_install();
             d3d_install();

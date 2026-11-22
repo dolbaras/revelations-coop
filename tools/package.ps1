@@ -17,7 +17,7 @@
 # shortcut's launcher updates from: the launcher takes the first asset matching revelations-coop-*.zip). Made by <workspace>\tools\mkinstaller (-Mkinstaller <folder>
 # for a clone placed elsewhere); the exe is unsigned. -Dist: write to that folder instead of dist\ (tests).
 param([Parameter(Mandatory)] [string] $Version, [switch] $Exe, [string] $Mkinstaller = "", [string] $Dist = "", [string] $Dll = "", [string] $LogCollector = "",
-      [switch] $AnyDllVersion)
+      [switch] $AnyDllVersion, [hashtable] $PortDll = @{})
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 # The workspace's shared tools (<workspace>\tools\<name>): the first folder above the repository that has it (mod\ and work\wt-* both work).
@@ -48,6 +48,23 @@ New-Item -ItemType Directory -Force $files, (Join-Path $files "coop") | Out-Null
 # The players' readme carries the version (@VERSION@ in docs\release-readme.txt), so it cannot go out with the number of an older release.
 $readme = (Get-Content -LiteralPath (Join-Path $root "docs\release-readme.txt") -Raw).Replace("@VERSION@", $Version)
 Copy-Item $dllFile (Join-Path $files "dinput8.dll")
+# The known game exes (tools\variants.json): the installer picks the DLL of the exe's build. The DLLs of the ported builds (native\build\dinput8-<id>.dll, built by
+# native\build_port.sh) go to files\coop\variants\ when they exist (a variant without one is left out of the package's list: its exe is then asked about like any other).
+$variantList = (Get-Content -LiteralPath (Join-Path $PSScriptRoot "variants.json") -Raw -Encoding UTF8 | ConvertFrom-Json).variants
+$shipVariants = @()
+foreach ($v in $variantList) {
+    if ($v.kind -ne "ported") { $shipVariants += $v; continue }
+    $src = Join-Path $root ("native\build\dinput8-" + $v.id + ".dll")
+    if ($PortDll.ContainsKey($v.id)) { $src = $PortDll[$v.id] }
+    if (-not (Test-Path -LiteralPath $src)) { Write-Host "note: no DLL for the ported build $($v.id) ($src): left out of this package"; continue }
+    if (-not ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($src))).Contains("RE Revelations co-op proxy")) { throw "$src is not the Revelations co-op proxy" }
+    $dst = Join-Path $files ($v.dll -replace "/", "\")
+    New-Item -ItemType Directory -Force (Split-Path $dst -Parent) | Out-Null
+    Copy-Item $src $dst
+    $shipVariants += $v
+}
+$variantJson = (@{ variants = @($shipVariants) } | ConvertTo-Json -Depth 4)
+Set-Content -Path (Join-Path $files "coop\variants.json") -Value $variantJson -Encoding UTF8
 Set-Content -Path (Join-Path $files "coop\version.txt") -Value $Version -Encoding ASCII
 # The "Resident Evil Revelations Co-op" shortcut's launcher: updates the mod from the GitHub releases, then starts the game.
 Copy-Item (Join-Path $PSScriptRoot "launcher.ps1") (Join-Path $files "coop\coop-launcher.ps1")
@@ -73,6 +90,7 @@ $list = Get-ChildItem $files -Recurse -File | ForEach-Object { $_.FullName.Subst
 Set-Content -Path (Join-Path $files "coop\payload.txt") -Value (@($list) + "coop\payload.txt") -Encoding ASCII
 # Installer at the archive's root (the launcher runs <zip>\coop-installer.ps1 -Game <folder> -AutoClose -NoShortcut)
 Copy-Item (Join-Path $PSScriptRoot "installer.ps1") (Join-Path $stage "coop-installer.ps1")
+Copy-Item (Join-Path $files "coop\variants.json") (Join-Path $stage "variants.json")
 Copy-Item (Join-Path $PSScriptRoot "coop-texts.ps1") (Join-Path $stage "coop-texts.ps1")
 Set-Content -Path (Join-Path $stage "Install Co-op.bat") -Encoding ASCII `
     -Value '@start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0coop-installer.ps1" %*'

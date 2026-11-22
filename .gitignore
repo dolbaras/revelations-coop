@@ -6,3 +6,4 @@ tests/build/
 *.exe
 test_lobby1.ini
 native/build-*/
+build/

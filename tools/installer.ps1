@@ -18,10 +18,12 @@
 # so every later installer has to take these: -AutoClose closes the window after a successful install, -NoShortcut keeps the shortcuts as they are (only
 # those already made are refreshed). -ShortcutDir puts new shortcuts in that folder instead (tests).
 # -AnyExe: skip the check of rerev.exe's hash (tests on a stand-in folder only).
+# -AcceptUntested: an exe of no known build (tools\variants.json) is installed without asking (the window asks the player; -Quiet refuses without this).
+#   The consent is written to <game>\coop\anyexe.txt (the exe's SHA-256) and the mod's DLL runs on that exe with every check failing closed.
 # Usage: coop-installer.ps1 [-Game <folder>] [-Uninstall] [-Quiet] [-Lang en|ru|de|fr|it|es|pt|pt-br|nl|pl|ja|zh-cn|zh-tw]
 #                           [-AutoClose] [-NoShortcut] [-ShortcutDir <folder>]
 param([string] $Game = "", [switch] $Uninstall, [switch] $Quiet, [switch] $IgnoreRunning, [string] $Lang = "",
-      [switch] $AutoClose, [switch] $NoShortcut, [string] $ShortcutDir = "", [switch] $AnyExe)
+      [switch] $AutoClose, [switch] $NoShortcut, [string] $ShortcutDir = "", [switch] $AnyExe, [switch] $AcceptUntested)
 $ErrorActionPreference = "Stop"
 # (tests: the launcher starts a new release's installer without -AnyExe; RE1_COOP_ANYEXE=1 does the same)
 if ($env:RE1_COOP_ANYEXE -eq "1") { $AnyExe = [switch]::Present }
@@ -36,6 +38,15 @@ $script:TITLE = "Resident Evil Revelations Co-op"
 $script:EXE_SHA = "1573B79EB921B1E7F571E6DEB71C39961C7F1940FAD6D19283FC3AEA7FCA48AA"
 $script:STEAM_APP = "222480"
 $script:DLL_MARK = "RE Revelations co-op proxy"
+# The known game exes (tools\variants.json: next to this installer, in the game's coop\ folder for the uninstaller, or in the payload): the supported Steam build
+# and the ported older build(s), each with the DLL that belongs to it. Another exe: the player is asked (Exe-Info / Exe-Ok).
+$script:VARIANTS = @()
+foreach ($vp in (Join-Path $here "variants.json"), (Join-Path $here "coop\variants.json"), (Join-Path $payload "coop\variants.json")) {
+    if (-not $script:VARIANTS.Count -and (Test-Path -LiteralPath $vp)) {
+        try { $script:VARIANTS = @((Get-Content -LiteralPath $vp -Raw -Encoding UTF8 | ConvertFrom-Json).variants) } catch { }
+    }
+}
+$script:askedYes = $false
 . (Join-Path $here "coop-texts.ps1")
 $script:lang = Pick-Lang $Lang
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -148,8 +159,23 @@ function Sha256-File($p) {
 
 # 1 = the supported exe, 0 = another one
 function Exe-Ok($g) {
-    if ($AnyExe) { return $true }
-    (Sha256-File (Join-Path $g "rerev.exe")) -eq $script:EXE_SHA
+    if ($AnyExe -or $AcceptUntested -or $script:askedYes) { return $true }
+    $e = Exe-Info $g
+    [bool]($e.variant -or $e.consent)
+}
+
+# What the exe is: its hash and size, the known build it is (or $null), and whether the player agreed to an untested one earlier (coop\anyexe.txt names the hash).
+function Exe-Info($g) {
+    $exe = Join-Path $g "rerev.exe"
+    $sha = Sha256-File $exe
+    $v = $script:VARIANTS | Where-Object { "$($_.sha256)".ToUpper() -eq $sha } | Select-Object -First 1
+    if (-not $v -and $sha -eq $script:EXE_SHA) { $v = [pscustomobject]@{ id = "steam-13298487"; kind = "supported"; dll = "dinput8.dll"; sha256 = $sha; label = "Steam build 13298487" } }
+    $consent = $false
+    $cf = Join-Path $g "coop\anyexe.txt"
+    if (-not $v -and (Test-Path -LiteralPath $cf)) {
+        try { if ((Get-Content -LiteralPath $cf -Raw) -match "(?im)^sha256=$sha\s*$") { $consent = $true } } catch { }
+    }
+    @{ sha = $sha; size = (Get-Item -LiteralPath $exe).Length; variant = $v; consent = $consent }
 }
 
 # Candidate game folders, most likely first.
@@ -510,6 +536,7 @@ function Run-Elevated($g, [switch] $Remove) {
     if ($Remove) { $a += "-Uninstall" }
     if ($AutoClose) { $a += "-AutoClose" }
     if ($NoShortcut) { $a += "-NoShortcut" }
+    if ($AcceptUntested -or $script:askedYes) { $a += "-AcceptUntested" }
     if ($ShortcutDir) { $a += @("-ShortcutDir", (Quote-Arg $ShortcutDir)) }
     if ($Lang) { $a += @("-Lang", $Lang) }
     try {
@@ -526,7 +553,10 @@ function Do-Install($g) {
     Ui-Step "check" "run"
     Ui-Progress 1 $g
     if (-not (Test-Path -LiteralPath $payload)) { throw (L "nofiles") }
-    if (-not (Exe-Ok $g)) { throw (L "badexe") }
+    $ex = Exe-Info $g
+    if (-not (Exe-Ok $g)) { throw (L "anyquiet" $ex.sha ("{0}" -f $ex.size)) }
+    $variantId = if ($ex.variant) { "$($ex.variant.id)" } else { "untested" }
+    $variantDll = if ($ex.variant -and $ex.variant.kind -eq "ported") { ("$($ex.variant.dll)" -replace "/", "\") } else { $null }
     # The payload first into a folder of this installer's own: whatever happens to the folder it came in (an old launcher started twice cleans it up) cannot
     # take files away mid-copy.
     $snap = Join-Path ([IO.Path]::GetTempPath()) ("re1-coop-payload-" + $PID)
@@ -541,6 +571,7 @@ function Do-Install($g) {
         if (-not (Test-Path -LiteralPath (Join-Path $payload $rel))) { Ui-Log ("missing: " + $rel); throw (L "incomplete") }
     }
     if (-not $IgnoreRunning -and (Game-Running $g)) { throw (L "closegame") }
+    if ($variantDll -and -not (Test-Path -LiteralPath (Join-Path $payload $variantDll))) { Ui-Log ("missing: " + $variantDll); throw (L "incomplete") }
     Lock-Install
     $old = Read-Manifest $g
     if ($old.version) { Ui-Log ((L "have" $old.version $version)) }
@@ -559,7 +590,7 @@ function Do-Install($g) {
     $links = @($old.shortcuts)
     $chains = New-Object System.Collections.Generic.List[string]
     $writeRecord = {
-        $lines = @("version=$version") + ($files | ForEach-Object { "file=$_" }) + ($backups | ForEach-Object { "backup=$_" }) + ($chains | ForEach-Object { "chain=$_" }) +
+        $lines = @("version=$version", "variant=$variantId") + ($files | ForEach-Object { "file=$_" }) + ($backups | ForEach-Object { "backup=$_" }) + ($chains | ForEach-Object { "chain=$_" }) +
                  ($links | ForEach-Object { "shortcut=$_" })
         New-Item -ItemType Directory -Force (Join-Path $g "coop") | Out-Null
         Set-Content -LiteralPath (Join-Path $g "coop\install.txt") -Value $lines -Encoding UTF8
@@ -592,6 +623,7 @@ function Do-Install($g) {
         $i++
         $rel = $item.FullName.Substring($payload.Length + 1)
         if ($rel -eq "coop\version.txt") { $versionFile = $item; $files.Add($rel); continue }
+        if ($rel.StartsWith("coop\variants\")) { continue }   # (the other builds' DLLs stay in the package: only the one for this exe goes to dinput8.dll)
         $dst = Join-Path $g $rel
         Ui-Progress (3 + 70 * $i / $all.Count) $rel
         # A file of someone else's that we replace (another dinput8.dll: an ASI loader, a graphics fix): keep the original once (our own DLL of an earlier version is not one).
@@ -607,10 +639,20 @@ function Do-Install($g) {
             Ui-Log ((L "kept") + $rel)
         }
         New-Item -ItemType Directory -Force (Split-Path $dst -Parent) | Out-Null
-        Copy-Item -LiteralPath $item.FullName $dst -Force
+        $srcFile = $item.FullName
+        if ($rel -eq "dinput8.dll" -and $variantDll) { $srcFile = Join-Path $payload $variantDll }
+        Copy-Item -LiteralPath $srcFile $dst -Force
         $files.Add($rel)
     }
     Ui-Log (L "copied" $($all.Count))
+    if ($variantDll) { Ui-Log (L "oldbuild" "$($ex.variant.label)") }
+    # An exe of no known build, installed by the player's yes: the consent (the exe's hash) is in the game folder, listed in the record so the removal takes it away.
+    if (-not $ex.variant -and -not $AnyExe) {
+        $cf = Join-Path $g "coop\anyexe.txt"
+        New-Item -ItemType Directory -Force (Split-Path $cf -Parent) | Out-Null
+        Set-Content -LiteralPath $cf -Value @("sha256=$($ex.sha)", "size=$($ex.size)", "date=$((Get-Date).ToString('yyyy-MM-dd'))", "version=$version") -Encoding ASCII
+        if ($files -notcontains "coop\anyexe.txt") { $files.Add("coop\anyexe.txt") }
+    }
     # The player's ASI loader (kept in coop-backup) runs on as winmm.dll (Chain-Plan): the copies are in the record before they are made, so a run that breaks off
     # leaves nothing the uninstaller does not know.
     $plan = Chain-Plan $g $old $backups
@@ -882,8 +924,11 @@ function Update-Setup {
     } elseif (-not (Test-Game $g)) {
         $lines += ([string][char]0x2716 + "  " + (L "noexe"))
     } elseif (-not (Exe-Ok $g)) {
+        # an exe of no known build: the page says so, Install asks (Start-Install)
+        $ei = Exe-Info $g
+        $ok = $true
         $lines += ([string][char]0x2714 + "  " + (L "found"))
-        $lines += ([string][char]0x2716 + "  " + (L "badexe"))
+        $lines += ([string][char]0x26A0 + "  " + (L "anyinfo" $ei.sha ("{0}" -f $ei.size)))
     } else {
         $ok = $true
         $lines += ([string][char]0x2714 + "  " + (L "found"))
@@ -964,6 +1009,12 @@ function Elevated-Instead($g, [switch] $Remove) {
 
 function Start-Install($g) {
     $g = (Resolve-Path -LiteralPath $g).Path
+    if (-not (Exe-Ok $g)) {
+        $ei = Exe-Info $g
+        $q = [Windows.Forms.MessageBox]::Show($form, (L "anyq" $ei.sha), $script:TITLE, "YesNo", "Warning")
+        if ($q -ne "Yes") { return }
+        $script:askedYes = $true
+    }
     if (Elevated-Instead $g) { return }
     $script:target = $g
     $ic = Window-Icon $g
@@ -1033,7 +1084,7 @@ $btCancel.Add_Click({ $form.Close() })
 $btClose.Add_Click({ $form.Close() })
 $btGo.Add_Click({
     $g = $tbGame.Text.Trim().Trim('"')
-    if (-not (Test-Game $g) -or -not (Exe-Ok $g)) { return }
+    if (-not (Test-Game $g)) { return }
     if (-not $IgnoreRunning -and (Game-Running $g)) {
         [Windows.Forms.MessageBox]::Show($form, (L "closegame"), $script:TITLE, "OK", "Warning") | Out-Null
         return

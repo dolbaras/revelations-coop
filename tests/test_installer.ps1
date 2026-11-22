@@ -16,7 +16,7 @@ $tools = Join-Path $root "tools"
 $base = Join-Path ([IO.Path]::GetTempPath()) ("re1-installer-test-" + $PID)
 Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $base | Out-Null
-$cur = "0.2.4"   # the version of THIS tree (native\r1.h); the older releases below are the published ones
+$cur = "0.2.5"   # the version of THIS tree (native\r1.h); the older releases below are the published ones
 $script:fails = 0; $script:checks = 0
 function Check($cond, $name) { $script:checks++; if ($cond) { Write-Host "ok   $name" } else { Write-Host "FAIL $name"; $script:fails++ } }
 function Sha($p) { $fs = [IO.File]::OpenRead($p); try { [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)) -replace "-", "" } finally { $fs.Close() } }
@@ -78,7 +78,7 @@ Check ($en.Count -ge 18 -and $bs.Count -eq 0 -and ($en -contains "files/coop/coo
 $x1 = Join-Path $base "x1"; $x2 = Join-Path $base "x2"; $x3 = Join-Path $base "x3"
 [IO.Compression.ZipFile]::ExtractToDirectory($zip1, $x1); [IO.Compression.ZipFile]::ExtractToDirectory($zip2, $x2); [IO.Compression.ZipFile]::ExtractToDirectory($zip3, $x3)
 $names = (Get-ChildItem $x1 -File | ForEach-Object Name) -join ","
-Check ($names -eq "coop-installer.ps1,coop-texts.ps1,ENET-LICENSE.txt,Install Co-op.bat,LICENSE.txt,README-COOP.txt") "the zip root: $names"
+Check ($names -eq "coop-installer.ps1,coop-texts.ps1,ENET-LICENSE.txt,Install Co-op.bat,LICENSE.txt,README-COOP.txt,variants.json") "the zip root: $names"
 $payload1 = @(Get-Content (Join-Path $x1 "files\coop\payload.txt"))
 Check ((($payload1 -contains "dinput8.dll") -and ($payload1 -contains "coop\coop-launcher.ps1") -and ($payload1 -contains "coop\coop-installer.ps1") -and ($payload1 -contains "coop\coop-texts.ps1") -and ($payload1 -contains "coop\version.txt"))) "payload list names the DLL, launcher, installer, texts and version"
 Check ((($payload1 -contains "coop\collect-logs.ps1") -and ($payload1 -contains "coop\Collect logs.bat") -and ($payload1 -contains "coop\log-profiles\revelations1.psd1"))) "payload list names the log collector, its .bat and the profile"
@@ -122,7 +122,7 @@ $clean = Snap $g
 # 1. refusal: not the supported exe (no -AnyExe): nothing may change
 Run-PS (Join-Path $x1 "coop-installer.ps1") @("-Quiet", "-Game", "`"$g`"", "-Lang", "en")
 Check ($script:exit -eq 1) "a fake exe is refused (exit $($script:exit))"
-Check ($script:out -match "13298487") "the refusal names the supported build"
+Check ($script:out -match "tested game version" -and $script:out -match "SHA-256 [0-9A-F]{64}" -and $script:out -match "AcceptUntested" -and $script:out -match "licensed copy is recommended") "the refusal shows the hash, says untested and names -AcceptUntested"
 Check (Same $clean (Snap $g)) "nothing changed after the refusal"
 
 # 2. install 0.0.1 over a game that has a foreign dinput8.dll
@@ -771,6 +771,54 @@ $lsrc = Get-Content (Join-Path $tools "launcher.ps1") -Raw
 Check ($lsrc -match 'Lt "net"') "launcher.ps1 shows the network line (l_net) in its update window"
 foreach ($lg in $script:LANGS.Keys) {
     Check (($script:TEXTS[$lg]["l_net"] -match "28410") -and ($script:TEXTS[$lg]["net"] -match "28410") -and ($script:TEXTS[$lg]["net"] -match "Steam")) "texts $lg : net / l_net name UDP port 28410 and the Steam way"
+}
+
+# 15. compat: known builds (tools\variants.json) and untested exes. Stand-in exes only; the build table is edited in a COPY of the package (a stand-in hash is made a "ported" build with a stand-in DLL).
+$cv = Join-Path $base "cv"; Copy-Item $x3 $cv -Recurse
+function Sha-Text($p) { Sha $p }
+$vj = Get-Content -LiteralPath (Join-Path $cv "variants.json") -Raw | ConvertFrom-Json
+Check (@($vj.variants).Count -ge 1 -and ((@($vj.variants) | Where-Object { $_.kind -eq "supported" }).sha256 -eq "1573B79EB921B1E7F571E6DEB71C39961C7F1940FAD6D19283FC3AEA7FCA48AA")) "the package's variants.json lists the supported build"
+# (the generated header of the proxy is the same table)
+$gv = & python -I (Join-Path $tools "gen_variants.py") --check; 
+Check ($LASTEXITCODE -eq 0) "native\variants.h is generated from tools\variants.json"
+# the old build's hash on a stand-in exe + a stand-in ported DLL in the package copy
+$gOld = New-Game "old build game"
+$oldSha = Sha (Join-Path $gOld "rerev.exe")
+$ported = @{ variants = @(@($vj.variants) + [pscustomobject]@{ id = "b2019-test"; sha256 = $oldSha; size = 1; kind = "ported"; dll = "coop/variants/dinput8-b2019-test.dll"; label = "older test build" }) }
+$pj = $ported | ConvertTo-Json -Depth 4
+Set-Content -LiteralPath (Join-Path $cv "variants.json") -Value $pj -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $cv "files\coop\variants.json") -Value $pj -Encoding UTF8
+New-Item -ItemType Directory -Force (Join-Path $cv "files\coop\variants") | Out-Null
+[IO.File]::WriteAllText((Join-Path $cv "files\coop\variants\dinput8-b2019-test.dll"), "MZ RE Revelations co-op proxy PORTED stand-in")
+Add-Content -LiteralPath (Join-Path $cv "files\coop\payload.txt") -Value "coop\variants\dinput8-b2019-test.dll" -Encoding ASCII
+Run-PS (Join-Path $cv "coop-installer.ps1") @("-Quiet", "-Game", "`"$gOld`"", "-ShortcutDir", "`"$(Join-Path $base 'links cv')`"", "-Lang", "en")
+Check ($script:exit -eq 0 -and $script:out -match "older test build") "a known ported build installs without asking (exit $($script:exit))"
+Check ((Get-Content -LiteralPath (Join-Path $gOld "dinput8.dll") -Raw) -match "PORTED stand-in") "the ported build gets its own DLL as dinput8.dll"
+Check (-not (Test-Path -LiteralPath (Join-Path $gOld "coop\variants"))) "the other builds' DLLs are not copied to the game"
+Check (-not (Test-Path -LiteralPath (Join-Path $gOld "coop\anyexe.txt")) -and ((Get-Content -LiteralPath (Join-Path $gOld "coop\install.txt") -Raw) -match "variant=b2019-test")) "no consent file for a known build; the record names the variant"
+$before = Snap $gOld
+Run-PS (Join-Path $cv "coop-installer.ps1") @("-Quiet", "-Uninstall", "-Game", "`"$gOld`"", "-Lang", "en")
+Check (-not (Test-Path -LiteralPath (Join-Path $gOld "dinput8.dll")) -and -not (Test-Path -LiteralPath (Join-Path $gOld "coop"))) "uninstall removes the ported build's install"
+# an exe of no known build: -Quiet refuses, -AcceptUntested installs the supported DLL + the consent record, the record is listed and removed, a second run does not ask again
+$gU = New-Game "untested game"
+$cleanU = Snap $gU
+Run-PS (Join-Path $x3 "coop-installer.ps1") @("-Quiet", "-Game", "`"$gU`"", "-Lang", "ru")
+Check ($script:exit -eq 1 -and (Same $cleanU (Snap $gU))) "an untested exe: -Quiet refuses and changes nothing"
+Run-PS (Join-Path $x3 "coop-installer.ps1") @("-Quiet", "-AcceptUntested", "-Game", "`"$gU`"", "-ShortcutDir", "`"$(Join-Path $base 'links cv')`"", "-Lang", "en")
+$uSha = Sha (Join-Path $gU "rerev.exe")
+Check ($script:exit -eq 0 -and (Sha (Join-Path $gU "dinput8.dll")) -eq (Sha (Join-Path $x3 "files\dinput8.dll"))) "-AcceptUntested installs the supported build's DLL"
+Check ((Get-Content -LiteralPath (Join-Path $gU "coop\anyexe.txt") -Raw) -match "sha256=$uSha" -and ((Get-Content -LiteralPath (Join-Path $gU "coop\install.txt")) -contains "file=coop\anyexe.txt")) "the consent (the exe's hash) is written and listed in the record"
+Run-PS (Join-Path $x3 "coop-installer.ps1") @("-Quiet", "-Game", "`"$gU`"", "-ShortcutDir", "`"$(Join-Path $base 'links cv')`"", "-Lang", "en")
+Check ($script:exit -eq 0) "a second run on the same exe does not ask again (the consent record)"
+[IO.File]::WriteAllText((Join-Path $gU "rerev.exe"), "MZ another untested exe")
+Run-PS (Join-Path $x3 "coop-installer.ps1") @("-Quiet", "-Game", "`"$gU`"", "-Lang", "en")
+Check ($script:exit -eq 1) "a consent for another hash is ignored"
+[IO.File]::WriteAllText((Join-Path $gU "rerev.exe"), "MZ fake game exe untested game")
+Run-PS (Join-Path $x3 "coop-installer.ps1") @("-Quiet", "-Uninstall", "-Game", "`"$gU`"", "-Lang", "en")
+Check (-not (Test-Path -LiteralPath (Join-Path $gU "coop")) -and -not (Test-Path -LiteralPath (Join-Path $gU "dinput8.dll"))) "uninstall takes the consent record away too"
+foreach ($lg in $script:LANGS.Keys) {
+    $t = $script:TEXTS[$lg]
+    Check ($t["anyinfo"] -and $t["anyq"] -and $t["anyquiet"] -and $t["oldbuild"] -and $t["anyq"] -match "\{0\}" -and $t["anyquiet"] -match "AcceptUntested" -and $t["anyquiet"] -match "\{0\}" -and $t["anyquiet"] -match "\{1\}") "texts $lg : the untested-exe question, info, refusal and build line exist"
 }
 
 if (-not $Keep) { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }

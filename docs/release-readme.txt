@@ -1,7 +1,7 @@
 Resident Evil Revelations Co-op - version @VERSION@
 ================================================================
 
-Two players in the story campaign of Resident Evil Revelations (2013 PC, Steam build 13298487): on one PC with split screen and two gamepads, or on two PCs over the network.
+Two players in the story campaign of Resident Evil Revelations (2013 PC, Steam build 13298487; an older game build is supported too, see "Needs"): on one PC with split screen and two gamepads, or on two PCs over the network.
 
 What it does
 - The campaign's AI partner (Parker, Jessica, Chris, Keith, Quint depending on the part of the story) is taken over by a second player. Each player has an own camera, an own HUD
@@ -40,7 +40,7 @@ Install
    "Resident Evil Revelations Co-op" shortcut (desktop, Start menu). Start the game with that shortcut (it starts it through Steam): it also installs a newer version of the
    mod from GitHub first, if there is one (no internet: the game starts as it is). A new version is installed only when its download matches the checksum GitHub gives for it.
 3. In the main menu choose "Co-Op Play" (the fourth entry) to open the co-op lobby; F6 (keyboard) or BACK (gamepad) open it too.
-If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0, 0.2.1, 0.2.2 or 0.2.3): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.3 and 0.2.4): the lobby refuses the other version and says so.
+If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0, 0.2.1, 0.2.2, 0.2.3 or 0.2.4): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.4 and 0.2.5): the lobby refuses the other version and says so.
 
 Network play: Steam friends or IP address
 - "Steam friends": the host starts hosting, the friend joins from the Steam friends list ("Join Game") or from the host's invite. No address and no port forwarding are needed.
@@ -69,10 +69,21 @@ Remove: run "Uninstall Co-op.bat" in the game folder (or the installer again and
 puts the backed-up files back and removes the shortcuts. Your saves are not touched (the co-op save folder rev1_coop_save stays too); the lobby's settings file stays in %LOCALAPPDATA%\CAPCOM\RESIDENT EVIL REVELATIONS
 (rev1_coop.ini, a few lines); screenshots you took with the mod stay in rev1_coop\shots.
 
-Needs: the Steam version of Resident Evil Revelations, build 13298487 (the installer checks rerev.exe and refuses any other one), Windows 10 or 11, PowerShell
-5.1 (part of Windows), two gamepads for two players on one PC. The mod changes no game file other than adding dinput8.dll; it does not touch the Steam stub or Raid.
+Needs: Resident Evil Revelations for PC: tested and supported is the Steam build 13298487; also made for an older build (PE timestamp 2019-02-23, a copy with the Steam wrapper
+removed, rerev.exe SHA-256 BA1F0168...4F88), for which the installer puts a DLL made for it. A licensed copy is recommended; on other versions stable work is not guaranteed.
+Any other rerev.exe: the installer shows its SHA-256 and size and asks whether to install anyway on an untested version (see "Other game versions" under Limits). Windows 10 or 11, PowerShell
+5.1 (part of Windows), two gamepads for two players on one PC. The mod changes no game file other than adding dinput8.dll; it does not touch the Steam stub, steam_api.dll, any Steam emulator's files or Raid, and it never works around a copy protection.
 
 Limits
+- Other game versions (0.2.5): A licensed copy is recommended; on other versions stable work is not guaranteed. The installer recognises the Steam build 13298487 and the older build
+  (2019-02-23, unwrapped) by the SHA-256 of rerev.exe and installs the DLL made for each. The older build's DLL is the same mod with the game's addresses moved to that build (every patch checks the game's
+  code bytes first and switches itself off, with a line in rev1_coop.log, when they are not the expected ones). What was run on the older build and what was not is in the release notes
+  ("Checked" and "Not verified"); the lobby's Steam friends and invitations are not available on a copy that has a Steam emulator instead of Steam: use "Direct IP" (UDP 28410). The older build
+  is not large-address-aware (2 GB): long split-screen sessions are not verified. On the older build the second player's shots in split screen follow his own view and damaged and killed an enemy in our last test
+  (one earlier test run of the same kind, with too few lucky hits, showed no damage: the test aims by steering and hits only when the line is within about 20 units of the enemy; it is only a few minutes of play, not a long fight). A network game between the two builds
+  (Steam build hosts, older build joins by IP) was checked for walking, aiming, the reload, the knife and the weapon change of a keyboard / mouse guest, and the guest's aimed shots on the older build damaged an enemy there. For any other rerev.exe the installer asks before it installs (the answer is kept in coop\anyexe.txt for that
+  exe only, and "Remove co-op" deletes it); the mod then runs with the Steam build's DLL and every patch checks the game's bytes; whatever does not match stays off. A network game needs the
+  same mod version on both PCs; the supported and the older build can join each other (they send the same build tag) - see the notes for what was verified.
 - Network play is for one person per PC. In the Guest Cabin part of Episode 2 the second player plays HUNK instead of the partner the story locks away: HUNK appears, walks and shoots there (on two PCs and in split screen) and the end of the part leads both PCs into Episode 3, but the part's own story (its scenes, doors and enemies) was not played through with HUNK; Split screen on one PC works in every part of the story with two playable characters.
 - Not verified with two real PCs in this version: the last boss fight of the campaign played through (its end flow after it is verified), and the section 12-3, which could only be started directly (not by the story's own way); it follows the same rules.
 - Not verified with two real PCs, the network additions of 0.2.2: a lever pulled by the partner moving on the other PC (the parts of the levels with levers load only by the

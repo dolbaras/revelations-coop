@@ -2,10 +2,24 @@
 #define R1_H
 #include <windows.h>
 
-#define R1_VERSION "0.2.4"
+#define R1_VERSION "0.2.5"
 
 /* The Steam build 13298487 exe (SHA-256 of rerev.exe on disk, lower case). Any other exe: the proxy only forwards DirectInput8Create. */
+#if defined(__has_include)
+#if __has_include("r1_build_port.h")
+#include "r1_build_port.h"   /* written by tools/portgen.py into the generated tree of a ported build: R1_BUILD_ID / KIND / LABEL / EXE_SHA256 / NET_TAG_SHA */
+#endif
+#endif
+#ifndef R1_BUILD_ID   /* a ported build (tools/portgen.py, native/build_port.sh) passes its own with -D; the supported build keeps these */
+#define R1_BUILD_ID "steam-13298487"
+#define R1_BUILD_KIND "supported"
+#define R1_BUILD_LABEL "supported build 13298487"
 #define R1_EXE_SHA256 "1573b79eb921b1e7f571e6deb71c39961c7f1940fad6d19283fc3aea7fca48aa"
+#endif
+/* The exe tag of the network hello (first 8 bytes of this SHA-256): the same wire protocol on every ported build, so they carry the supported build's. */
+#ifndef R1_NET_TAG_SHA
+#define R1_NET_TAG_SHA "1573b79eb921b1e7f571e6deb71c39961c7f1940fad6d19283fc3aea7fca48aa"
+#endif
 
 /* Addresses of build 13298487 (image base 0x400000, no ASLR). Names are ours (notes\engine-map.md, notes\stage1-live.md). */
 #define R1_APP_PTR      0x11E0314u   /* [..] = sApp object (window object): +0x12C HWND, +0x20 / +0x2551 "window is active" bytes, +0x2660 exit flag, +0x2657 NCACTIVATE flag */
@@ -25,6 +39,8 @@ void *r1_patch_vtable(void *obj, int index, void *hook);
 int r1_safe_read(const void *addr, void *out, unsigned size);        /* 1 = all bytes read (ReadProcessMemory on ourselves) */
 int r1_exe_ok(void);                                                   /* 1 = the exe is the supported build */
 const char *r1_exe_sha(void);
+const char *r1_net_sha(void);   /* the SHA-256 whose first 8 bytes the network hello carries (R1_NET_TAG_SHA; the own exe's for a consented unknown exe) */
+int r1_gate_consented(void);    /* 1 = an exe of no known build, running by the player's consent (coop\anyexe.txt) */
 void r1_iat_check(const char *when);                                   /* logs and repairs patched import slots the stub/game changed */
 /* How "unpacked" .text is: ratio of 0x00 and 0x8B bytes in a sample (code ~ 12% / 6%, an encrypted body ~ 0.4% each). In Rev1 it is code from the start. */
 void r1_text_state(char *out, int size);
