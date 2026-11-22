@@ -196,7 +196,7 @@ changes a message layout also bumps `CP_PROTO_VERSION` (`native/coop_proto.h`).
 - **Published:** tag `v0.2.5` (full release, Latest) on public commit `9b735e8`, 2026-11-22. Assets: `revelations-coop-0.2.5.zip` sha256 `e9355c21...`, `revelations-coop-setup-0.2.5.exe` sha256 `e1a78e3b...`; shipped DLLs `22b3011f...` (Steam build) and `4cc19df6...` (older build).
 - **Checks after the publication (2026-11-22):**
   - Neither a draft nor a pre-release; each asset's `digest` equals the local SHA-256; `releases/latest` = `v0.2.5`.
-  - `tests	est_installer.ps1 -Online -OldZip` 0.2.4: 320 of 320.
+  - `tests\test_installer.ps1 -Online -OldZip` 0.2.4: 320 of 320.
   - The real update through the real feed (no `-Feed`) on a stand-in folder: the published 0.2.4 launcher logged `installed 0.2.4, latest v0.2.5`, `downloaded 1490046 bytes`, `checksum ok E9355C21...`, `installer exit 0`; version 0.2.5, dinput8.dll `22b3011f`; a second start installs nothing; uninstall restores the folder byte for byte (19 of 19).
 - **Update feed note:** the update feed is the same GitHub `releases/latest` (0.2.4 -> 0.2.5 is a plain version increase; the 0.2.4 launcher runs the 0.2.5 installer from the zip, which already holds the variant logic).
 
