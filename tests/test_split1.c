@@ -38,7 +38,7 @@ int classes_object_name(unsigned obj, char *out, int size)
     return 1;
 }
 static lt_frame_cb the_cb;
-void lt_add_frame_cb(lt_frame_cb cb) { the_cb = cb; }
+void lt_add_frame_cb(lt_frame_cb cb) { if (!the_cb) the_cb = cb; }   /* rel026: the first one is the split's pass; the leash adds its own after it */
 
 /* capture stubs */
 static struct { int en, pad; } crole[2] = {{1, 0}, {1, 1}};
@@ -93,6 +93,17 @@ void testmode_pad_swap(int on) { pad_swapped = on; }
 static int pad_merged;
 void testmode_pad_merge(int on) { pad_merged = on; }
 int testmode_pad_swapped(void) { return pad_swapped; }
+/* rel026 stubs: the partner gate's stick damping, the HUD fit, the second torch (their own modules are not part of this harness) */
+static int pad_damp[2] = {1000, 1000};
+void testmode_pad_damp(int user, int permille) { if (user >= 0 && user < 2) pad_damp[user] = permille; }
+int testmode_pad_damped(int user, unsigned *n) { if (n) *n = 0; return user >= 0 && user < 2 ? pad_damp[user] : 1000; }
+static int hudfit_stub = 1;
+void d3d_hudfit_set(int on) { hudfit_stub = on; }
+int d3d_hudfit_is_on(void) { return hudfit_stub; }
+unsigned d3d_hudfit_count(void) { return 0; }
+void flash2_frame(int active, unsigned p2_unit) { (void)active; (void)p2_unit; }
+void flash2_set(int on) { (void)on; }
+void flash2_status(char *out, int size) { snprintf(out, (size_t)size, "flash2 stub"); }
 int testmode_pad_peek(int user, void *out)
 {
     memset(out, 0, 12);
@@ -425,6 +436,7 @@ int main(void)
         Sleep(450);
         passes(1);
         CHECK(!suspended && R8(v2 + 0x10) == 1, "fix023 scene: 0.45 s after the movie: split again");
+        split_cmd("ambient 0", out, sizeof out);   /* fix026: the old rule for the checks of fix023 below */
         /* an in-engine cutscene: a "demo\" slot running, manager 0 on its event camera */
         W32(pcs + 0x284 + 3 * 4, u_demo[0]), W8(pcs + 0x1EC + 3, 0);
         passes(1);
@@ -438,6 +450,20 @@ int main(void)
         passes(1);
         CHECK(!suspended, "fix023 scene: the slot says ended (START / its end): split again although the camera lags");
         W32(pcs + 0x284 + 3 * 4, 0);
+        /* fix026: debounce (a ~1 s door animation stays in the split) and the ambient rule (the ship shake 11_020_0 never takes the whole view) */
+        split_cmd("ambient 1 400", out, sizeof out);
+        W32(pcs + 0x284 + 3 * 4, u_demo[0]), W8(pcs + 0x1EC + 3, 0), W32(g_mgr0 + 0xCC, 4);
+        passes(1);
+        CHECK(!suspended, "fix026: a scene + event camera signal that has just begun stays in the split (debounce)");
+        Sleep(450);
+        passes(1);
+        CHECK(suspended == SPLIT_SUSP_SCENE, "fix026: the same signal still there after the debounce: whole view");
+        W8(pcs + 0x1EC + 3, 1);
+        Sleep(450);
+        passes(2);
+        CHECK(!suspended, "fix026: the scene ended: split again");
+        W32(pcs + 0x284 + 3 * 4, 0);
+        split_cmd("ambient 0", out, sizeof out);
         /* a background scene script with the event camera: not a cutscene */
         W32(pcs + 0x284 + 5 * 4, u_bg), W8(pcs + 0x1EC + 5, 0);
         passes(2);

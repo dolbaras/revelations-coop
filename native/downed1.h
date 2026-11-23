@@ -14,4 +14,7 @@ int downed1_damage_patch(unsigned char out[8]);
 /* network mode: 1 while this PC's own human lies DOWN (puppet_game.c sends CP_SF_DOWN in its pad / STATE flags, which holds the partner's puppet of him); 0 otherwise / split */
 int downed1_own_down(void);
 
+/* rel026: the split screen's Downed / revive rule from the lobby row (flags as the session record: bit 0 = rule, bits 1..2 = bleed-out preset); any thread; the default is ON, 60 s */
+void downed1_set_local(unsigned flags);
+
 #endif

@@ -568,6 +568,168 @@ static unsigned pad_buttons(int slot)
     return testmode_pad_peek(slot, g) ? (unsigned)*(unsigned short *)g : 0u;
 }
 
+/* fix026i: WHOSE prompt may a press fire. The manager update (0x412600) reads ONE pad (the current pad slot) and gives that pad state to EVERY registered command: the examine prompt of the
+ * first human fired on the second human's press (the central update runs in his context as soon as he operates any object) and the second human could never press a prompt of the first
+ * one's. The owner of a command: the other human for the commands of the objects / items of his table (ia_tabs), the own-slot human for everything else (story prompts of the PCS scripts,
+ * his objects). While the manager runs in one human's context the commands of the other human are taken out of its list (the next pointer of the node before them is moved, +8; the head
+ * is [m + 0x38], the end node [m + 0x3C]) and put back after the call. Switch `cap ia own 0|1` (LAB). */
+static volatile int ia_sw_own = 1;
+/* fix026i (owner 2026-11-22): the second human triggers the story prompts of the other class himself. A prompt FSM waits for the zone result bit of ITS class (EventCollisionHitCheck, 0x74BBF0: per zone and
+ * per unit inside, class bit k of DTI 0x800110k0 -> result dword at [[this + 0x34] + 4 * zone]); hook_zone ORs the other local human's class bit into every zone either human stands in (both humans' classes
+ * answer for both, split screen only). The command the prompt then registers (a PCS record of sPcsManager: [0x116A34C] + 0x9E0 + k * 0x150) belongs to the human who is the only one inside the zones
+ * (ia_story_other: seen "other alone" within IA_ST_FRESH ms and "own alone" not): his viewport shows the icon, his pad context presses it. Switch `cap ia zone 0|1` (LAB). */
+#define IA_ST_FRESH 300u
+static volatile int ia_sw_zone = 1;
+static volatile DWORD ia_st_t_own, ia_st_t_other;   /* last tick a zone had ONLY the own human's / ONLY the other human's class bit (before the alias) */
+static volatile LONG ia_n_zone_calls, ia_n_zone_alias_own, ia_n_zone_alias_other, ia_n_zone_hit_own, ia_n_zone_hit_other, ia_n_zone_both;
+static volatile unsigned ia_zone_seen, ia_zone_ba, ia_zone_bb;   /* LAB: every class bit any zone result ever had, the two humans' class bits */
+static int ia_story_other_now(void)
+{
+    DWORD now = GetTickCount();
+    return ia_sw_zone && ia_st_t_other && (DWORD)(now - ia_st_t_other) < IA_ST_FRESH && !(ia_st_t_own && (DWORD)(now - ia_st_t_own) < IA_ST_FRESH);
+}
+/* fix026p: the commands of every world object / item (sArrange lists, both humans; refreshed by ia_scan) - a registered command that belongs to none of them (and is not in the other human's table) is a
+ * story prompt (PcsStartACTriggerButton of a scene script: a heap object, NOT inside the PCS manager's record array, proven live f26p_a3/a4 "story 0"). */
+#define IA_OC_MAX 1024
+static unsigned ia_oc[IA_OC_MAX];
+static volatile unsigned ia_oc_n;
+static int ia_is_object_cmd(unsigned cmd)
+{
+    unsigned n = ia_oc_n;
+    for (unsigned i = 0; i < n && i < IA_OC_MAX; i++)
+        if (ia_oc[i] == cmd)
+            return 1;
+    return 0;
+}
+static void ia_scan_objcmds(void)
+{
+    unsigned sa = rd32(0x11695C4u), n = 0;
+    static unsigned tmp[IA_OC_MAX];
+    static const struct { unsigned off, cls; } lists[2] = {{0xBCu, 0x80060000u}, {0xA8u, 0x80040000u}};
+    for (int l = 0; l < 2 && sa; l++) {
+        unsigned cnt = rd32(sa + lists[l].off + 4), arr = rd32(sa + lists[l].off + 0x10);
+        if (cnt > 2000 || !arr)
+            continue;
+        for (unsigned i = 0; i < cnt && n < IA_OC_MAX; i++) {
+            unsigned e = rd32(arr + 4 * i), u = e ? rd32(e + 4) : 0;
+            if (u < 0x10000 || (rd32(u + 0xE28) & 0xF00F0000u) != lists[l].cls)
+                continue;
+            unsigned c = l ? u + 0xFB0 : rd32(u + 0xF3C);
+            if (c > 0x10000)
+                tmp[n++] = c;
+        }
+    }
+    memcpy(ia_oc, tmp, n * sizeof(unsigned));
+    ia_oc_n = n;
+}
+static int ia_is_story_cmd(unsigned cmd)
+{
+    unsigned pcs = rd32(0x116A34Cu);
+    if (pcs > 0x10000 && cmd >= pcs + 0x9E0u && cmd < pcs + 0x9E0u + 16u * 0x150u)
+        return 1;
+    return cmd > 0x10000 && !ia_is_object_cmd(cmd);
+}
+static volatile LONG ia_n_hidden, ia_n_hide_pass;
+#define IA_HIDE_MAX 24
+/* fix026p: the owner of a story prompt = the human nearer to its icon anchor (the world position at cmd + 0xB0, valid while the prompt is active; read from `cap ia cmds` "anchor?" lines): 1 = the
+ * other human, 0 = the own human, -1 = no usable anchor (then the zone-time rule above decides). Several prompts at once (one per human) each go to their own human. */
+static int ia_story_owner(unsigned cmd)
+{
+    int own = capture_own_effective();
+    unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
+    if (!ua || !ub || cmd < 0x10000)
+        return -1;
+    float x = rdf_(cmd + 0xB0), y = rdf_(cmd + 0xB4), z = rdf_(cmd + 0xB8);
+    if (!(y > -5000.f && y < 5000.f && (x > 1.f || x < -1.f) && (z > 1.f || z < -1.f) && x > -30000.f && x < 30000.f && z > -30000.f && z < 30000.f))
+        return -1;
+    float da = (rdf_(ua + 0x40) - x) * (rdf_(ua + 0x40) - x) + (rdf_(ua + 0x48) - z) * (rdf_(ua + 0x48) - z), db = (rdf_(ub + 0x40) - x) * (rdf_(ub + 0x40) - x) + (rdf_(ub + 0x48) - z) * (rdf_(ub + 0x48) - z);
+    if (da > 1500.f * 1500.f && db > 1500.f * 1500.f)
+        return -1;
+    return db < da ? 1 : 0;
+}
+static int ia_st_other_fresh(void)   /* the other human hit a story zone within IA_ST_FRESH ms (without it a command is never his: f26p_f23r_a, any anchor rule alone broke his shots) */
+{
+    DWORD now = GetTickCount();
+    return ia_sw_zone && ia_st_t_other && (DWORD)(now - ia_st_t_other) < IA_ST_FRESH;
+}
+static int ia_story_other_any(void)
+{
+    if (!ia_sw_zone || !ia_st_other_fresh())
+        return 0;
+    if (ia_story_other_now())
+        return 1;
+    unsigned m = rd32(0x1169390u);
+    if (!m)
+        return 0;
+    unsigned end = rd32(m + 0x3C), cur = rd32(m + 0x38);
+    for (unsigned guard = 0; cur && cur != end && guard < 64; guard++, cur = rd32(cur + 8)) {
+        unsigned cmd = rd32(cur + 0x10);
+        if (cmd > 0x10000 && ia_is_story_cmd(cmd) && ia_story_owner(cmd) == 1)
+            return 1;
+    }
+    return 0;
+}
+static int ia_cmd_of_other(unsigned cmd, const ia_tab *t)
+{
+    if (ia_sw_zone && ia_is_story_cmd(cmd)) {
+        int ow = ia_story_owner(cmd);
+        if ((ow == 1 && ia_st_other_fresh()) || (ow < 0 && ia_story_other_now()))
+            return 1;
+    }
+    for (unsigned i = 0; i < t->n; i++) {
+        unsigned c = t->e[i].item ? t->e[i].unit + 0xFB0 : rd32(t->e[i].unit + 0xF3C);
+        if (c == cmd)
+            return 1;
+    }
+    return 0;
+}
+/* hides the commands of the context that does NOT run (hide_other = 1: the other human's, 0: everything that is not his); returns the number hidden, undone by ia_unhide(the same arrays) */
+static unsigned ia_hide(unsigned m, const ia_tab *t, int ctx_other, unsigned *nodes, unsigned *prevs)
+{
+    unsigned n = 0, head = rd32(m + 0x38), end = rd32(m + 0x3C), prev = 0, cur = head;
+    for (unsigned guard = 0; cur && cur != end && guard < 64 && n < IA_HIDE_MAX; guard++) {
+        unsigned cmd = rd32(cur + 0x10), next = rd32(cur + 8), hide = cmd > 0x10000 && (ctx_other ? !ia_cmd_of_other(cmd, t) : ia_cmd_of_other(cmd, t));
+        if (hide) {
+            nodes[n] = cur, prevs[n] = prev, n++;
+            if (prev)
+                wr32(prev + 8, next);
+            else
+                wr32(m + 0x38, next);
+        } else
+            prev = cur;
+        cur = next;
+    }
+    return n;
+}
+static void ia_unhide(unsigned m, unsigned n, const unsigned *nodes, const unsigned *prevs)
+{
+    for (unsigned k = n; k-- > 0;) {
+        if (prevs[k])
+            wr32(prevs[k] + 8, nodes[k]);
+        else
+            wr32(m + 0x38, nodes[k]);
+    }
+}
+static void ia_act_call(unsigned self, capu_t *c, const ia_tab *t)
+{
+    unsigned nodes[IA_HIDE_MAX], prevs[IA_HIDE_MAX], n = 0;
+    int on = ia_sw_own && ia_live && t && (t->n || ia_story_other_any()) && self == rd32(0x1169390u);
+    if (on)
+        n = ia_hide(self, t, c != NULL, nodes, prevs);
+    if (c)
+        swap_call_ia(orig_act, self, c);
+    else
+        orig_act(self);
+    if (on) {
+        ia_unhide(self, n, nodes, prevs);
+        if (n) {
+            InterlockedAdd(&ia_n_hidden, (LONG)n);
+            if (InterlockedIncrement(&ia_n_hide_pass) <= 6)
+                r1_log("interact: the action update runs for %s: %u command(s) of the other human taken out of its list", c ? "the other human" : "the own human", n);
+        }
+    }
+}
+
 /* sActionCommand::update (vf6): the single reader of the buttons */
 static void FC hook_act(unsigned self)
 {
@@ -575,7 +737,8 @@ static void FC hook_act(unsigned self)
     if (ia_live && ia_sw_central) {
         LONG cur = ia_cur;
         const ia_tab *t = &ia_tabs[cur & 1];
-        capu_t *o = t->n ? ia_other_cap(cur) : NULL;
+        int story = ia_story_other_any();
+        capu_t *o = t->n || story ? ia_other_cap(cur) : NULL;
         if (o) {
             int own = capture_own_effective();
             capu_t *a = NULL;
@@ -586,16 +749,282 @@ static void FC hook_act(unsigned self)
                 }
             unsigned ob = pad_buttons(o->pad), ab = a ? pad_buttons(a->pad) : pad_buttons(own);
             ia_last_other_btn = ob, ia_last_own_btn = ab;
-            if (ia_central_ctx(ob, ab, t->n))
+            if (ia_central_ctx(ob, ab, t->n + (story ? 1u : 0u)))
                 c = o;
         }
         InterlockedIncrement(&ia_n_central);
     }
-    if (c) {
+    if (c)
         InterlockedIncrement(&ia_n_central_other);
-        swap_call_ia(orig_act, self, c);
-    } else
-        orig_act(self);
+    ia_act_call(self, c, &ia_tabs[ia_cur & 1]);
+}
+
+/* fix026i: the 2D prompt icon (uActionIcon2D 0xFEC370) is two uGUI_ActionIcon sprites (vt 0x107FF90 at icon + 0x50 / + 0x2D0) whose own view mask (+0xC = 0xF) draws them in EVERY viewport: the first
+ * human's examine prompt showed in the second human's half. The submit of the unit draw (0xB9E7F0, one stack argument) is hooked: a sprite of a registered command is skipped when the viewport
+ * being drawn ([0x116C3E4]) is not its owner's (the table's commands = the other human's view, every other command = view 0). Switch `cap ia spr 0|1` (LAB). */
+#define IA_FN_DRAW 0x79EF00u   /* slot 11 of both sprite classes (vt 0x107FF90 / 0x107FDC8): the draw with the draw command (+0x158 = the viewport being drawn), ret 4 */
+static int drw_on;
+static void (FC *orig_drw)(unsigned, unsigned, unsigned);
+static volatile int ia_sw_spr = 1;
+static volatile LONG ia_n_spr_seen[4], ia_n_spr_skip[4], ia_n_spr_unk;
+static int ia_sprite_owner_view(unsigned spr)
+{
+    unsigned m = rd32(0x1169390u);
+    if (!m)
+        return -1;
+    const ia_tab *t = &ia_tabs[ia_cur & 1];
+    unsigned end = rd32(m + 0x3C), cur = rd32(m + 0x38);
+    for (unsigned guard = 0; cur && cur != end && guard < 64; guard++, cur = rd32(cur + 8)) {
+        unsigned cmd = rd32(cur + 0x10), icon = cmd > 0x10000 ? rd32(cmd + 0xE0) : 0;
+        if (icon > 0x10000 && rd32(icon) == 0xFEC370u && (spr == icon + 0x50 || spr == icon + 0x2D0))
+            return ia_cmd_of_other(cmd, t) ? (int)(ia_view ? ia_view : 2u) : 0;
+    }
+    return -1;
+}
+static void FC hook_drw(unsigned self, unsigned edx, unsigned arg)
+{
+    unsigned svt = rd32(self);
+    if (ia_live && ia_sw_spr && ia_view && (svt == 0x107FF90u || svt == 0x107FDC8u) && arg > 0x10000) {
+        unsigned v = rd32(arg + 0x158) & 0x1Fu;   /* the engine shifts 1 << +0x158 (x86: count mod 32): 0x10400 = viewport 0, 0x10402 = viewport 2 */
+        static volatile LONG dgn;
+        if (InterlockedIncrement(&dgn) <= 40)
+            r1_log("interact: sprite draw %08x vt %08x cmd %08x +4 %08x +8 %08x +154 %08x view %u +15C %08x view[116C3E4] %u", self, svt, arg, rd32(arg + 4), rd32(arg + 8), rd32(arg + 0x154), v, rd32(arg + 0x15C), rd32(AD.view_idx_ptr));
+        int vk = v < 4;   /* an unknown value in +0x158: the sprite is drawn as before */
+        int ov = ia_sprite_owner_view(self);
+        if (vk)
+            InterlockedIncrement(&ia_n_spr_seen[v]);
+        if (ov < 0)
+            InterlockedIncrement(&ia_n_spr_unk);
+        else if (vk && (unsigned)ov != v) {
+            if (v < 4)
+                InterlockedIncrement(&ia_n_spr_skip[v]);
+            return;
+        }
+    }
+    orig_drw(self, edx, arg);
+}
+
+/* fix026i: the zone result aliasing (see ia_sw_zone above). hook_zone runs the stock check first, then looks at the two local humans' class bits in every zone's result. */
+#define IA_FN_ZONE 0x74BBF0u
+static hk_t hk_zone;
+static unsigned (FC *orig_zone)(unsigned, unsigned, unsigned, unsigned);   /* thiscall, two stack arguments (ret 8) */
+static unsigned ia_class_bit(unsigned unit)
+{
+    unsigned vt = unit > 0x10000 ? rd32(unit) : 0, fn = vt > 0x10000 ? rd32(vt + 0x10) : 0;
+    if (fn < 0x401000u || fn > 0xF00000u)
+        return 0;
+    unsigned dti = ((unsigned (FC *)(unsigned))(uintptr_t)fn)(unit), id = dti > 0x10000 ? rd32(dti + 0x1C) & 0xF00FF0F0u : 0;
+    return id >= 0x80011000u && id <= 0x800110B0u && !(id & 0xF) ? 1u << ((id - 0x80011000u) >> 4) : 0;
+}
+static void ia_zone_alias(unsigned self, unsigned prm)
+{
+    int own = capture_own_effective();
+    unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
+    if (!ua || !ub)
+        return;
+    unsigned ba = ia_class_bit(ua), bb = ia_class_bit(ub);
+    if (!ba || !bb || ba == bb)
+        return;
+    int n = (int)rd32(prm + 0x14);
+    unsigned data = rd32(self + 0x34), size = rd32(self + 0x38);
+    if (n <= 0 || n > 512 || data < 0x10000 || (unsigned)n > size)
+        return;
+    DWORD now = GetTickCount();
+    for (int i = 0; i < n; i++) {
+        unsigned w = rd32(data + 4u * (unsigned)i), nw = w;
+        if (!w)
+            continue;
+        ia_zone_seen |= w, ia_zone_ba = ba, ia_zone_bb = bb;
+        if ((w & ba) && (w & bb))
+            InterlockedIncrement(&ia_n_zone_both);
+        else if (w & ba)
+            InterlockedIncrement(&ia_n_zone_hit_own);
+        else if (w & bb)
+            InterlockedIncrement(&ia_n_zone_hit_other);
+        if ((w & ba) && !(w & bb))
+            nw |= bb, ia_st_t_own = now, InterlockedIncrement(&ia_n_zone_alias_own);
+        else if ((w & bb) && !(w & ba))
+            nw |= ba, ia_st_t_other = now, InterlockedIncrement(&ia_n_zone_alias_other);
+        if (nw != w) {
+            static volatile LONG zlog;
+            if (InterlockedIncrement(&zlog) <= 60)
+                r1_log("interact: zone alias: fsm %08x zone %d/%d result %08x -> %08x (own %08x bit %08x at (%.0f,%.0f,%.0f), other %08x bit %08x at (%.0f,%.0f,%.0f))", self, i, n, w, nw, ua, ba, (double)rdf_(ua + 0x40), (double)rdf_(ua + 0x44), (double)rdf_(ua + 0x48),
+                       ub, bb, (double)rdf_(ub + 0x40), (double)rdf_(ub + 0x44), (double)rdf_(ub + 0x48));
+            wr32(data + 4u * (unsigned)i, nw);
+        }
+    }
+}
+/* fix026p LAB (`cap ia zones`): every distinct zone-check action seen (self, prm), dumped on request: the zone structures (id at +8, the shape data) and the result words */
+#define IA_ZN_MAX 40
+static volatile unsigned ia_zn_self[IA_ZN_MAX], ia_zn_prm[IA_ZN_MAX];
+static volatile LONG ia_zn_n;
+static void ia_zn_note(unsigned self, unsigned prm)
+{
+    LONG n = ia_zn_n;
+    for (LONG i = 0; i < n && i < IA_ZN_MAX; i++)
+        if (ia_zn_self[i] == self && ia_zn_prm[i] == prm)
+            return;
+    if (n < IA_ZN_MAX) {
+        ia_zn_self[n] = self, ia_zn_prm[n] = prm;
+        ia_zn_n = n + 1;
+    }
+}
+static void ia_zn_dump(int want)   /* want >= 0: only the zones with that id (and their shape); -1 = every zone, short */
+{
+    int own = capture_own_effective();
+    unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
+    r1_log("zones: %ld checks seen; own %08x at (%.0f,%.0f,%.0f) other %08x at (%.0f,%.0f,%.0f); filter id %d", (long)ia_zn_n, ua, (double)rdf_(ua + 0x40), (double)rdf_(ua + 0x44), (double)rdf_(ua + 0x48), ub, (double)rdf_(ub + 0x40), (double)rdf_(ub + 0x44), (double)rdf_(ub + 0x48), want);
+    for (LONG k = 0; k < ia_zn_n && k < IA_ZN_MAX; k++) {
+        unsigned self = ia_zn_self[k], prm = ia_zn_prm[k], n = rd32(prm + 0x14), arr = rd32(prm + 0x20), data = rd32(self + 0x34);
+        if (n == 0 || n > 16 || arr < 0x10000)
+            continue;
+        for (unsigned i = 0; i < n; i++) {
+            unsigned z = rd32(arr + 4 * i), id = z > 0x10000 ? rd32(z + 8) : 0xFFFFFFFFu;
+            if (z < 0x10000 || (want >= 0 && (int)id != want))
+                continue;
+            unsigned world = rd32(self + 0x48 + 8), tab = world > 0x10000 ? rd32(world + 0x80) : 0, shape = tab > 0x10000 && id < 512 ? rd32(tab + 4 * id) : 0;
+            r1_log("zones: [%ld] fsm %08x zone %u/%u id %u grp %08x result %08x world %08x shape %08x", (long)k, self, i, n, id, rd32(z + 12), data > 0x10000 ? rd32(data + 4 * i) : 0, world, shape);
+            for (unsigned o = 0; shape > 0x10000 && o < 0xC0; o += 0x20)
+                r1_log("zones:    shape+%02x: %08x %08x %08x %08x %08x %08x %08x %08x | %.1f %.1f %.1f %.1f %.1f %.1f", o, rd32(shape + o), rd32(shape + o + 4), rd32(shape + o + 8), rd32(shape + o + 12), rd32(shape + o + 16), rd32(shape + o + 20), rd32(shape + o + 24), rd32(shape + o + 28),
+                       (double)rdf_(shape + o), (double)rdf_(shape + o + 4), (double)rdf_(shape + o + 8), (double)rdf_(shape + o + 12), (double)rdf_(shape + o + 16), (double)rdf_(shape + o + 20));
+        }
+    }
+}
+/* fix026p: the zone SHAPES carry a class mask (shape + 0xBC, bit k = class value 1<<k; the test 0x6D34D0 skips every unit whose class bit is not in it): the lead's story zones have Jill's bit (2) and not
+ * Parker's (4), so a second human of the other class is never inside (proven live: f26p_a2 goggle zone shape +0xB8 = 1, +0xBC = 0xFFFFFFC2). During the check the mask gets the other local human's class bit
+ * (and back afterwards), so his hit is real, with his own position, and the aliasing below makes it count for the FSM. Switch `cap ia zmask 0|1`. */
+static volatile int ia_sw_zmask = 1;
+static volatile LONG ia_n_zmask;
+#define IA_ZM_MAX 64
+static unsigned ia_zm_addr[IA_ZM_MAX], ia_zm_old[IA_ZM_MAX];
+static unsigned ia_zmask_widen(unsigned self, unsigned prm)
+{
+    unsigned n = 0;
+    int own = capture_own_effective();
+    unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
+    unsigned ba = ua ? ia_class_bit(ua) : 0, bb = ub ? ia_class_bit(ub) : 0;
+    if (!ba || !bb || ba == bb)
+        return 0;
+    unsigned cnt = rd32(prm + 0x14), arr = rd32(prm + 0x20), world = rd32(self + 0x50);
+    if (cnt == 0 || cnt > 32 || arr < 0x10000 || world < 0x10000)
+        return 0;
+    unsigned tab = rd32(world + 0x80);
+    if (tab < 0x10000)
+        return 0;
+    for (unsigned i = 0; i < cnt && n < IA_ZM_MAX; i++) {
+        unsigned z = rd32(arr + 4 * i), id = z > 0x10000 ? rd32(z + 8) : 0xFFFFFFFFu, shape = id < 1024 ? rd32(tab + 4 * id) : 0;
+        if (shape < 0x10000)
+            continue;
+        unsigned m = rd32(shape + 0xBC), add = 0;
+        if ((m & ba) && !(m & bb))
+            add = bb;
+        else if ((m & bb) && !(m & ba))
+            add = ba;
+        if (!add)
+            continue;
+        int dup = 0;
+        for (unsigned k = 0; k < n; k++)
+            dup |= ia_zm_addr[k] == shape + 0xBC;
+        if (dup)
+            continue;
+        ia_zm_addr[n] = shape + 0xBC, ia_zm_old[n] = m, n++;
+        wr32(shape + 0xBC, m | add);
+    }
+    return n;
+}
+static unsigned FC hook_zone(unsigned self, unsigned edx, unsigned prm, unsigned prm2)
+{
+    unsigned nw = 0;
+    if (ia_live && ia_sw_zone && ia_sw_zmask && prm > 0x10000)
+        nw = ia_zmask_widen(self, prm);
+    unsigned r = orig_zone(self, edx, prm, prm2);
+    for (unsigned k = nw; k-- > 0;)
+        wr32(ia_zm_addr[k], ia_zm_old[k]);
+    if (nw)
+        InterlockedAdd(&ia_n_zmask, (LONG)nw);
+    if (ia_live && prm > 0x10000)
+        ia_zn_note(self, prm);
+    if (ia_live && ia_sw_zone && prm > 0x10000) {
+        InterlockedIncrement(&ia_n_zone_calls);
+        ia_zone_alias(self, prm);
+    }
+    return r;
+}
+
+/* EventCollisionHitCharaCheck (0x74C2B0, the other zone action: its param +8 is a MASK of the classes that count, result byte this + 0x9BC): when the stock check says "nobody of those classes", the mask
+ * gets the other local human's class bit as well and the check runs again; owner times as in ia_zone_alias. */
+#define IA_FN_HCC 0x74C2B0u
+static hk_t hk_hcc;
+static unsigned (FC *orig_hcc)(unsigned, unsigned, unsigned, unsigned);
+static volatile LONG ia_n_hcc_calls, ia_n_hcc_alias_own, ia_n_hcc_alias_other;
+static unsigned FC hook_hcc(unsigned self, unsigned edx, unsigned prm, unsigned prm2)
+{
+    unsigned r = orig_hcc(self, edx, prm, prm2);
+    if (ia_live && ia_sw_zone && prm > 0x10000) {
+        int own = capture_own_effective();
+        unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
+        unsigned ba = ua ? ia_class_bit(ua) : 0, bb = ub ? ia_class_bit(ub) : 0;
+        InterlockedIncrement(&ia_n_hcc_calls);
+        if (ba && bb && ba != bb) {
+            unsigned mask = rd32(prm + 8), res = rd32(self + 0x9BC) & 0xFFu;
+            DWORD now = GetTickCount();
+            static volatile LONG hlog;
+            if (InterlockedIncrement(&hlog) <= 12)
+                r1_log("interact: hit-chara check %08x prm %08x mask %08x result %u (classes own %08x other %08x)", self, prm, mask, res, ba, bb);
+            if (res == 1 && (mask & ba) && !(mask & bb))
+                ia_st_t_own = now;
+            else if (res == 1 && (mask & bb) && !(mask & ba))
+                ia_st_t_other = now;
+            else if (res == 0 && ((mask & ba) != 0) != ((mask & bb) != 0)) {
+                unsigned widened = mask | ba | bb;
+                wr32(prm + 8, widened);
+                orig_hcc(self, edx, prm, prm2);
+                wr32(prm + 8, mask);
+                if ((rd32(self + 0x9BC) & 0xFFu) == 1) {
+                    if (mask & ba)
+                        ia_st_t_other = now, InterlockedIncrement(&ia_n_hcc_alias_other);
+                    else
+                        ia_st_t_own = now, InterlockedIncrement(&ia_n_hcc_alias_own);
+                }
+            }
+        }
+    }
+    return r;
+}
+
+/* LAB (fix026i): `cap ia sprprobe 1` puts a counting stub in front of every virtual function (slots 0..31) of uGUI_ActionIcon (vtable 0x107FF90): per slot, how often it runs while which viewport
+ * ([0x116C3E4] & 3) is current; shown by `cap ia`. Finds the function that draws the sprite once per viewport. */
+static volatile LONG ia_probe_cnt[32][4];
+static int ia_probe_on;
+static void ia_probe_install(void)
+{
+    if (ia_probe_on || !AD.view_idx_ptr)
+        return;
+    unsigned char *mem = (unsigned char *)VirtualAlloc(NULL, 32 * 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    DWORD old;
+    if (!mem || !VirtualProtect((void *)0x107FF90u, 32 * 4, PAGE_READWRITE, &old))
+        return;
+    for (unsigned i = 0; i < 32; i++) {
+        unsigned orig = rd32(0x107FF90u + 4 * i);
+        unsigned char *q = mem + i * 32, *w = q;
+        *w++ = 0x50;
+        *w++ = 0xA1, *(unsigned *)w = AD.view_idx_ptr, w += 4;
+        *w++ = 0x83, *w++ = 0xE0, *w++ = 0x03;
+        *w++ = 0xF0, *w++ = 0xFF, *w++ = 0x04, *w++ = 0x85, *(unsigned *)w = (unsigned)(uintptr_t)&ia_probe_cnt[i][0], w += 4;
+        *w++ = 0x58;
+        *w++ = 0xE9, *(int *)w = (int)(orig - (unsigned)(uintptr_t)(w + 4)), w += 4;
+        *(unsigned *)(0x107FF90u + 4 * i) = (unsigned)(uintptr_t)q;
+    }
+    VirtualProtect((void *)0x107FF90u, 32 * 4, old, &old);
+    ia_probe_on = 1;
+}
+static int ia_probe_text(char *out, int size)
+{
+    int o = 0;
+    for (int i = 0; i < 32 && o < size - 80; i++)
+        if (ia_probe_cnt[i][0] | ia_probe_cnt[i][1] | ia_probe_cnt[i][2] | ia_probe_cnt[i][3])
+            o += snprintf(out + o, (size_t)(size - o), "\n  probe slot %d: view0/1/2/3 = %ld/%ld/%ld/%ld", i, (long)ia_probe_cnt[i][0], (long)ia_probe_cnt[i][1], (long)ia_probe_cnt[i][2], (long)ia_probe_cnt[i][3]);
+    return o;
 }
 
 /* the prompt icon of an object / item (its command: objects +0xF3C is a pointer, items have it embedded at +0xFB0; the icon pointer is command+0xE0, uActionIcon3D 0xFEC448 / 2D 0xFEC370) */
@@ -690,6 +1119,35 @@ static void ia_list_objs(char *out, int size, const char *filter)
             unsigned mgr = l == 0 ? rd32(u + 0xE80) : 0;
             o += snprintf(out + o, (size_t)(size - o), "\n%s %08x %-24s (%.0f,%.0f,%.0f) cls %08x serial %u kind %u owner %u state %08x spent %u", lists[l].nm, u, cn, (double)rdf_(u + 0x40),
                           (double)rdf_(u + 0x44), (double)rdf_(u + 0x48), rd32(u + 0xE28), rd32(u + 0xE2C), rd32(u + 0xE30), rd32(u + 0xE7C), mgr ? ia_sid(mgr) : 0u, (unsigned)spent);
+        }
+    }
+}
+/* LAB (fix026i): `cap ia cmds` lists the registered action commands of sActionCommand (0x1169390: nodes [m+0x38]..[m+0x3C], next +8, command +0x10) with class, mode, priority, icon and raw words */
+static void ia_list_cmds(char *out, int size)
+{
+    unsigned m = rd32(0x1169390u), n = m ? rd32(m + 0x38) : 0, e = m ? rd32(m + 0x3C) : 0;
+    int o = snprintf(out, (size_t)size, "sActionCommand %08x nodes %08x..%08x", m, n, e);
+    unsigned ua = unit_by_slot((unsigned)capture_own_effective()), ub = unit_by_slot((unsigned)(1 - capture_own_effective()));
+    o += snprintf(out + o, (size_t)(size - o), " | A %08x (%.0f,%.0f,%.0f) B %08x (%.0f,%.0f,%.0f)", ua, (double)rdf_(ua + 0x40), (double)rdf_(ua + 0x44), (double)rdf_(ua + 0x48), ub, (double)rdf_(ub + 0x40), (double)rdf_(ub + 0x44), (double)rdf_(ub + 0x48));
+    for (int k = 0; n && n != e && k < 10 && o < size - 900; k++, n = rd32(n + 8)) {
+        unsigned c = rd32(n + 0x10), icon = c > 0x10000 ? rd32(c + 0xE0) : 0;
+        o += snprintf(out + o, (size_t)(size - o), "\ncmd %08x (pcs %08x story %d) vt %08x mode %u pri %u icon %08x ivt %08x w:", c, rd32(0x116A34Cu), ia_is_story_cmd(c), c > 0x10000 ? rd32(c) : 0, c > 0x10000 ? rd32(c + 0xC) : 0, c > 0x10000 ? rd32(c + 0x18) : 0, icon, icon > 0x10000 ? rd32(icon) : 0);
+        for (unsigned w = 4; c > 0x10000 && w < 0x40; w += 4)
+            o += snprintf(out + o, (size_t)(size - o), " %x", rd32(c + w));
+        {   /* fix026p: where is the prompt's anchor? consecutive float triples that look like a world position (y about -600, x and z in range) in the command (+0..0x1F0) and in the icon (+0..0x300) */
+            for (int part = 0; part < 2; part++) {
+                unsigned base = part ? icon : c, len = part ? 0x300u : 0x1F0u;
+                for (unsigned w = 0; base > 0x10000 && w + 12 <= len; w += 4) {
+                    float x = rdf_(base + w), y = rdf_(base + w + 4), z = rdf_(base + w + 8);
+                    if (y > -700.f && y < -100.f && x > -3000.f && x < 3000.f && z > 5000.f && z < 20000.f)
+                        o += snprintf(out + o, (size_t)(size - o), "\n  anchor? %s+%x (%.0f,%.0f,%.0f)", part ? "icon" : "cmd", w, (double)x, (double)y, (double)z);
+                }
+            }
+        }
+        if (icon > 0x10000) {
+            o += snprintf(out + o, (size_t)(size - o), "\n  icon:");
+            for (unsigned w = 4; w < 0x80; w += 4)
+                o += snprintf(out + o, (size_t)(size - o), " %x", rd32(icon + w));
         }
     }
 }
@@ -795,6 +1253,7 @@ static void ia_scan(void)
         }
         return;
     }
+    ia_scan_objcmds();
     int own = capture_own_effective();
     unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own));
     capu_t *cb = ub ? cap_find(ub) : NULL;
@@ -873,6 +1332,11 @@ static void ia_status(char *out, int size)
                      "central updates %ld (in the other human's context %ld), most operated %ld; last buttons other %04x own %04x",
                      ia_req, ia_view, (long)ia_live, ia_sw_obj, ia_sw_central, hk_act.on ? "on" : "off", t->n, (long)ia_n_scans, (long)ia_n_obj_calls, (long)ia_n_central, (long)ia_n_central_other, (long)ia_max_objs,
                      ia_last_other_btn, ia_last_own_btn);
+    o += snprintf(out + o, (size_t)(size - o), "\n  prompt-icon sprites (draw hook %s, switch %d): drawn per viewport 0/1/2/3 = %ld/%ld/%ld/%ld, skipped %ld/%ld/%ld/%ld, without owner %ld", drw_on ? "on" : "off", ia_sw_spr,
+                  (long)ia_n_spr_seen[0], (long)ia_n_spr_seen[1], (long)ia_n_spr_seen[2], (long)ia_n_spr_seen[3], (long)ia_n_spr_skip[0], (long)ia_n_spr_skip[1], (long)ia_n_spr_skip[2], (long)ia_n_spr_skip[3], (long)ia_n_spr_unk);
+    o += snprintf(out + o, (size_t)(size - o), "\n  story zones (hook %s, switch %d, zmask %d widened %ld): checks %ld, aliased for the other human %ld / for the own human %ld, hit-chara checks %ld (aliased other %ld / own %ld); story prompts now belong to %s; zones hit by own only %ld, other only %ld, both %ld; class bits own %x other %x, any zone had %x", hk_zone.on ? "on" : "off", ia_sw_zone, ia_sw_zmask, (long)ia_n_zmask,
+                  (long)ia_n_zone_calls, (long)ia_n_zone_alias_other, (long)ia_n_zone_alias_own, (long)ia_n_hcc_calls, (long)ia_n_hcc_alias_other, (long)ia_n_hcc_alias_own, ia_story_other_now() ? "the OTHER human" : "the own human", (long)ia_n_zone_hit_own, (long)ia_n_zone_hit_other, (long)ia_n_zone_both, ia_zone_ba, ia_zone_bb, ia_zone_seen);
+    o += ia_probe_text(out + o, size - o);
     for (unsigned i = 0; i < t->n && i < 8 && o < size - 100; i++)
         o += snprintf(out + o, (size_t)(size - o), "\n  object %08x mgr %08x at (%.0f,%.0f,%.0f)", t->e[i].unit, t->e[i].mgr, (double)t->e[i].pos[0], (double)t->e[i].pos[1], (double)t->e[i].pos[2]);
 }
@@ -1144,6 +1608,40 @@ static int hooks_install(void)
         else
             r1_log("capture: the action-command hook is NOT installed (bytes differ): the second human's buttons are not read for objects");
     }
+    {   /* fix026i, optional: the story zones answer for both local humans (class bit aliasing) */
+        static const unsigned char b_zone[] = {0x83, 0xEC, 0x08, 0xA1, 0x14, 0x91, 0x16, 0x01};
+        static const unsigned char b_hcc[] = {0x51, 0xA1, 0x14, 0x91, 0x16, 0x01, 0x53, 0x8B, 0xD9};
+        if (!getenv("REV1_NOZONE")) {
+            if (hook_install(&hk_hcc, IA_FN_HCC, b_hcc, 9, (void *)hook_hcc))
+                orig_hcc = (unsigned (FC *)(unsigned, unsigned, unsigned, unsigned))hk_hcc.tramp;
+            else
+                r1_log("capture: the hit-chara hook is NOT installed (bytes differ)");
+        }
+        if (getenv("REV1_NOZONE"))
+            r1_log("capture: the story-zone hook is switched off by REV1_NOZONE");
+        else if (hook_install(&hk_zone, IA_FN_ZONE, b_zone, 8, (void *)hook_zone))
+            orig_zone = (unsigned (FC *)(unsigned, unsigned, unsigned, unsigned))hk_zone.tramp;
+        else
+            r1_log("capture: the story-zone hook is NOT installed (bytes differ): the second human cannot trigger the story prompts");
+    }
+    {   /* fix026i, optional: the prompt icon sprites are drawn in the viewport of their owner only */
+        static const unsigned vts[2] = {0x107FF90u, 0x107FDC8u};
+        DWORD old;
+        int ok = rd32(vts[0] + 44) == IA_FN_DRAW && rd32(vts[1] + 44) == IA_FN_DRAW && VirtualProtect((void *)vts[0], 48, PAGE_READWRITE, &old);
+        if (ok) {
+            *(unsigned *)(vts[0] + 44) = (unsigned)(uintptr_t)hook_drw;
+            VirtualProtect((void *)vts[0], 48, old, &old);
+            ok = VirtualProtect((void *)vts[1], 48, PAGE_READWRITE, &old);
+            if (ok) {
+                *(unsigned *)(vts[1] + 44) = (unsigned)(uintptr_t)hook_drw;
+                VirtualProtect((void *)vts[1], 48, old, &old);
+            }
+        }
+        if (ok)
+            orig_drw = (void (FC *)(unsigned, unsigned, unsigned))(uintptr_t)IA_FN_DRAW, drw_on = 1;
+        else
+            r1_log("capture: the prompt-icon draw (sprite vtables) is NOT patched (unexpected slot 11): the first human's prompt icon may show in the other half");
+    }
     {   /* fix022, optional: the objects of the other human are owned by him (the owner slot getter / setter above) */
         static const unsigned char b_og[] = {0x8B, 0x81, 0x7C, 0x0E, 0x00, 0x00}, b_os[] = {0x8B, 0x44, 0x24, 0x04, 0x89, 0x81, 0x7C, 0x0E, 0x00, 0x00};
         int g = hook_install(&hk_ogt, 0x6C9FD0u, b_og, 6, (void *)hook_oget), t = hook_install(&hk_ost, 0x6C9FC0u, b_os, 10, (void *)hook_oset);
@@ -1167,6 +1665,19 @@ static void hooks_remove(void)
     hook_remove(&hk_ost);
     hook_remove(&hk_ogt);
     hook_remove(&hk_act);
+    hook_remove(&hk_zone);
+    hook_remove(&hk_hcc);
+    if (drw_on) {   /* the sprite vtables back */
+        DWORD old;
+        for (int i = 0; i < 2; i++) {
+            unsigned vt = i ? 0x107FDC8u : 0x107FF90u;
+            if (VirtualProtect((void *)vt, 48, PAGE_READWRITE, &old)) {
+                *(unsigned *)(vt + 44) = IA_FN_DRAW;
+                VirtualProtect((void *)vt, 48, old, &old);
+            }
+        }
+        drw_on = 0;
+    }
     hook_remove(&hk_kind);
     hook_remove(&hk_own);
     hook_remove(&hk_think);
@@ -1792,12 +2303,31 @@ void capture_cmd(const char *arg, char *out, int size)
             ia_list_packs(out, size, (unsigned)strtoul(b, NULL, 16));
             return;
         }
+        if (!strcmp(a, "cmds")) {
+            ia_list_cmds(out, size);
+            return;
+        }
         if (!strcmp(a, "objs")) {   /* LAB: the world objects / items with class, position, ownership and state */
             ia_list_objs(out, size, b);
             return;
         }
         if (!strcmp(a, "obj") && b[0])
             ia_sw_obj = atoi(b) != 0;
+        else if (!strcmp(a, "own") && b[0])   /* LAB (fix026i): command ownership of the central update (0 = the old behaviour: every command reacts to the pad of the running context) */
+            ia_sw_own = atoi(b) != 0;
+        else if (!strcmp(a, "sprprobe") && b[0]) {
+            if (atoi(b))
+                ia_probe_install();
+        } else if (!strcmp(a, "spr") && b[0])   /* LAB (fix026i): the prompt-icon sprites in the owner's viewport only (0 = drawn in every viewport) */
+            ia_sw_spr = atoi(b) != 0;
+        else if (!strcmp(a, "zones")) {   /* LAB (fix026p): dump the zone-check actions seen (host.log "zones:" lines) */
+            ia_zn_dump(b[0] ? atoi(b) : -1);
+            snprintf(out, (size_t)size, "zones dumped to the log (%ld checks)", (long)ia_zn_n);
+            return;
+        } else if (!strcmp(a, "zmask") && b[0])   /* LAB (fix026p): class mask of the zone shapes widened by the other human's class during the check (0 = off) */
+            ia_sw_zmask = atoi(b) != 0;
+        else if (!strcmp(a, "zone") && b[0])   /* LAB (fix026i): the second human triggers the story prompts (0 = the engine's class rule) */
+            ia_sw_zone = atoi(b) != 0;
         else if (!strcmp(a, "central") && b[0])
             ia_sw_central = atoi(b) != 0;
         else if (!strcmp(a, "owner") && b[0])   /* LAB: the owner-slot hooks (the other human's objects are owned by him) on / off (before = 0.2.1 + the object contexts) */

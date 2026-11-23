@@ -341,7 +341,7 @@ static void t_glue(void)
               strstr(g, "int on = cs1_step2(&CS, session, split, level, at_title) && g_vt != NULL;") && strstr(g, "int session = net1_session_active();"),
           "D m15l9: the title = the title menu page OR the title area (its press-start screen read the CO-OP file 3 times before the menu page was up)");
     char *m = slurp("../native/menu.c", NULL), *k = slurp("../native/lobby_link.c", NULL), *rb = slurp("../native/rolebarrier1_game.c", NULL);
-    CHECK(g && strstr(g, "split = cs1_split_now(menu_split_armed(), menu_title_age_ms() < 1500u, level);") && m && strstr(m, "int menu_split_armed(void) { return g_applied_armed == 1; }"),
+    CHECK(g && strstr(g, "split = cs1_split_now(armed, menu || hold, level);") && m && strstr(m, "int menu_split_armed(void) { return g_applied_armed == 1; }"),
           "K rule 5: the applied split screen (menu.c) at the title menu / in a level is a co-op game");
     CHECK(g && strstr(g, "#define CS_CONT_DECIDE_RET 0x83DCE2u") && strstr(g, "if (e && (uintptr_t)__builtin_return_address(0) == CS_CONT_DECIDE_RET) cs_continue_decide();"),
           "K rule 6: only the title Continue decide (the call at 0x83DCDD, return 0x83DCE2) with a slot entry asks the lock (New Game / Load keep the room's roles)");

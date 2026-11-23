@@ -294,6 +294,9 @@ static void run(const char *cmd, char *out, int size)
     } else if (!strcmp(name, "shot")) {
         d3d_request_shot();
         snprintf(out, size, "shot requested (next presented frame)");
+    } else if (!strcmp(name, "d3dtrace")) {   /* fix026h LAB: the device calls of the next 1..3 frames to <log>.d3d.txt */
+        d3d_trace_request(atoi(arg));
+        snprintf(out, size, "d3dtrace requested (written at the end of the frame)");
     } else if (!strcmp(name, "devreset")) {   /* devreset <n>: the next Present resets with n lost answers (the wait in d3d.c hook_Reset) */
         int dn = atoi(arg);
         if (dn < 1 || dn > 50)

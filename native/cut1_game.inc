@@ -152,6 +152,7 @@ static void TC hook_mplay(void *self)
     if (st == 3 && (ct_last_state != 3 || key != ct_last_key) && key) {   /* a movie is being prepared: a new start */
         ct_begin(&CTS, key, now);
         if (CTX.lines++ < 120) wlog("cut: movie '%s' (key %08x) prepared here (start #%u of it)", nm, (unsigned)key, CTS.n);
+        split_gate_request("a movie is prepared");
     }
     ct_last_state = st, ct_last_key = key;
     if (st == 0 || st > 5) ct_end(&CTS);

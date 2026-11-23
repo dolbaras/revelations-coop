@@ -144,6 +144,14 @@ void capture_unbind(int u) { (void)u; rec.unbinds++; }
 void capture_set_own(int s) { rec.own = s; }
 void capture_bind(int unit, int pad) { if (rec.binds < 8) rec.bind_unit[rec.binds] = unit, rec.bind_pad[rec.binds] = pad; rec.binds++; }
 void capture_get_state(capture_state_t *st) { *st = g_cs; }
+/* rel026: kbpad stubs (menu.c reads the real gamepads through the keyboard + gamepad mapping) */
+void capture_set_kbskip(int on) { (void)on; }
+void capture_set_kbskip_pads(unsigned mask) { (void)mask; }
+void testmode_pad_kbpad(int on) { (void)on; }
+int testmode_pad_kbpad_get(void) { return 0; }
+void split_leash_enable(int on) { (void)on; }
+void downed1_set_local(unsigned flags) { (void)flags; }
+int testmode_pad_real_present(int user) { (void)user; return 0; }
 void split_set_layout(int l) { rec.layout = l; }
 void split_enable(int on) { rec.enable = on; }
 void split_get_state(split_state_t *st) { *st = g_ss; }
@@ -346,6 +354,7 @@ int main(void)
     status(st, sizeof st);
     CHECK(strstr(st, "lobby OPEN"));
     g_pad[0] = 0x0001; frames(2); g_pad[0] = 0; frames(2);   /* up: wraps to Done */
+    g_pad[0] = 0x0001; frames(2); g_pad[0] = 0; frames(2);   /* up: Downed / revive row (rel026) */
     g_pad[0] = 0x0001; frames(2); g_pad[0] = 0; frames(2);   /* up: pads row */
     g_pad[1] = 0x1000; frames(2); g_pad[1] = 0; frames(2);   /* A: exchange pads */
     g_pad[0] = 0x0001; frames(2); g_pad[0] = 0; frames(2);   /* up: layout */

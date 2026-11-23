@@ -1,12 +1,13 @@
 Resident Evil Revelations Co-op - version @VERSION@
 ================================================================
 
-Two players in the story campaign of Resident Evil Revelations (2013 PC, Steam build 13298487; an older game build is supported too, see "Needs"): on one PC with split screen and two gamepads, or on two PCs over the network.
+Two players in the story campaign of Resident Evil Revelations (2013 PC, Steam build 13298487; an older game build and a third build are supported too, see "Needs"): on one PC with split screen and two gamepads, or on two PCs over the network.
 
 What it does
 - The campaign's AI partner (Parker, Jessica, Chris, Keith, Quint depending on the part of the story) is taken over by a second player. Each player has an own camera, an own HUD
   with the own ammunition and weapon, and an own pause / item menu.
-- One PC, split screen: the second player uses a second gamepad. The screen is split side by side or top and bottom (your choice). Cutscenes, the pause menu and the game over
+- One PC, split screen: the second player uses a second gamepad, or: player 1 plays with the keyboard and the mouse and player 2 with ONE gamepad (the lobby's "Gamepads" row, third
+  value). The screen is split side by side or top and bottom (your choice); the HUD (minimap, ammunition, weapon box, text) keeps its proportions in each half, drawn in a centred 16:9 box. Cutscenes, the pause menu and the game over
   screen use the whole screen. Split screen works in every part of the story with two playable characters.
 - Network, two PCs: each player has the game on the own PC (both need the Steam copy and this mod) and plays the own character on the own screen. One person per PC; split screen
   and network are not used together. Network play follows the story section by section (every section with two playable characters, whichever pair the story gives: Jill and Parker, Chris and Jessica, Keith and Quint ...; arrival, characters and movement of each section were checked on two PCs, what was not is listed under "Limits"): the guest's game follows
@@ -18,8 +19,21 @@ What it does
   opening on your screen (for you it stays closed with your own loot inside: open it yourself). The key items of every episode and the story flags that the game's objects
   set are passed to the other PC. Movies (the pre-rendered cutscenes) start together on both PCs ("Waiting for ... to finish loading..." while one PC waits for the other),
   and a skip needs both players: the first skip press shows "... wants to skip the cutscene" on the partner's screen, and when the partner skips too, the movie ends on both PCs.
-- Downed / revive in a network game (the host's choice in the lobby: off, 30, 60, 120 seconds or no limit; 60 by default): a player whose health runs out lies down and can be
-  helped up by the partner before the time runs out; when both are down, it is game over for both.
+- Downed / revive, in a network game and in split screen (a row of the lobby: off, 30, 60, 120 seconds or no limit; 60 by default and ON by default; in a network game the host's
+  choice): a player whose health runs out lies down and can be helped up by the partner (stand next to him, hold A) before the time runs out; when both are down, it is game over for
+  both. A line on the screen tells the player who lies "You are down. Your partner can help you up." and the other one "Your partner is down! Stand next to them and hold A to help.",
+  with the time left (13 languages).
+- Partner gate (split screen and network, local gamepads): when the two players get far apart (about 25 m) a line asks the one who runs away to wait for the partner; from about
+  40 m the left stick of the one who walks AWAY is damped (never to zero, never a teleport or a kill; walking back or standing is not damped). In split screen, before a cutscene, a movie,
+  a section change or a restart, a second player who is far away is put next to the first player. It can be switched off (rev1_coop.ini: leash=0).
+- Split screen, the second player cannot fall out of the world: when his half has no ground (the game streams the level around the first player only) or he is far below the first
+  player, he is put next to the first player after about two seconds.
+- Split screen, the second player examines and uses things himself: the action prompts of objects (for example the drain cover in the galley of Episode 1) show in the half of the player
+  who can use them, and he presses his own button; the first player is no longer forced to examine.
+- Split screen: the co-op save is kept on while the title's Continue or New Game loads (the first Continue after starting the game could load the solo save's area).
+- Split screen: the second HUD set is taken down before a section change or a restart (players reported a crash after the first B.O.W. kill and at the end of a section: the same cause;
+  reproduced and gone in our restart test, see Limits). A short scripted scene that repeats (the ship's shake) or a short door animation should no longer take the whole screen (checked by
+  offline tests only: we could not make the loop happen in the lab).
 - Give to partner (as in Resident Evil 5): in the game's own item screen (BACK on a gamepad) a herb, a grenade or ammunition can be passed to the partner while the
   partner stands within about 3 m and is not down. The screen shows "Give to partner" on such an item; one herb or one grenade per press, half of that ammunition (rounded
   up; press again for more). The partner takes what fits; if the partner cannot hold any more, the item stays with you and the screen says so. On one PC and over the network,
@@ -28,7 +42,7 @@ What it does
   player scans on the own PC, and an item a scan reveals shows on both PCs. In split screen the second player's scan uses the whole screen while he holds the scanner.
   Each player has an own analysis rate and own herb rewards; in part 2 of Episode 1 (the scanner tutorial) the rate is the team's, as the story counts it.
 - A lobby, opened by the "Co-Op Play" row of the main menu (or F6, or the BACK button of a gamepad), sets: co-op on / off, which character player 1 plays, the layout of the
-  screen, which gamepad is player 1's, and the network: "Host" (you start the game, the other player joins) or "Join", the connection ("Steam friends" or "Direct IP") and "Start".
+  screen, which gamepad is player 1's (or "keyboard + mouse and one gamepad"), the Downed / revive rule, and the network: "Host" (you start the game, the other player joins) or "Join", the connection ("Steam friends" or "Direct IP") and "Start".
   The lobby is in the game's 13 languages. The story is started from the game's own menus as always; a co-op game keeps its own save (see "Saves").
 - When the host leaves or the connection is lost, the guest reads it on screen and goes back to the title; when the guest leaves, the host plays on with the game's AI partner.
   Both PCs need the same version of the mod: another version is refused and the lobby says so.
@@ -40,7 +54,7 @@ Install
    "Resident Evil Revelations Co-op" shortcut (desktop, Start menu). Start the game with that shortcut (it starts it through Steam): it also installs a newer version of the
    mod from GitHub first, if there is one (no internet: the game starts as it is). A new version is installed only when its download matches the checksum GitHub gives for it.
 3. In the main menu choose "Co-Op Play" (the fourth entry) to open the co-op lobby; F6 (keyboard) or BACK (gamepad) open it too.
-If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0, 0.2.1, 0.2.2, 0.2.3 or 0.2.4): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.4 and 0.2.5): the lobby refuses the other version and says so.
+If you had an older version (0.0.1, 0.0.2, 0.1.0, 0.2.0, 0.2.1, 0.2.2, 0.2.3, 0.2.4 or 0.2.5): the shortcut updates it to this version by itself at the next start. Different versions do not play together (for example 0.2.5 and 0.2.6): the lobby refuses the other version and says so.
 
 Network play: Steam friends or IP address
 - "Steam friends": the host starts hosting, the friend joins from the Steam friends list ("Join Game") or from the host's invite. No address and no port forwarding are needed.
@@ -70,12 +84,13 @@ puts the backed-up files back and removes the shortcuts. Your saves are not touc
 (rev1_coop.ini, a few lines); screenshots you took with the mod stay in rev1_coop\shots.
 
 Needs: Resident Evil Revelations for PC: tested and supported is the Steam build 13298487; also made for an older build (PE timestamp 2019-02-23, a copy with the Steam wrapper
-removed, rerev.exe SHA-256 BA1F0168...4F88), for which the installer puts a DLL made for it. A licensed copy is recommended; on other versions stable work is not guaranteed.
+removed, rerev.exe SHA-256 BA1F0168...4F88), for which the installer puts a DLL made for it; and a third build (rerev.exe SHA-256 B90005AF...58EA, seen in a player's logs) that has the
+Steam build's code layout (the installer puts the same DLL as for the Steam build; every patch checks the game's bytes and stays off on a mismatch). A licensed copy is recommended; on other versions stable work is not guaranteed.
 Any other rerev.exe: the installer shows its SHA-256 and size and asks whether to install anyway on an untested version (see "Other game versions" under Limits). Windows 10 or 11, PowerShell
 5.1 (part of Windows), two gamepads for two players on one PC. The mod changes no game file other than adding dinput8.dll; it does not touch the Steam stub, steam_api.dll, any Steam emulator's files or Raid, and it never works around a copy protection.
 
 Limits
-- Other game versions (0.2.5): A licensed copy is recommended; on other versions stable work is not guaranteed. The installer recognises the Steam build 13298487 and the older build
+- Other game versions (0.2.6): A licensed copy is recommended; on other versions stable work is not guaranteed. The third build (B90005AF...58EA) was NOT available to us: it is accepted because a player's log showed the same addresses as the Steam build, not because we ran it; its crashes in the log (the end of a section, a stray address when hosting through Steam) were not reproduced on it. The installer recognises the Steam build 13298487 and the older build
   (2019-02-23, unwrapped) by the SHA-256 of rerev.exe and installs the DLL made for each. The older build's DLL is the same mod with the game's addresses moved to that build (every patch checks the game's
   code bytes first and switches itself off, with a line in rev1_coop.log, when they are not the expected ones). What was run on the older build and what was not is in the release notes
   ("Checked" and "Not verified"); the lobby's Steam friends and invitations are not available on a copy that has a Steam emulator instead of Steam: use "Direct IP" (UDP 28410). The older build
@@ -84,6 +99,11 @@ Limits
   (Steam build hosts, older build joins by IP) was checked for walking, aiming, the reload, the knife and the weapon change of a keyboard / mouse guest, and the guest's aimed shots on the older build damaged an enemy there. For any other rerev.exe the installer asks before it installs (the answer is kept in coop\anyexe.txt for that
   exe only, and "Remove co-op" deletes it); the mod then runs with the Steam build's DLL and every patch checks the game's bytes; whatever does not match stays off. A network game needs the
   same mod version on both PCs; the supported and the older build can join each other (they send the same build tag) - see the notes for what was verified.
+- The older game build (2019-02-23) and 0.2.6: its DLL is made from the same sources with the new addresses of this version found by comparing the two builds' code; the additions of 0.2.6 (own prompts, gate, fall rescue, HUD fit, Downed / revive in split screen, keyboard + one gamepad) were NOT run on that build. Every patch checks the game's bytes first and stays off on a mismatch.
+- Not in this version: a flashlight for the second player in split screen (the second torch is computed but no beam could be seen in our pictures, so it is switched off; REV1_FLASH2=1 turns the unfinished code on for tests). In dark rooms the second player has the same light as before.
+- Partner gate: the distances (25 m hint, 40 m damping) are a first choice. Keyboard and mouse players get the hint only (the game fills their input itself). In a network game the remote partner is damped by his own PC only, and nobody is put next to the other. The line, the damping (about a quarter of the speed when walking away, no change when walking towards the partner) and the move before a scene were checked in the lab with two virtual gamepads, top/bottom and side by side; a section change in real play was not driven to the end, and no real pair of players has used it yet.
+- Split screen HUD fit: checked in both layouts and both halves at 1280x720 (the screen of our test PC) only; the HUD is smaller than the half's corners on purpose. The text of item messages, help and subtitles was not seen in the split (it uses the same fit).
+- Split screen, own prompts: the second player's own examine prompt and press were proven for the drain cover of Episode 1 only (the fix is general for story prompts of that kind; in the final 0.2.6 build the lab route that reaches that spot loads the checkpoint through the new Continue rule and then neither player got the prompt, so the proof was repeated with that rule switched off in the lab: the scene started by his press) the galley prompts "10b" / "10c", other parts of the story, a padlock door and the "missing opening events" a player reported (Episode 1) were not examined. The crash at the end of a section (second HUD set) was reproduced with a restart in the lab and is not seen after the change; the real end of a section during play, a "New Game" crash after "Saving game" and a crash at a stray address when hosting through Steam were not reproduced.
 - Network play is for one person per PC. In the Guest Cabin part of Episode 2 the second player plays HUNK instead of the partner the story locks away: HUNK appears, walks and shoots there (on two PCs and in split screen) and the end of the part leads both PCs into Episode 3, but the part's own story (its scenes, doors and enemies) was not played through with HUNK; Split screen on one PC works in every part of the story with two playable characters.
 - Not verified with two real PCs in this version: the last boss fight of the campaign played through (its end flow after it is verified), and the section 12-3, which could only be started directly (not by the story's own way); it follows the same rules.
 - Not verified with two real PCs, the network additions of 0.2.2: a lever pulled by the partner moving on the other PC (the parts of the levels with levers load only by the

@@ -60,4 +60,30 @@ static inline void frs_target(const float partner[3], float out[3])
     out[0] = partner[0] + 70.0f, out[1] = partner[1], out[2] = partner[2] + 70.0f;
 }
 
+/* SPLIT SCREEN (fix026m, tester report 2026-11-22 "Parker outside the map ... fixed by walking towards Jill"): both humans are local, the stage streams around the FIRST human only (the cast of
+ * stage1.h), and FUN_006F0660 spares every human that is not the own slot: the second human who is further from the first than the loaded floor reaches has no ground, hovers or falls for ever and
+ * is never killed. Unlike frs_step a FALLING second human is rescued too (nothing else would ever end it): no ground for FRS_SPLIT_MS (whatever the height does), or more than
+ * FRS_SPLIT_DROP below the first human. Cooldown FRS_SPLIT_COOL_MS (the rescue itself needs a moment before the floor is under him). Returns 1 = put him next to the first human now. */
+#define FRS_SPLIT_MS 2000u
+#define FRS_SPLIT_DROP 2500.0f
+#define FRS_SPLIT_COOL_MS 4000u
+static inline int frs_split_step(frs_t *f, int noground, float y, float partner_y, int partner_ok, uint32_t now)
+{
+    int deep = partner_ok && (partner_y - y) > FRS_SPLIT_DROP;
+    if (!noground && !deep) {
+        f->armed = 0;
+        return 0;
+    }
+    if (!f->armed) {
+        f->armed = 1, f->since_ms = now, f->y0 = y;
+        if (!deep)
+            return 0;
+    }
+    if (!partner_ok) return 0;
+    if (!deep && (uint32_t)(now - f->since_ms) < FRS_SPLIT_MS) return 0;
+    if (f->last_rescue_ms && (uint32_t)(now - f->last_rescue_ms) < FRS_SPLIT_COOL_MS) return 0;
+    f->last_rescue_ms = now, f->rescues++, f->armed = 0;
+    return 1;
+}
+
 #endif

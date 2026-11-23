@@ -243,3 +243,6 @@ if "$@" > build/test_chain.txt; then tail -2 build/test_chain.txt; else cat buil
 UDLL=""; for f in "${OUT_DLL:-}" ../native/build/dinput8.dll; do [ -z "$UDLL" ] && [ -n "$f" ] && [ -f "$f" ] && UDLL="$f"; done
 if [ -n "$UDLL" ]; then MOD_DLL="$UDLL" ZIG="$ZIG" sh ual_test.sh > build/ual_test.txt || { cat build/ual_test.txt; echo "FAIL: ual_test"; exit 1; }; tail -1 build/ual_test.txt
 else echo "(ual_test: no native/build/dinput8.dll; sh native/build.sh first, or OUT_DLL=<file>)"; fi
+# fix026g: the partner gate's leash and scene gate (native/leash1.h)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_leash1.exe test_leash1.c
+./build/test_leash1.exe

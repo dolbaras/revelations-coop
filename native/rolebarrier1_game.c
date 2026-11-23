@@ -25,6 +25,7 @@
 
 #include "r1.h"
 #include "capture.h"
+#include "split.h"
 #include "net1.h"
 #include "rolebarrier1.h"
 #include "world1_game.h"
@@ -527,6 +528,7 @@ static void sect_start(uint32_t area)
 
 static uint32_t __attribute__((force_align_arg_pointer)) cb_restart(rbk_frame *f)
 {
+    split_retire_hud("restart");   /* fix026: a restart tears the area down too (lab f26j_after: AV exe+1396 28 ms after the console restart without this) */
     rb_triple t = {f->arg[0], (int32_t)f->arg[1], (int32_t)f->arg[2]};
     uint32_t hold = 0;
     char what[220];
@@ -554,6 +556,7 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_restart(rbk_frame *f
         snprintf(what, sizeof what, "restart as the client or offline: own area %08x %d / %d -> %s area %08x %d / %d (%s)", own.area, own.a, own.b, hold ? "NOT NOW" : "runs with", t.area, t.a, t.b, B.why);
         mark(RBK_RESTART, changed, what);
     }
+    split_gate_request("restart");
     r1_log("barrier: restart #%u from %08x (%s): %s", HS[RBK_RESTART].calls, f->ret_addr, restart_caller(f->ret_addr), what);   /* rare: every call is logged */
     LeaveCriticalSection(&cs);
     if (!hold) {   /* the engine reloads right after this returns */
@@ -786,6 +789,7 @@ static int running_area(char *name, int size, unsigned *hash)
 static uint32_t __attribute__((force_align_arg_pointer)) cb_start(rbk_frame *f)
 {
     int section = f->ret_addr >= RB_SECTION_FN_LO && f->ret_addr < RB_SECTION_FN_HI;
+    split_retire_hud(section ? "section change" : "start record");   /* fix026 */
     {   /* fix021 LAB (REV1_LAB_RDUMP=1, rdump1.c): the resource table and the save panel entries at every start (r48: em1000 at start #2) */
         extern void rdump_auto(const char *why);
         rdump_auto(section ? "barrier start: a SECTION CHANGE" : "barrier start");
@@ -810,6 +814,7 @@ static uint32_t __attribute__((force_align_arg_pointer)) cb_start(rbk_frame *f)
         r1_log("barrier: start #%u: FUN_00720540(record %08x, area %08x) from %08x%s", HS[RBK_START].calls, f->arg[0], f->arg[1], f->ret_addr,
                st ? ": the host's story start, sent next frame" : section ? " (section change)" : " (not a host start)");
     }
+    if (section) split_gate_request("section change");
     if (section) {
         r1_log("barrier: section change on this PC (%s): finished section %08x (running area %s) -> %08x, start table %s %d / %d", B.host ? "host" : "client", from, an[0] ? an : "?",
                f->arg[1], nx_ok ? "entry" : "has NO entry", nx_ok ? nx.a : 0, nx_ok ? nx.b : 0);

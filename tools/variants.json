@@ -3,6 +3,8 @@
     {"id": "steam-13298487", "sha256": "1573B79EB921B1E7F571E6DEB71C39961C7F1940FAD6D19283FC3AEA7FCA48AA", "size": 14260576, "kind": "supported",
      "dll": "dinput8.dll", "label": "Steam build 13298487"},
     {"id": "b2019-0223", "sha256": "BA1F016816C7780C706BD95D6811F828DC595370A7DF7A644AA64F6F96354F88", "size": 14252816, "kind": "ported",
-     "dll": "coop/variants/dinput8-b2019-0223.dll", "label": "older game build (2019-02-23), Steam wrapper removed"}
+     "dll": "coop/variants/dinput8-b2019-0223.dll", "label": "older game build (2019-02-23), Steam wrapper removed"},
+    {"id": "b90005af", "sha256": "B90005AFDBCE740FD7BA9FD36BF35CF0E65B75B8C5699744CA650EDE917758EA", "kind": "samelayout",
+     "dll": "dinput8.dll", "label": "third game build (seen in a player's logs), same code layout as the Steam build"}
   ]
 }

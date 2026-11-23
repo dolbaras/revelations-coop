@@ -55,6 +55,13 @@ enum l1_text {
     /* sync022 (the cutscene skip vote; our wording, not read by native speakers) */
     L1T_CUT_PARTNER_SKIP,   /* "%s wants to skip the cutscene. Press Start to skip it together." */
     L1T_CUT_SELF_SKIP,      /* "Waiting for %s to skip as well..." */
+    /* kbpad (2026-11-22): player 1 on keyboard + mouse, player 2 on the one gamepad (our wording, not read by native speakers) */
+    L1T_PADS_KBPAD, L1T_CARD_KBM, L1T_CARD_PAD,
+    /* fix026d (downed / revive cue, our wording): the strip while a human lies / his partner lies; %s = " (58 s)" or "" (no time limit) */
+    L1T_DOWN_SELF,          /* this human is down */
+    L1T_DOWN_PARTNER,       /* the partner is down: how to help */
+    L1T_LEASH_FAR,          /* fix026g: "Wait for your partner: you are too far apart." */
+    L1T_LEASH_GATE,         /* fix026g: "Your partner was brought to you before the next scene." */
     L1T_COUNT
 };
 /* the game's own strings (Coop_<lang>.gmd, the Raid mode's online texts, in all 13 languages) that the network lobby quotes: menu.c loads them for the running language
@@ -114,6 +121,7 @@ typedef struct {
     char join_addr[48];  /* "host:port" typed for Join (the Steam way: the host's Steam ID); persisted */
     int way;             /* round 2: 0 = Direct IP, 1 = Steam friends (lobby + relay, invites, no port forwarding); persisted */
     int downed;          /* ep1-flow E12: the host's Downed / revive rule of a network session, L1D_* (0 = the default: on, 60 s); persisted */
+    int pads_kb;         /* 1 (kbpad, last field: the others are initialised by position): player 1 plays with the keyboard + mouse, player 2 with the one gamepad (pads_swapped is 0 then) */
 } l1_settings;
 
 /* ep1-flow E12: the Downed / revive row (network host; the guest sees the host's choice). The values cycle Off, 30 s, 60 s, 120 s, no time limit; 0 is the
@@ -225,6 +233,10 @@ enum {
     L1G_CUT_WAIT,                    /* sync022: this PC's movie is ready and waits for the partner's (name) */
     L1G_CUT_PARTNER_SKIP,            /* sync022: the partner wants to skip the movie (name) */
     L1G_CUT_SELF_SKIP,               /* sync022: this player wants to skip, the partner has not pressed yet (name) */
+    L1G_DOWN_SELF,                   /* fix026d: this human is down (seconds = the bleed-out time left, -1 = no limit) */
+    L1G_DOWN_PARTNER,                /* fix026d: the partner is down (seconds as above) */
+    L1G_LEASH_FAR,                   /* fix026g: the partner gate: the two humans are far apart (no name) */
+    L1G_LEASH_GATE,                  /* fix026g: the second human was put next to the first one before a scene (no name) */
     L1G_COUNT
 };
 enum { L1GF_CONNECTED = 1, L1GF_READY = 2, L1GF_PEER_READY = 4, L1GF_HOST = 8 };   /* l1_strip_in.flags of L1G_READY_GATE */
@@ -276,7 +288,7 @@ int l1_addr_ok(const char *s);                                    /* "host[:port
 
 /* resolved assignment for the capture / split modules: unit slots of the two humans, their pad slots (player 1 is always on pad slot 0: the game's menus read slot 0 as "the local human")
  * and whether the two PHYSICAL gamepads are exchanged at the XInput level (testmode_pad_swap_base): that is how "player 1 uses gamepad 2" is done. */
-typedef struct { int unit1, unit2, pad1, pad2, swap; } l1_assign;
+typedef struct { int unit1, unit2, pad1, pad2, swap, kbpad; } l1_assign;
 void l1_assign_get(const l1_settings *s, l1_assign *a);
 
 /* title-screen hint / banner line for the current settings */

@@ -12,6 +12,7 @@
  * slot 0 entry Continue loads) of a co-op save recorded as "net" puts the session's roles back to the recorded ones (lk_force_roles) before the save is read.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -27,6 +28,10 @@ static const unsigned char cs_entry_bytes[30] = {0x51, 0x8B, 0x44, 0x24, 0x08, 0
                                                  0x00, 0x00, 0x00, 0xE8, 0x78, 0xFF, 0xFF, 0xFF, 0x59, 0xC2, 0x04, 0x00, 0xCC, 0xCC};
 
 static cs1_t CS;
+#define CS_HOLD_MS 45000   /* fix026s: how long the decided title start keeps the co-op save on while the level loads */
+static volatile int g_hold_on = 1;
+static DWORD g_hold_until;
+static int g_hold_set, g_hold_logged;
 static volatile int g_on_flag;          /* CS.active for the storage thread */
 static volatile LONG g_rec_now;         /* rule 6: (mode << 4) | (role + 1) of the record a co-op write puts next to the file now (the storage thread reads it) */
 static cs1_rec g_rec_last = {CS1_REC_NONE, -1, 0};
@@ -185,7 +190,11 @@ static int TC w_read(void *self, const char *name, void *data, int size)
         r1_log("coopsave: no co-op file yet: the game's read of %s served from the solo save READ ONLY (%d bytes; its next write goes to the co-op file)", CS1_SOLO_NAME, n);
         return n;
     }
-    if (r != CS1_COOP) return ((fr_t)g_orig[1])(self, name, data, size);
+    if (r != CS1_COOP) {
+        if (menu_split_armed() && cs1_is_solo(name) && cs_exists())   /* fix026s diag: the split is armed and the co-op file exists, yet this read goes to the SOLO save */
+            r1_log("coopsave: DIAG a read of %s (%d bytes) goes to the SOLO save while the split is armed (co-op save %s, hold %d)", CS1_SOLO_NAME, size, g_on_flag ? "on" : "OFF", g_hold_set);
+        return ((fr_t)g_orig[1])(self, name, data, size);
+    }
     InterlockedIncrement(&g_reads);
     if (!cs_paths() || size <= 0) return 0;
     HANDLE h = CreateFileA(g_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -348,7 +357,20 @@ static void cs_frame(void)
     int was = CS.active;
     /* (m15c5: the main title, not just "no level"; m15l9: the title AREA already, its press-start screen reads the save before the menu page is up) */
     int at_title = menu_title_age_ms() < 1500u || rolebarrier_title_area();
-    int level = rolebarrier_level_present(), split = cs1_split_now(menu_split_armed(), menu_title_age_ms() < 1500u, level);   /* rule 5 */
+    int level = rolebarrier_level_present();
+    /* fix026s (issue #2, player 0.2.5: the first Continue after the start loaded area 91050200, the solo save's, instead of the co-op checkpoint 91010100; the
+     * second Continue was right): the title menu page stops updating the moment Continue / New Game is decided, so 1.5 s later menu_title_age_ms() >= 1500 and
+     * split (rule 5) went false while the level was still loading: co-op save OFF, the load's own read of DATA0.DAT then went to the SOLO file (log: "Continue
+     * decide" -> "co-op save OFF" 1.46 s later -> start #1 area 91050200 with the roles of the save lost). The decision now holds rule 5 for CS_HOLD_MS (until a
+     * level exists) after the title menu was seen with the split armed. `coopsave hold 0` (g_hold_on) = the old rule (LAB). */
+    DWORD now = GetTickCount();
+    int armed = menu_split_armed(), menu = menu_title_age_ms() < 1500u;
+    if (armed && menu) g_hold_until = now + CS_HOLD_MS, g_hold_set = 1;
+    if (level || !armed) g_hold_set = 0;
+    int hold = g_hold_on && g_hold_set && (int)(g_hold_until - now) > 0;
+    if (hold && !menu && !g_hold_logged) g_hold_logged = 1, r1_log("coopsave: the title menu is left (Continue / New Game decided) with the split armed: co-op save held on while the level loads (up to %d s)", CS_HOLD_MS / 1000);
+    if (menu || level) g_hold_logged = 0;
+    int split = cs1_split_now(armed, menu || hold, level);   /* rule 5 */
     int session = net1_session_active();
     int on = cs1_step2(&CS, session, split, level, at_title) && g_vt != NULL;
     {   /* rule 6: what a co-op write records now */
@@ -424,6 +446,11 @@ void coopsave_cmd(const char *arg, char *out, int size)
     if (!strcmp(w, "delete")) {   /* LAB: the restore of a run / a test */
         int ok = cs_paths() && DeleteFileA(g_path);
         snprintf(out, (size_t)size, "coopsave: %s %s", g_path, ok ? "deleted" : "not there");
+        return;
+    }
+    if (!strcmp(w, "hold")) {   /* LAB (fix026s): `coopsave hold 0|1` = the decided title start keeps the co-op save on while the level loads (0 = the 0.2.5 rule) */
+        if (w2[0]) g_hold_on = atoi(w2) != 0;
+        snprintf(out, (size_t)size, "coopsave: hold %d (set %d)", g_hold_on, g_hold_set);
         return;
     }
     if (!strcmp(w, "force")) {   /* LAB */

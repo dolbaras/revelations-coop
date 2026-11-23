@@ -17,6 +17,7 @@
  * never a copy of this mod (chain_logic.h).
  */
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@ static CRITICAL_SECTION log_lock;
 static int exe_ok;
 static char exe_sha[65];
 static int gate_consented;
+static const char *gate_samelayout = "";   /* rel026: the id of a known build with the supported layout (variants.json kind "samelayout") */
 
 void r1_log(const char *fmt, ...)
 {
@@ -301,6 +303,19 @@ static LONG CALLBACK log_access_violation(EXCEPTION_POINTERS *x)
     r1_log("AccessViolation at %p (exe+%lx) %s %p eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx ebp=%08lx esp=%08lx",
            r->ExceptionAddress, (unsigned long)((BYTE *)r->ExceptionAddress - exe), r->ExceptionInformation[0] ? "write" : "read",
            (void *)r->ExceptionInformation[1], c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+    /* module list: names the DLL that owns an address outside the exe (owner run 2: 66AAE359 unidentified) */
+    {
+        HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+        if (sn != INVALID_HANDLE_VALUE) {
+            MODULEENTRY32 me;
+            me.dwSize = sizeof me;
+            for (BOOL ok = Module32First(sn, &me); ok; ok = Module32Next(sn, &me)) {
+                int hit = (BYTE *)r->ExceptionAddress >= me.modBaseAddr && (BYTE *)r->ExceptionAddress < me.modBaseAddr + me.modBaseSize;
+                r1_log("  module %p +%lx %s%s", me.modBaseAddr, (unsigned long)me.modBaseSize, me.szExePath, hit ? "  <== fault address" : "");
+            }
+            CloseHandle(sn);
+        }
+    }
     IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(exe + ((IMAGE_DOS_HEADER *)exe)->e_lfanew);
     DWORD lo = (DWORD)exe, hi = lo + nt->OptionalHeader.SizeOfImage;
     NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
@@ -485,8 +500,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             exe_ok = strcmp(exe_sha, R1_EXE_SHA256) == 0;
             if (!exe_ok) {
                 for (int i = 0; i < R1_N_VARIANTS; i++)
-                    if (strcmp(exe_sha, r1_variants[i].sha256) == 0) { gate_why = r1_variants[i].id; break; }
-                if (!gate_why[0] && consent_for(exe_sha)) { exe_ok = 1; gate_consented = 1; }
+                    if (strcmp(exe_sha, r1_variants[i].sha256) == 0) {
+                        if (strcmp(r1_variants[i].kind, "samelayout") == 0 && strcmp(R1_BUILD_ID, "steam-13298487") == 0) {   /* only the supported build's own DLL (a ported DLL has other addresses) */
+                            /* rel026: a build with the supported build's code layout (a third exe seen in a player's logs: every address the hooks use matched). This DLL
+                             * runs on it; every patch still compares its own bytes first and refuses on a mismatch (fail closed). Same network tag as the supported build. */
+                            exe_ok = 1;
+                            gate_samelayout = r1_variants[i].id;
+                        } else
+                            gate_why = r1_variants[i].id;
+                        break;
+                    }
+                if (!exe_ok && !gate_why[0] && consent_for(exe_sha)) { exe_ok = 1; gate_consented = 1; }
             }
         }
         if (!exe_ok && !gate_why[0] && r1_env("REV1_ANYEXE", v, sizeof v) && v[0] == '1') {
@@ -496,7 +520,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         if (gate_why[0] && !exe_ok)
             r1_log("gate: this exe is the known build %s, which needs its own dinput8.dll (this one is for %s): forwarding only", gate_why, R1_BUILD_ID);
         r1_log("gate: exe sha256 %s -> %s", exe_sha[0] ? exe_sha : "(unreadable)",
-               exe_ok ? (gate_consented ? "UNKNOWN build, running by the player's consent (every check fails closed)" : R1_BUILD_LABEL) : "UNSUPPORTED, forwarding only");
+               exe_ok ? (gate_consented ? "UNKNOWN build, running by the player's consent (every check fails closed)" : gate_samelayout[0] ? "known build with the supported layout (every patch checks its bytes, fail closed)" : R1_BUILD_LABEL) : "UNSUPPORTED, forwarding only");
         if (exe_ok) {
             testmode_install();
             d3d_install();

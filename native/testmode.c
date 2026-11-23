@@ -435,6 +435,22 @@ void testmode_pad_pretend(int user, int active, const void *gamepad)
     InterlockedExchange(&rpad[user].active, active);
 }
 
+/* kbpad: the game gives pad slot k to the k-th CONNECTED user, so with one gamepad it would be player 1's. The mapping above presents two connected users: user 0 neutral (the engine's keyboard
+ * mode drives pad slot 0 = player 1 through it) and user 1 = the real pad (pad slot 1 = player 2). On / off is idempotent; the menu's frame callback keeps it in step with the lobby setting. */
+static volatile LONG kbpad_on;
+void testmode_pad_kbpad(int on)
+{
+    on = on != 0;
+    if (kbpad_on == on)
+        return;
+    InterlockedExchange(&kbpad_on, on);
+    InterlockedExchange(&keep_user[0], on);
+    InterlockedExchange(&keep_user[1], on);
+    testmode_pad_human(on ? 1 : -1);
+    r1_log("kbpad: %s (game user 0 = neutral pad for the keyboard + mouse, game user 1 = the real gamepad)", on ? "ON" : "off");
+}
+int testmode_pad_kbpad_get(void) { return kbpad_on != 0; }
+
 DWORD testmode_pad_activity(void) { return pad_activity_tick; }
 
 static int pad_is_active(const XINPUT_GAMEPAD *g)
@@ -717,6 +733,18 @@ unsigned testmode_pad_masked(int user, unsigned *hidden)
     return (unsigned)pad_mask[user];
 }
 
+static volatile LONG pad_damp[4] = {1000, 1000, 1000, 1000}, pad_damp_n[4];
+void testmode_pad_damp(int user, int permille)
+{
+    if (user >= 0 && user < 4) InterlockedExchange(&pad_damp[user], permille < 0 ? 0 : permille > 1000 ? 1000 : permille);
+}
+int testmode_pad_damped(int user, unsigned *n)
+{
+    if (user < 0 || user > 3) return 1000;
+    if (n) *n = (unsigned)pad_damp_n[user];
+    return (int)pad_damp[user];
+}
+
 static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
 {
     DWORD ret_addr = (DWORD)__builtin_return_address(0);
@@ -736,6 +764,11 @@ static DWORD WINAPI hook_XInputGetState(DWORD i, XINPUT_STATE *st)
     if (i < 4 && st && fr == ERROR_SUCCESS && pad_mask[i] && (st->Gamepad.wButtons & pad_mask[i])) {   /* a button another module owns right now (downed1: the revive's A): the game does not see it */
         st->Gamepad.wButtons &= (WORD)~pad_mask[i];
         InterlockedIncrement(&pad_mask_hidden[i]);
+    }
+    if (i < 4 && st && fr == ERROR_SUCCESS && pad_damp[i] != 1000 && (st->Gamepad.sThumbLX || st->Gamepad.sThumbLY)) {   /* the partner gate's leash (leash1.h): a human walking away from his partner is slowed */
+        st->Gamepad.sThumbLX = (SHORT)((int)st->Gamepad.sThumbLX * (int)pad_damp[i] / 1000);
+        st->Gamepad.sThumbLY = (SHORT)((int)st->Gamepad.sThumbLY * (int)pad_damp[i] / 1000);
+        InterlockedIncrement(&pad_damp_n[i]);
     }
     if (i < 4 && st && fr == ERROR_SUCCESS) {   /* what the game really gets (console `pads`): last state per user and how often a button was down */
         xlast[i].buttons = st->Gamepad.wButtons;

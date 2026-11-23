@@ -5,6 +5,7 @@ typedef struct { const char *id; const char *sha256; const char *kind; } r1_vari
 static const r1_variant_t r1_variants[] = {
     {"steam-13298487", "1573b79eb921b1e7f571e6deb71c39961c7f1940fad6d19283fc3aea7fca48aa", "supported"},
     {"b2019-0223", "ba1f016816c7780c706bd95d6811f828dc595370a7df7a644aa64f6f96354f88", "ported"},
+    {"b90005af", "b90005afdbce740fd7ba9fd36bf35cf0e65b75b8c5699744ca650ede917758ea", "samelayout"},
 };
 #define R1_N_VARIANTS ((int)(sizeof r1_variants / sizeof r1_variants[0]))
 #endif

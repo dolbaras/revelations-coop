@@ -27,6 +27,7 @@
 #include "r1.h"
 #include "rolebarrier1.h"
 #include "split.h"
+#include "downed1.h"
 #include "world1_game.h"   /* ep1-solo: solo1_watch_now */
 #include "coop_steam.h"   /* rel010: the friend row */
 
@@ -427,6 +428,22 @@ static void ini_path_init(void)
         snprintf(g_ini_path, sizeof g_ini_path, "%s\\CAPCOM\\RESIDENT EVIL REVELATIONS\\rev1_coop.ini", la);
 }
 
+extern void split_leash_enable(int on);
+static int ini_leash(void)   /* fix026g: leash=0 in rev1_coop.ini switches the partner gate's leash off (default on) */
+{
+    FILE *f = fopen(g_ini_path, "rb");
+    if (!f) return 1;
+    char line[200];
+    int on = 1;
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, "leash", 5)) {
+            char *e = strchr(line, '=');
+            if (e && atoi(e + 1) == 0) on = 0;
+        }
+    fclose(f);
+    return on;
+}
+
 static int ini_enabled(void)
 {
     FILE *f = fopen(g_ini_path, "rb");
@@ -442,6 +459,21 @@ static int ini_enabled(void)
     return on;
 }
 
+/* kbpad (keyboard + mouse for player 1, the one gamepad for player 2): the pad mapping of testmode.c, and the engine's keyboard-mode wipe of pad slot 1 undone (capture.c kbskip, mask pad slot 1) */
+static int g_kb_skip_mine;
+static void kbpad_apply(int on)
+{
+    testmode_pad_kbpad(on);
+    if (on && !g_kb_skip_mine) {
+        capture_set_kbskip_pads(2);
+        capture_set_kbskip(1);
+        g_kb_skip_mine = 1;
+    } else if (!on && g_kb_skip_mine) {
+        capture_set_kbskip(0);
+        g_kb_skip_mine = 0;
+    }
+}
+
 /* ---------------------------------------------------------------- applying the settings to the engines */
 static void menu_apply(const char *why)
 {
@@ -452,6 +484,7 @@ static void menu_apply(const char *why)
         /* one mode: a network game never arms the local split (check 9 of net-role-barrier.md); the role barrier owns the capture roles then */
         split_enable(0);
         testmode_pad_swap_base(0);
+        kbpad_apply(0);
         g_applied_armed = 0;
         snprintf(g_last_apply, sizeof g_last_apply, "split kept off (%s): a network link runs", why);
         r1_log("menu: co-op split NOT armed (%s): a network link is running (one human per PC)", why);
@@ -463,6 +496,7 @@ static void menu_apply(const char *why)
          * barrier owns the own slot and the capture roles (as in the armed branch above): only the split is kept off */
         split_enable(0);
         testmode_pad_swap_base(0);
+        kbpad_apply(0);
         g_applied_armed = 0;
         snprintf(g_last_apply, sizeof g_last_apply, "off (%s): the network session's roles stay", why);
         r1_log("menu: co-op split off (%s): a network session runs, its own slot and capture roles stay as the role barrier set them", why);
@@ -473,6 +507,7 @@ static void menu_apply(const char *why)
         capture_set_own(-1);
         split_enable(0);
         testmode_pad_swap_base(0);
+        kbpad_apply(0);
         g_applied_armed = 0;
         snprintf(g_last_apply, sizeof g_last_apply, "off (%s)", why);
         r1_log("menu: co-op OFF (%s)", why);
@@ -485,9 +520,10 @@ static void menu_apply(const char *why)
     split_set_layout(g_set.layout == L1_LAYOUT_TOPBOTTOM ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE);
     split_enable(1);
     testmode_pad_swap_base(a.swap);
+    kbpad_apply(a.kbpad);
     g_applied_armed = 1;
     snprintf(g_last_apply, sizeof g_last_apply, "on (%s): player 1 = unit slot %d on pad slot %d, player 2 = unit slot %d on pad slot %d, layout %s, pads %s", why, a.unit1, a.pad1, a.unit2,
-             a.pad2, g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", a.swap ? "exchanged" : "normal");
+             a.pad2, g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", a.kbpad ? "keyboard + mouse and one gamepad" : a.swap ? "exchanged" : "normal");
     r1_log("menu: co-op %s", g_last_apply);
 }
 
@@ -520,6 +556,10 @@ static void read_raw(l1_raw *raw, int *pads, int want_pads)
             raw->pad_buttons[u] = gp.wButtons, raw->lx[u] = gp.sThumbLX, raw->ly[u] = gp.sThumbLY;
             n++;
         }
+    }
+    if (testmode_pad_kbpad_get()) {   /* kbpad: game user 0 is a neutral pad that is always "connected": count the real gamepads */
+        n = 0;
+        for (int u = 0; u < 4 && want_pads; u++) n += testmode_pad_real_present(u) ? 1 : 0;
     }
     *pads = n;
 }
@@ -846,6 +886,12 @@ static volatile int g_cut_kind;
 static volatile unsigned g_cut_ms;
 void menu_strip_cut(int kind, unsigned ms) { g_cut_ms = ms, g_cut_kind = kind; }
 
+/* fix026d (downed1.c, logic thread): the downed / revive cue: kind 1 = this human is down, 2 = the partner is down (reach it / how to help), seconds = the bleed-out time
+ * left (-1 = no limit). Refreshed every pass while it lasts; it goes by itself 700 ms after the last call. */
+static volatile int g_down_kind, g_down_secs;
+static volatile unsigned g_down_until;
+void menu_strip_down(int kind, int secs) { g_down_kind = kind, g_down_secs = secs, g_down_until = (GetTickCount() + 700u) | 1u; }
+
 /* once per pass: what the network session means for the title menu and the levels: the guest hold, the strip, the automatic end at the title, the guest's
  * return to the title after the host is gone. Returns the strip to draw (L1G_NONE = none) in *st. */
 /* allep1: the strip at an end of co-op by RB_EK_* (rolebarrier1.h): 1 = the campaign is over, 3 = a part that is no section; local = this PC passed it too */
@@ -873,7 +919,7 @@ static void session_watch(int idle, l1_strip_in *st)
     if (g_cut_kind) {   /* sync022: a movie strip asked by cut1_game.inc */
         int ck = g_cut_kind;
         g_cut_kind = 0;
-        strip_show(ck == 1 ? L1G_CUT_WAIT : ck == 2 ? L1G_CUT_PARTNER_SKIP : L1G_CUT_SELF_SKIP, in.last_peer[0] ? in.last_peer : in.peer_name, g_cut_ms ? g_cut_ms : 600);
+        strip_show(ck == 1 ? L1G_CUT_WAIT : ck == 2 ? L1G_CUT_PARTNER_SKIP : ck == 4 ? L1G_LEASH_FAR : ck == 5 ? L1G_LEASH_GATE : L1G_CUT_SELF_SKIP, in.last_peer[0] ? in.last_peer : in.peer_name, g_cut_ms ? g_cut_ms : 600);
     }
     if (!insession) g_played = 0, g_title_idle_since = 0, g_role_seen = -1;
     /* rev1 live 16: the host's title Continue of a co-op save put the save's roles back (lk_force_roles): the line on both PCs, this PC's character named */
@@ -980,6 +1026,16 @@ static void session_watch(int idle, l1_strip_in *st)
         g_quit_at = 0;
         if (level_present()) quit_to_title("the host is gone");
     }
+    {
+        static int cue_shown;
+        int on = g_down_kind && g_down_until && (int)(now - g_down_until) < 0;
+        if (on != cue_shown) cue_shown = on, r1_log("menu: strip: the downed / revive cue %s (kind %d, %d s)", on ? "ON" : "off", g_down_kind, g_down_secs);
+    }
+    if (g_down_kind && g_down_until && (int)(now - g_down_until) < 0) {   /* fix026d: somebody lies: the cue comes first (the time is short) */
+        st->kind = g_down_kind == 1 ? L1G_DOWN_SELF : L1G_DOWN_PARTNER;
+        st->seconds = g_down_secs;
+        return;
+    }
     /* what to show: a fresh event first, then the running states */
     if (g_strip_kind == L1G_READY_GATE && g_strip_until) {   /* ready1: the gate's line follows the ready flags while it shows, and goes when the gate is gone */
         char pn[40];
@@ -1080,6 +1136,7 @@ static void menu_frame(void)
         l1_settings cur = g_set;
         if (g_open && g_lobby) l1_settings_get(g_lobby, &cur);
         net1_set_session_flags((int)l1_downed_flags(cur.downed));
+        downed1_set_local(l1_downed_flags(cur.downed));   /* rel026: the split screen's own Downed / revive row (ON by default) */
         if (g_lobby) {
             lk_t *k = net1_link_peek();
             int hf = -1;
@@ -1132,6 +1189,7 @@ static void menu_frame(void)
     capture_get_state(&cs);
     split_state_t ss;
     split_get_state(&ss);
+    kbpad_apply(g_applied_armed == 1 && g_set.armed && g_set.pads_kb && !(cs.blocked || ss.blocked));   /* kbpad: like the exchange, never outside the campaign (Raid) */
     if (g_set.armed && g_set.pads_swapped && (cs.blocked || ss.blocked)) testmode_pad_swap_base(0);
     else if (g_set.armed && g_set.pads_swapped && !testmode_pad_swap_base_get()) testmode_pad_swap_base(1);
 }
@@ -1167,6 +1225,7 @@ void menu_install(void)
         return;
     }
     int ini_found = l1_ini_load(g_ini_path, &g_set, &g_lang_override);
+    split_leash_enable(ini_leash());
     l1_input_reset(&g_in);
     /* wrap the title menu's update: patch one slot of the class vtable (checked first) */
     unsigned cur = rd32(g_vtable + 4 * GM_VF8_SLOT);
@@ -1203,7 +1262,7 @@ void menu_install(void)
     lt_add_frame_cb(menu_frame);
     g_installed = 1;
     r1_log("menu: ready (settings file %s%s; armed %d role %s layout %s pads %s)", g_ini_path, ini_found ? "" : " - not there yet", g_set.armed, g_set.role == L1_PARTNER ? "partner" : "lead",
-           g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", g_set.pads_swapped ? "exchanged" : "normal");
+           g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", g_set.pads_kb ? "keyboard + mouse and one gamepad" : g_set.pads_swapped ? "exchanged" : "normal");
     if (g_set.armed) menu_apply("settings file");
 }
 
@@ -1240,7 +1299,7 @@ void menu_cmd(const char *arg, char *out, int size)
                  "language %s (src %d); last apply: %s\nini %s\n%s",
                  g_installed ? "installed" : (g_disabled ? "disabled" : "not installed"), g_gm_this, g_gm_state, g_gm_type, g_gm_sub, g_gm_cursor, g_gm_count,
                  g_gm_this ? (int)(now - g_gm_tick) : -1, g_gm_calls, g_idle_state, g_type_filter, g_open ? "OPEN" : "closed", g_set.armed, g_set.role == L1_PARTNER ? "partner" : "lead",
-                 g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", g_set.pads_swapped ? "exchanged" : "normal", g_lang >= 0 ? l1_lang_codes[g_lang] : "?", g_lang_src,
+                 g_set.layout == L1_LAYOUT_TOPBOTTOM ? "top/bottom" : "side by side", g_set.pads_kb ? "keyboard + mouse and one gamepad" : g_set.pads_swapped ? "exchanged" : "normal", g_lang >= 0 ? l1_lang_codes[g_lang] : "?", g_lang_src,
                  g_last_apply[0] ? g_last_apply : "-", g_ini_path, ov);
     } else if (!strcmp(sub, "open")) {
         open_lobby();
@@ -1278,7 +1337,7 @@ void menu_cmd(const char *arg, char *out, int size)
                 if (!strcmp(k, "armed")) g_set.armed = atoi(v) != 0, n++;
                 else if (!strcmp(k, "role")) g_set.role = !strcmp(v, "partner") ? L1_PARTNER : L1_LEAD, n++;
                 else if (!strcmp(k, "layout")) g_set.layout = !strcmp(v, "top") ? L1_LAYOUT_TOPBOTTOM : L1_LAYOUT_SIDE, n++;
-                else if (!strcmp(k, "pads")) g_set.pads_swapped = !strcmp(v, "swapped"), n++;
+                else if (!strcmp(k, "pads")) g_set.pads_swapped = !strcmp(v, "swapped"), g_set.pads_kb = !strcmp(v, "keyboard"), n++;
             }
             tok = strtok(NULL, " ");
         }

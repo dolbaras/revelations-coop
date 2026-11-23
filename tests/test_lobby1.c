@@ -35,6 +35,7 @@ static int same_word_ok(int id, int lang)
     switch (id) {
     case L1T_PARTNER: return lang == 7 || lang == 8;                         /* "partner" (Polish, Dutch) */
     case L1T_PADS: return lang == 3 || lang == 8;                            /* "Gamepads" (German, Dutch) */
+    case L1T_CARD_PAD: return lang == 8;                                     /* "Gamepad" (Dutch) */
     case L1T_PAD1: case L1T_PAD2: return lang == 3 || lang == 7 || lang == 8;   /* "Gamepad 1" */
     case L1T_LEG_OK: return lang != 5 && lang != 11 && lang != 12;          /* "OK": the game's own key legend says OK in these languages (Russian title menu: "(A) OK (B) Назад") */
     case L1T_SECS: return lang != 5 && lang != 6 && lang != 11 && lang != 12;   /* "%s s" */
@@ -168,7 +169,7 @@ static void test_model(void)
     l1_open(l, &s, &env);
     l1_view v;
     l1_view_get(l, &v);
-    CHECK(v.nrows == 7);
+    CHECK(v.nrows == 8);
     CHECK(v.sel == 0);
     CHECK(!strcmp(v.title, "Co-Op Play"));
     CHECK(!v.cards_on);
@@ -178,8 +179,10 @@ static void test_model(void)
     ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 1);
     ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 3);   /* row 2 (player 2) is info */
     ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 4);
-    ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 6);   /* row 5 (pads found) is info */
+    ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 6);   /* row 5 (pads found) is info; row 6 = Downed / revive (rel026) */
+    ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 7);
     ev(l, L1E_DOWN); l1_view_get(l, &v); CHECK(v.sel == 0);   /* wraps */
+    ev(l, L1E_UP); l1_view_get(l, &v); CHECK(v.sel == 7);
     ev(l, L1E_UP); l1_view_get(l, &v); CHECK(v.sel == 6);
     ev(l, L1E_UP); l1_view_get(l, &v); CHECK(v.sel == 4);
     ev(l, L1E_UP); ev(l, L1E_UP); ev(l, L1E_UP);
@@ -224,13 +227,47 @@ static void test_model(void)
     l1_assign a;
     l1_assign_get(&s, &a);
     CHECK(a.unit1 == 0 && a.unit2 == 1 && a.pad1 == 0 && a.pad2 == 1 && a.swap == 1);
+    /* kbpad: the third value of the Gamepads row (normal -> exchanged -> keyboard + mouse and one gamepad -> normal; left goes back) */
+    ev(l, L1E_OK);
+    l1_settings_get(l, &s);
+    CHECK(s.pads_kb == 1 && s.pads_swapped == 0);
+    l1_view_get(l, &v);
+    CHECK(!strcmp(v.card[0].pad, "Keyboard + mouse") && !strcmp(v.card[1].pad, "Gamepad"));
+    l1_assign_get(&s, &a);
+    CHECK(a.kbpad == 1 && a.swap == 0 && a.pad1 == 0 && a.pad2 == 1);
+    ev(l, L1E_LEFT);
+    l1_settings_get(l, &s);
+    CHECK(s.pads_kb == 0 && s.pads_swapped == 1);
+    ev(l, L1E_LEFT);
+    l1_settings_get(l, &s);
+    CHECK(s.pads_kb == 0 && s.pads_swapped == 0);
+    ev(l, L1E_OK);
+    ev(l, L1E_OK);
+    l1_settings_get(l, &s);
+    CHECK(s.pads_kb == 1);
+    {   /* the settings file keeps it; the default stays "normal" */
+        l1_settings w2 = {1, L1_LEAD, L1_LAYOUT_SIDE, 0};
+        w2.pads_kb = 1;
+        const char *p2 = "test_kbpad.ini";
+        l1_settings r2;
+        memset(&r2, 0, sizeof r2);
+        CHECK(l1_ini_save(p2, &w2, -1) && l1_ini_load(p2, &r2, NULL));
+        CHECK(r2.pads_kb == 1 && r2.pads_swapped == 0);
+        remove(p2);
+    }
+    ev(l, L1E_OK);   /* back to normal for the checks below */
+    l1_settings_get(l, &s);
+    CHECK(s.pads_kb == 0 && s.pads_swapped == 0);
+    s.pads_swapped = 1;
+    l1_assign_get(&s, &a);
+    CHECK(a.swap == 1 && a.kbpad == 0);
     s.role = L1_PARTNER, s.pads_swapped = 0;
     l1_assign_get(&s, &a);
     CHECK(a.unit1 == 1 && a.unit2 == 0 && a.pad1 == 0 && a.pad2 == 1 && a.swap == 0);
     /* Done and Back close */
-    ev(l, L1E_DOWN);
+    ev(l, L1E_DOWN); ev(l, L1E_DOWN);
     l1_view_get(l, &v);
-    CHECK(v.sel == 6);
+    CHECK(v.sel == 7);
     CHECK(l1_take_request(l) == L1R_NONE);
     ev(l, L1E_OK);
     CHECK(l1_take_request(l) == L1R_CLOSE);
@@ -245,7 +282,7 @@ static void test_model(void)
     { l1_event e = {L1E_HOVER, 2}; l1_event_in(l, &e); }   /* info row: ignored */
     l1_view_get(l, &v);
     CHECK(v.sel == 3);
-    { l1_event e = {L1E_CLICK, 6}; l1_event_in(l, &e); }
+    { l1_event e = {L1E_CLICK, 7}; l1_event_in(l, &e); }
     CHECK(l1_take_request(l) == L1R_CLOSE);
     /* pad warnings only while armed */
     s.armed = 1;
@@ -508,7 +545,7 @@ static void test_net_model(void)
     l1_settings_get(l, &s);
     CHECK(s.armed == 1 && s.net_mode == L1N_OFF && l1_changed(l));
     l1_view_get(l, &v);
-    CHECK(v.nrows == 7 && !strcmp(v.rows[0].value, "< Split screen >") && !strcmp(v.rows[1].label, "Player 1 plays") && !strcmp(v.rows[3].label, "Screen layout"));
+    CHECK(v.nrows == 8 && !strcmp(v.rows[0].value, "< Split screen >") && !strcmp(v.rows[1].label, "Player 1 plays") && !strcmp(v.rows[3].label, "Screen layout"));
     CHECK(v.cards_on && v.status_kind == L1S_OK && strstr(v.note, "its own co-op save: your solo campaign save is not changed") && !strstr(v.note, "save slot") && !strcmp(v.subtitle, l1_text(L1T_SUBTITLE, 0)));   /* rev1 live 16: split co-op uses the co-op save (the text before said "your usual save slot") */
     CHECK(v.net_status[0] == 0);
     /* Split -> Network: host: the split is switched off (one mode only) */
@@ -757,7 +794,7 @@ static void test_net_model(void)
     env.net_rows = 0;
     l1_open(l, &s, &env);
     l1_view_get(l, &v);
-    CHECK(v.nrows == 7 && v.net_status[0] == 0 && !strcmp(v.rows[0].label, "Co-Op"));
+    CHECK(v.nrows == 8 && v.net_status[0] == 0 && !strcmp(v.rows[0].label, "Co-Op"));
     l1_free(l);
 }
 
@@ -853,13 +890,19 @@ static void test_strips(void)
             CHECKF(utf8_ok(out) && strlen(out) < sizeof out - 1 && !strstr(out, "%s") && !strchr(out, '$'), "strip %d lang %d: %s", k, lang, out);
             CHECKF((k == L1G_NONE) == (out[0] == 0), "strip %d lang %d empty", k, lang);
             if (k == L1G_WAIT_LOAD || k == L1G_SILENT || k == L1G_PARTNER_LEFT || k == L1G_GUEST_HOLD || k == L1G_HOST_GO || k == L1G_SOLO_WATCH || k == L1G_CONT_ROLES || k == L1G_CUT_WAIT || k == L1G_CUT_PARTNER_SKIP || k == L1G_CUT_SELF_SKIP) CHECKF(strstr(out, "Lissa") != NULL, "strip %d lang %d lacks the name: %s", k, lang, out);
-            if (k == L1G_SILENT) CHECKF(strstr(out, "37") != NULL, "strip %d lang %d lacks the seconds", k, lang);
+            if (k == L1G_SILENT || k == L1G_DOWN_SELF || k == L1G_DOWN_PARTNER) CHECKF(strstr(out, "37") != NULL, "strip %d lang %d lacks the seconds", k, lang);
             CHECKF(kind == L1S_INFO || kind == L1S_WARN, "strip %d kind %d", k, kind);
         }
     char out[400];
     l1_strip_in in = {L1G_HOST_LOST, "", 0};
     l1_strip_text(&in, 0, out, sizeof out, NULL);
     CHECK(!strcmp(out, "Connection to the other player has been terminated.  Returning to the title screen..."));
+    in.kind = L1G_DOWN_PARTNER, in.seconds = -1;   /* fix026d: no time limit = no time in the line */
+    l1_strip_text(&in, 0, out, sizeof out, NULL);
+    CHECK(!strcmp(out, "Your partner is down! Stand next to them and hold A to help."));
+    in.kind = L1G_DOWN_SELF, in.seconds = 23;
+    l1_strip_text(&in, 0, out, sizeof out, NULL);
+    CHECK(!strcmp(out, "You are down. Your partner can help you up. (23 s)"));
     in.kind = L1G_CONT_ROLES, snprintf(in.name, sizeof in.name, "Parker");   /* rev1 live 16 */
     l1_strip_text(&in, 0, out, sizeof out, NULL);
     CHECK(!strcmp(out, "'Continue' keeps the characters of the co-op save. Your character: Parker."));
@@ -881,7 +924,7 @@ static void test_strips(void)
             CHECKF(out[0] && utf8_ok(out) && !strstr(out, "%s"), "reason %d lang %d", r, lang);
         }
     /* the placeholders of the translated texts: the same count as English in every language */
-    static const int one[] = {L1T_NET_PEER, L1T_JOINING_AS, L1T_NET_ST_CONNECTING_TO, L1T_NET_ST_GO_HOST, L1T_NET_ST_GO_GUEST, L1T_REF_MODVER_OLD, L1T_REF_NOANSWER, L1T_WAIT_LOAD, L1T_CUT_PARTNER_SKIP, L1T_CUT_SELF_SKIP};
+    static const int one[] = {L1T_NET_PEER, L1T_JOINING_AS, L1T_NET_ST_CONNECTING_TO, L1T_NET_ST_GO_HOST, L1T_NET_ST_GO_GUEST, L1T_REF_MODVER_OLD, L1T_REF_NOANSWER, L1T_WAIT_LOAD, L1T_CUT_PARTNER_SKIP, L1T_CUT_SELF_SKIP, L1T_DOWN_SELF, L1T_DOWN_PARTNER};
     static const int two[] = {L1T_REF_MODVER, L1T_PARTNER_SILENT};
     for (int lang = 0; lang < L1_LANGS; lang++) {
         for (unsigned i = 0; i < sizeof one / sizeof one[0]; i++) {
@@ -1286,13 +1329,13 @@ static void test_downed_row(void)
     l1_settings_get(l, &s);
     CHECK(s.downed == L1D_60 && !l1_changed(l));
     l1_free(l);
-    /* the split screen page has no such row (the local rule stays the lab's REV1_DOWNED=1) */
+    /* rel026: the split screen page has the row too (the local rule is ON by default) */
     l = l1_new();
     memset(&s, 0, sizeof s);
     l1_mode_set(&s, L1M_SPLIT);
     l1_open(l, &s, &env);
     l1_view_get(l, &v);
-    CHECK(row_of(&v, "Downed / revive") < 0);
+    CHECK(row_of(&v, "Downed / revive") >= 0);
     l1_free(l);
 
     /* persisted: downed=off|30|60|120|never; a missing key or a stray value = 60 s */

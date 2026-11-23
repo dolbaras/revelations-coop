@@ -43,8 +43,11 @@
 #include "downed1_net.h"
 #include "downed1_pose.h"
 #include "downed1.h"
+#include "split.h"
 #include "solo1.h"
 #include "world1_game.h"   /* ep1-solo: solo1_unit_off */
+
+void menu_strip_down(int kind, int secs);   /* menu.c: fix026d, the in-game strip while somebody lies (L1G_DOWN_*) */
 
 #define TC __attribute__((thiscall))
 
@@ -492,7 +495,13 @@ static void d1_net_frame(lk_t *k, uint32_t now)
         wrf(own + D1_HP_OFF, 1.0f);   /* a DOWN human stays at 1 hp: the regeneration does not raise him */
     int na = d1n_step(&d1_net, now, acts, 24);
     int still_own = own && d1n_own_down(&d1_net), still_pup = pup && d1n_partner_down(&d1_net);
+    int cue_secs = -1;   /* fix026d: the strip's cue: seconds left of the one who lies (own first) */
+    if (still_own || still_pup) {
+        int32_t bl = dl_bleed_left(&d1_net.d, still_own ? me : other);
+        cue_secs = bl == 0x7FFFFFFF ? -1 : bl <= 0 ? 0 : (int)((bl + 999) / 1000);
+    }
     LeaveCriticalSection(&d1_cs);
+    if (still_own || still_pup) menu_strip_down(still_own ? 1 : 2, cue_secs);
 
     for (int i = 0; i < na; i++) {
         d1n_action *a = &acts[i];
@@ -587,16 +596,33 @@ static unsigned d1_session_flags(lk_t *k)
     return (unsigned)in.set.flags & 7u;
 }
 
+/* rel026: the split rule's lobby choice (default ON, 60 s); REV1_DOWNED=0 / =1 win over the row */
+static volatile LONG d1_row_flags = (LONG)CP_SESS_DOWNED;
+static int d1_env_forced;   /* REV1_DOWNED was set: the env decides, not the row */
+void downed1_set_local(unsigned flags)
+{
+    InterlockedExchange(&d1_row_flags, (LONG)(flags & 7u));
+}
+
 /* per logic pass */
 static void d1_frame(void)
 {
     if (!d1_on && !d1_god)
         return;
+    if (!d1_env_forced) {   /* rel026: the split rule follows the lobby row (default ON, 60 s) */
+        unsigned f = (unsigned)d1_row_flags;
+        int on = (f & 1u) != 0;
+        if (on && f != d1_flags) {
+            d1_flags = f;
+            for (int k2 = 0; k2 < D1_N; k2++) d1_units[k2] = 0;   /* the pair starts again with the new preset */
+        }
+        d1_local = on;
+    }
     /* ep1-flow E12 (product default): ON in a network session whose host has the rule on; the local split rule stays REV1_DOWNED=1 (d1_local). The Damage hook
      * goes in only when something uses it: a solo game is not patched */
     lk_t *k0 = net1_link_peek();
     int net_on = k0 && net1_session_active(), net_rule = d1_on && net_on && (d1_session_flags(k0) & CP_SESS_DOWNED);
-    if (!d1_hooked && !d1_hook_failed && (d1_god || d1_local || net_rule) && !d1_install())
+    if (!d1_hooked && !d1_hook_failed && (d1_god || (d1_local && (d1_env_forced || split_is_active())) || net_rule) && !d1_install())   /* rel026: a solo game is not patched */
         d1_hook_failed = 1;   /* the bytes differ or the memory is not writable: the rule stays off for this run */
     if (!d1_on)
         return;               /* only the lab god mode: the hook is in, no rule */
@@ -682,7 +708,13 @@ static void d1_frame(void)
     int still[D1_N];
     for (int k = 0; k < D1_N; k++)
         still[k] = down[k] && d1_is_down(&d1_pair, k);
+    int cue_k = still[0] ? 0 : still[1] ? 1 : -1, cue_secs = -1;   /* fix026d: split: one strip for both halves, it tells the one who is up how to help */
+    if (cue_k >= 0) {
+        int32_t bl = dl_bleed_left(&d1_pair.d[cue_k], cue_k);
+        cue_secs = bl == 0x7FFFFFFF ? -1 : bl <= 0 ? 0 : (int)((bl + 999) / 1000);
+    }
     LeaveCriticalSection(&d1_cs);
+    if (cue_k >= 0 && !(still[0] && still[1])) menu_strip_down(2, cue_secs);
 
     for (int i = 0; i < nacts; i++)
         d1_apply(&acts[i], units[acts[i].who]);
@@ -818,7 +850,9 @@ int downed1_init(void)
     /* ep1-flow E12 (product default): the rule is ON for network sessions (the host's lobby row decides, default 60 s); REV1_DOWNED=0 switches the module off,
      * REV1_DOWNED=1 also runs the local split rule (lab, as before) */
     d1_on = !(r1_env("REV1_DOWNED", v, sizeof v) && v[0] == '0');
-    d1_local = r1_env("REV1_DOWNED", v, sizeof v) && v[0] == '1';
+    /* rel026: the split screen's rule is ON by default (the lobby row decides); REV1_DOWNED=1 forces it on, =0 switches the module off */
+    d1_env_forced = r1_env("REV1_DOWNED", v, sizeof v) && v[0] != 0;
+    d1_local = !(r1_env("REV1_DOWNED", v, sizeof v) && v[0] == '0');
     if (r1_env("REV1_DOWNED_POSE", v, sizeof v) && v[0] == '0')
         d1_pose_on = 0;
     if (r1_env("REV1_DOWNED_BLEED", v, sizeof v)) {   /* seconds: 60 (default), 30, 120, 0 = never (the presets of the session flags) */
@@ -840,8 +874,8 @@ int downed1_init(void)
                "in a network session the host's session flags decide",
                dl_preset_ms((d1_flags >> 1) & 3u) / 1000u, (double)D1_REACH, (double)(D1_REVIVE_PCT * 100.0f), d1_pose_on ? "knock-down + frozen get-up + input ban" : "off (REV1_DOWNED_POSE=0)");
     else
-        r1_log("downed1: ON for network sessions (the host's Downed / revive row, default 60 s; the Damage hook goes in when such a session starts), pose %s; local split rule off "
-               "(REV1_DOWNED=1)", d1_pose_on ? "knock-down + frozen get-up + input ban" : "off (REV1_DOWNED_POSE=0)");
+        r1_log("downed1: ON for network sessions (the host's Downed / revive row, default 60 s; the Damage hook goes in when such a session starts), pose %s; the split rule is off "
+               "(REV1_DOWNED=0)", d1_pose_on ? "knock-down + frozen get-up + input ban" : "off (REV1_DOWNED_POSE=0)");
     return 1;
 }
 

@@ -63,6 +63,26 @@ int main(void)
     frs_target(p, o);
     CHECK(o[1] == 500.0f && fabsf(o[0] - 170.0f) < 0.01f && fabsf(o[2] + 130.0f) < 0.01f);
 
+    /* split screen (frs_split_step): a FALLING second human is rescued too (the engine never kills him), after FRS_SPLIT_MS without ground, once, with a cooldown */
+    frs_reset(&f);
+    n = 0;
+    for (uint32_t t2 = 1000, k = 0; t2 < 12000; t2 += 250, k++) n += frs_split_step(&f, 1, 500.0f - 40.0f * (float)k, 500.0f, 1, t2);
+    CHECK(n >= 1 && f.rescues == (unsigned)n);
+    /* hovering: the same */
+    frs_reset(&f);
+    n = 0;
+    uint32_t first2 = 0;
+    for (uint32_t t2 = 1000; t2 <= 3200; t2 += 250) { int r = frs_split_step(&f, 1, 500.0f, 500.0f, 1, t2); n += r; if (r && !first2) first2 = t2; }
+    CHECK(n == 1 && first2 >= 1000 + FRS_SPLIT_MS);
+    /* ground: nothing; flicker: nothing; no partner: nothing */
+    frs_reset(&f);
+    for (uint32_t t2 = 1000; t2 < 9000; t2 += 250) CHECK(!frs_split_step(&f, 0, 500.0f, 500.0f, 1, t2));
+    for (uint32_t t2 = 1000, k = 0; t2 < 9000; t2 += 250, k++) CHECK(!frs_split_step(&f, (k % 4) != 3, 500.0f, 500.0f, 1, t2));
+    for (uint32_t t2 = 20000; t2 < 28000; t2 += 250) CHECK(!frs_split_step(&f, 1, 500.0f, 500.0f, 0, t2));
+    /* far below the first human (fell through the world with the flag not set): rescued at once */
+    frs_reset(&f);
+    CHECK(frs_split_step(&f, 0, -3500.0f, 500.0f, 1, 5000) == 1);
+
     printf("test_fallres1: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

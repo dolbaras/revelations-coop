@@ -2,7 +2,7 @@
 #define R1_H
 #include <windows.h>
 
-#define R1_VERSION "0.2.5"
+#define R1_VERSION "0.2.6"
 
 /* The Steam build 13298487 exe (SHA-256 of rerev.exe on disk, lower case). Any other exe: the proxy only forwards DirectInput8Create. */
 #if defined(__has_include)
@@ -61,11 +61,16 @@ void testmode_pad_hold(int slot, const void *xinput_gamepad, int ms);       /* .
 void testmode_pad_wag(int slot, int lx, int period, int ms);  /* LAB: the left stick x swings +-lx every period ms, for ms */
 void testmode_pad_keep(int user, int on);
 void testmode_pad_human(int game_user);
+void testmode_pad_kbpad(int on);   /* kbpad (lobby: keyboard + mouse for player 1, the one real gamepad for player 2): game user 0 = a connected neutral pad (the keyboard plays on it), game user 1 = the real pad */
+int testmode_pad_kbpad_get(void);
 void testmode_pad_pretend(int user, int active, const void *xinput_gamepad);
 DWORD testmode_pad_activity(void);
 void testmode_dinput_stats(char *out, int size);
 int testmode_pad_peek(int user, void *xinput_gamepad_out);                    /* what XInputGetState(user) would give the game: synthetic first, else real; 1 = connected */
 void testmode_pad_mask(int user, unsigned buttons);                            /* these XInput buttons of game user k are hidden from the GAME (its XInputGetState); testmode_pad_peek still sees them (downed1: the revive owns A next to a downed partner) */
+void split_gate_request(const char *why);                                       /* split.c (fix026g): a scene / movie / section change / restart is about to start: the partner gate brings a far second human to the first one */
+void testmode_pad_damp(int user, int permille);                                 /* fix026g (leash1.h): the left stick of game user k is scaled to permille/1000 for the GAME (1000 = untouched) */
+int testmode_pad_damped(int user, unsigned *n);                                 /* the factor now; *n = polls in which it changed a stick */
 unsigned testmode_pad_masked(int user, unsigned *hidden);                       /* the mask of user k now; *hidden = polls in which a masked button was really down */
 int testmode_pad_real_present(int user);                                       /* a real gamepad on that user (same front rule as the peek); 1 = connected */
 void testmode_xinput_user(int user, unsigned *calls, unsigned *ok, unsigned *buttons, int *lx, int *ly, unsigned *packet, unsigned *nonzero);   /* the game's own polls of XInput user k: counts and the last state it got */
@@ -97,6 +102,10 @@ void inject_vk_from_dik(int dik, int *vk);
 /* d3d.c: Direct3D 9 creation/device/Present hooks, screenshots (F11, console "shot", REV1_SHOTS) */
 void d3d_install(void);
 void d3d_request_shot(void);
+void d3d_hudfit_set(int on);   /* fix026h: the split halves draw the GUI in a centred 16:9 box (d3d.c); console `split hudfit 0|1` */
+int d3d_hudfit_is_on(void);
+unsigned d3d_hudfit_count(void);
+void d3d_trace_request(int frames);   /* fix026h LAB: console d3dtrace [frames] */
 void d3d_devreset_request(int n);   /* test: the next Present makes n Reset calls answer DEVICELOST (console `devreset <n>`) */
 unsigned d3d_frames(void);
 

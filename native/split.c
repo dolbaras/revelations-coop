@@ -28,6 +28,10 @@
 #include "solo1.h"
 #include "mapptn1.h"
 #include "aimray1.h"
+#include "fallres1.h"
+#include "leash1.h"
+#include "downed1.h"
+#include "flash2.h"
 
 #define TC __attribute__((thiscall))
 #define FC __attribute__((fastcall))
@@ -487,6 +491,7 @@ static int hud_build(void)
  * any load. So the set does not live through anything that can load: it is RETIRED when a pause / game over screen opens or a cutscene starts (those are the doors to a load),
  * and it is (re)built only after the world has been unchanged for hud_settle_ms: same stock cockpit managers, camera managers and player units, gameplay camera on viewport 0. */
 static unsigned hud_settle_ms = 1500;
+static DWORD hud_hold_until;   /* fix026: no (re)build until then (after a start record: the autosave notice of a New Game / Continue runs ~1 s after it; tester report: crash right at "Saving game") */
 static unsigned stable_key[6];
 static DWORD stable_since;
 
@@ -500,6 +505,18 @@ static void hud_unstable(void)
 {
     memset(stable_key, 0, sizeof stable_key);
     stable_since = 0;
+}
+
+/* fix026 (issue #2, owner run 2026-11-22 06:23:28): a SECTION CHANGE (FUN_00720540 from the episode end state, no pause, no cutscene before it) found the second set alive and
+ * updating: AccessViolation at 0x401396 (assert cGameSystem.h:62) 15 ms later, esi = the second cockpit manager. The start hook retires the set before the area goes. */
+void split_retire_hud(const char *why)
+{
+    if ((hud.cp || hud.mm) && in_group(COCKPIT_GROUP, hud.cp) && in_group(COCKPIT_GROUP, hud.mm))
+        hud_destroy(why);
+    else if (hud.cp || hud.mm)
+        hud_forget();
+    hud_unstable();
+    hud_hold_until = GetTickCount() + 6000;
 }
 
 /* once per pass while the split is on and the gameplay view is shown */
@@ -532,7 +549,7 @@ static void hud_frame(unsigned mgr0, unsigned mgr1)
         }
         return;
     }
-    if (!hud.failed && now - stable_since >= hud_settle_ms) {
+    if (!hud.failed && now - stable_since >= hud_settle_ms && (!hud_hold_until || (int)(now - hud_hold_until) >= 0)) {
         static DWORD last_try;
         if (now - last_try > 500 || last_try == 0) {   /* a build that could not start yet (stock set not running) is retried every half second */
             if (!hud_build())
@@ -714,6 +731,53 @@ static unsigned sc_fsm_cell = 0x1169114u, sc_pcs_cell = 0x116A34Cu;
 static unsigned scene_mask = 0x9, scene_hold_ms = 400, scene_demo_cap_ms = 240000;
 static struct { unsigned unit; int demo; DWORD t0; char name[48]; } sc_slot[16];
 static DWORD sc_last_seen;
+/* fix026 (issue #2, owner runs 2026-11-22): the ship-shake scene (demo\d0	_020_0 / 11_040_0) repeats every ~8 s and door animations are short event-camera demos: none of them
+ * is a story cutscene of both characters, and switching the whole screen (second HUD set removed and rebuilt each time) was unneeded and ended in a crash at a section change.
+ * AMBIENT: a demo name from the list below, or one that started twice or more within 90 s, never holds the whole view; DEBOUNCE: a scene / camera signal (not a movie) must
+ * last scene_debounce_ms without a break before the whole view is taken, so a door animation (~1 s) stays in the split. REV1_SPLIT_AMBIENT=0 or `split ambient 0` = the old rule. */
+static int scene_ambient = -1;
+static unsigned scene_debounce_ms = 900;
+static DWORD sc_hit_since;
+static struct { char name[48]; DWORD t[3]; } sc_hist[8];
+static unsigned n_sc_ambient;
+static int sc_ambient_on(void)
+{
+    if (scene_ambient < 0) {
+        char v[16];
+        scene_ambient = r1_env("REV1_SPLIT_AMBIENT", v, sizeof v) && v[0] == '0' ? 0 : 1;
+    }
+    return scene_ambient;
+}
+static int sc_is_ambient_name(const char *n)
+{
+    static const char *const list[] = {"11_020_0", "11_040_0", NULL};   /* the ship shake of the intro deck (flags 4382 / 4383, sub fsm *_sub_vib) */
+    for (int i = 0; list[i]; i++)
+        if (strstr(n, list[i]))
+            return 1;
+    return 0;
+}
+/* a demo slot started: 1 = it is ambient (listed, or the 3rd start within 90 s) */
+static int sc_note_start(const char *name, DWORD now)
+{
+    if (sc_is_ambient_name(name))
+        return 1;
+    int k = -1, free_k = -1;
+    for (int i = 0; i < 8; i++) {
+        if (!strcmp(sc_hist[i].name, name)) { k = i; break; }
+        if (!sc_hist[i].name[0] && free_k < 0) free_k = i;
+    }
+    if (k < 0) {
+        k = free_k >= 0 ? free_k : (int)(now % 8);
+        snprintf(sc_hist[k].name, sizeof sc_hist[k].name, "%s", name);
+        memset(sc_hist[k].t, 0, sizeof sc_hist[k].t);
+    }
+    int recent = 0;
+    for (int j = 0; j < 3; j++)
+        if (sc_hist[k].t[j] && now - sc_hist[k].t[j] < 90000)
+            recent++;
+    sc_hist[k].t[2] = sc_hist[k].t[1], sc_hist[k].t[1] = sc_hist[k].t[0], sc_hist[k].t[0] = now ? now : 1;
+    return recent >= 2;   /* the 3rd start within 90 s (a Retry replays a cutscene once; the shake came every 7-14 s) */
+}
 static int sc_on;
 static unsigned n_sc_movie, n_sc_demo, n_sc_cam, n_sc_capped;
 void split_test_set_scene_cells(unsigned fsm_cell, unsigned pcs_cell) { sc_fsm_cell = fsm_cell, sc_pcs_cell = pcs_cell; }
@@ -767,6 +831,11 @@ static unsigned scene_signals(unsigned mgr0, const char **what)
         if (u != sc_slot[i].unit) {   /* a new scene in this slot: its name once */
             sc_slot[i].unit = u, sc_slot[i].t0 = now;
             sc_slot[i].demo = sc_slot_name(pcs, i, sc_slot[i].name, sizeof sc_slot[i].name) && sc_is_cutscene_name(sc_slot[i].name);
+            if (sc_slot[i].demo && sc_ambient_on() && sc_note_start(sc_slot[i].name, now)) {
+                sc_slot[i].demo = 0;   /* ambient: logged once, it never counts */
+                n_sc_ambient++;
+                r1_log("split: the demo '%s' is ambient (listed or repeated): it does not take the whole view", sc_slot[i].name);
+            }
         }
         if (sc_slot[i].demo && !rd8(pcs + 0x1EC + i)) {
             if (now - sc_slot[i].t0 < scene_demo_cap_ms) {
@@ -796,6 +865,14 @@ static int scene_rule(unsigned mgr0, const char **why)
     unsigned s = scene_signals(mgr0, &what);
     DWORD now = GetTickCount();
     int hit = ((scene_mask & 1) && (s & 1)) || ((scene_mask & 2) && (s & 2)) || ((scene_mask & 4) && (s & 4)) || ((scene_mask & 8) && (s & 6) == 6);
+    if (hit && !(s & 1) && sc_ambient_on() && !sc_on) {   /* debounce: a short scene / camera signal stays in the split */
+        if (!sc_hit_since)
+            sc_hit_since = now ? now : 1;
+        if (now - sc_hit_since < scene_debounce_ms)
+            return 0;
+    }
+    if (!hit)
+        sc_hit_since = 0;
     if (hit) {
         if (!sc_on) {
             if (s & 1) n_sc_movie++;
@@ -835,6 +912,135 @@ static void teardown(const char *why)
     capture_set_view_index(1, 0);
 }
 
+/* fix026m: the second human of a split game without ground (he is further from the first human than the loaded stage reaches: the stage streams around the first human only and the
+ * engine's fall-out kill spares him) is put next to the first human (fallres1.h frs_split_step). Console `split fall 0|1`; status in `split status`-like line `split fall`. */
+static int fall_on = 1;
+static frs_t fall_frs;
+static unsigned fall_unit, fall_n_ng;
+/* the placement of the rescue (also the partner gate's): the second human goes beside the first one, velocity and fall timer cleared */
+static void place_next_to(unsigned own_unit, unsigned other_unit)
+{
+    unsigned mo = rd32(other_unit + 0xE88);
+    float pp[3] = {rdf(own_unit + 0x40), rdf(own_unit + 0x44), rdf(own_unit + 0x48)}, to[3];
+    unsigned zero = 0;
+    frs_target(pp, to);
+    if (mo > 0x10000) wr8(mo + 0x2B4, 1);   /* the move object's teleport byte (as the network part's rescue) */
+    wr(other_unit + 0x40, to, 12);
+    wr(other_unit + 0x4C, &zero, 4);
+    if (mo > 0x10000) wrf(mo + 0x2B8, 0.0f);
+}
+static void fall_rescue(unsigned own_unit, unsigned other_unit)
+{
+    if (!fall_on || !own_unit || !other_unit)
+        return;
+    if (fall_unit != other_unit)
+        frs_reset(&fall_frs), fall_unit = other_unit;
+    unsigned mo = rd32(other_unit + 0xE88);
+    int ng = mo > 0x10000 && rd8(mo + 0x2B5) == 1 && rd8(mo + 8) == 1;
+    if (ng)
+        fall_n_ng++;
+    float y = rdf(other_unit + 0x44), py = rdf(own_unit + 0x44);
+    if (frs_split_step(&fall_frs, ng, y, py, 1, GetTickCount() | 1u)) {
+        float pp[3] = {rdf(own_unit + 0x40), py, rdf(own_unit + 0x48)}, to[3], from[3] = {rdf(other_unit + 0x40), y, rdf(other_unit + 0x48)};
+        place_next_to(own_unit, other_unit);
+        frs_target(pp, to);
+        r1_log("split: the second human (unit %08x) had no ground (or fell far below the first human): put next to him, (%.0f,%.0f,%.0f) -> (%.0f,%.0f,%.0f) (rescue #%u)", other_unit, (double)from[0], (double)from[1], (double)from[2], (double)to[0], (double)to[1], (double)to[2], fall_frs.rescues);
+    }
+}
+
+/* ====================================================================== partner gate v1 (fix026g, leash1.h) ====================================================================== */
+extern void menu_strip_cut(int kind, unsigned ms);   /* menu.c: the in-game strip; 4 = L1G_LEASH_FAR, 5 = L1G_LEASH_GATE */
+static ls_t ls_g;
+static unsigned ls_n_pass, ls_n_active;
+static volatile LONG ls_gate_why_n;
+
+/* any thread: a scene / movie / section change / restart is about to start (cut1_game.inc, rolebarrier1_game.c, the split's own cutscene edge) */
+void split_gate_request(const char *why)
+{
+    if (!ls_g.on) return;
+    ls_gate_request(&ls_g, GetTickCount());
+    if (InterlockedIncrement(&ls_gate_why_n) <= 40)
+        r1_log("gate: %s: the far second human will be brought to the first one (if he is more than %.0f units away)", why ? why : "?", (double)ls_g.gate_r);
+}
+
+static void leash_pads(int s0, int s1)   /* permille for the left stick of the pad that plays unit slot 0 / 1 (local pads only) */
+{
+    int f[4] = {1000, 1000, 1000, 1000}, sc[2] = {s0, s1};
+    capture_state_t cs;
+    capture_get_state(&cs);
+    for (int u = 0; u < 2; u++)
+        if (cs.role[u].enabled && cs.role[u].pad >= 0 && cs.role[u].pad < 4 && cs.src[cs.role[u].pad < 2 ? cs.role[u].pad : 0].kind == CAP_NATIVE && sc[u] < f[cs.role[u].pad])
+            f[cs.role[u].pad] = sc[u];
+    for (int k = 0; k < 4; k++)
+        if (testmode_pad_damped(k, NULL) != f[k]) testmode_pad_damp(k, f[k]);
+}
+
+static void leash_frame(void)
+{
+    ls_n_pass++;
+    unsigned r = root();
+    int ok = r && !raid_active() && inited;
+    unsigned mgr0 = ok ? rd32(r + 0xCE0) : 0, mgr1 = ok ? rd32(r + 0xCE4) : 0;
+    ok = ok && is_cam_mgr(mgr0) && is_cam_mgr(mgr1);
+    capture_state_t cs;
+    unsigned u0 = 0, u1 = 0;
+    if (ok) {
+        capture_get_state(&cs);
+        ok = cs.hooks_on && cs.role[0].enabled && cs.role[1].enabled;   /* two humans only: an AI partner is never leashed */
+    }
+    if (ok) {
+        u0 = unit_by_slot(0), u1 = unit_by_slot(1);
+        ok = u0 && u1 && (rd32(u0 + 0xC) & 0x400) && (rd32(u1 + 0xC) & 0x400);   /* both in play (a solo part switches the other off) */
+    }
+    int quiet = ok && (rd32(vp_addr(r, 0) + 4) != mgr0 || gui_running() || (active && suspended) || downed1_own_down());
+    float p0[3] = {0}, p1[3] = {0};
+    if (ok)
+        for (int k = 0; k < 3; k++)
+            p0[k] = rdf(u0 + 0x40 + 4 * (unsigned)k), p1[k] = rdf(u1 + 0x40 + 4 * (unsigned)k);
+    uint32_t now = GetTickCount() | 1u;
+    int hint = ls_step(&ls_g, p0, p1, ok && !quiet, now);
+    if (ok && !quiet) ls_n_active++;
+    leash_pads(ls_g.scale[0], ls_g.scale[1]);
+    if (hint) {
+        menu_strip_cut(4, 900);
+        if (ls_g.hints <= 3 || ls_g.hints % 20 == 0) r1_log("leash: hint #%u: the humans are %.0f units apart (level %d)", ls_g.hints, (double)ls_g.dist, ls_g.level);
+    }
+    /* the gate (b): a scene / movie / section change was announced: split = put the far second human next to the first one (fall rescue's placement), network = hint only */
+    if (ok && ls_g.gate_at) {
+        if (ls_gate_step(&ls_g, p0, p1, now)) {
+            int own = capture_own_effective();
+            if (active) {
+                unsigned ou = own ? u1 : u0, xu = own ? u0 : u1;
+                place_next_to(ou, xu);
+                ls_reset(&ls_g);
+                menu_strip_cut(5, 4000);
+                r1_log("gate: the second human (unit %08x) was %.0f units from the first one before the scene: put next to him (gate move #%u)", xu, (double)ls_dist(p0, p1), ls_g.gate_moves);
+            } else {
+                menu_strip_cut(4, 3000);
+                r1_log("gate: the partner is %.0f units away before the scene (network: hint only, gate #%u)", (double)ls_dist(p0, p1), ls_g.gate_moves);
+            }
+        }
+    } else if (!ok && ls_g.gate_at && (uint32_t)(now - ls_g.gate_at) > LS_GATE_TTL_MS)
+        ls_g.gate_at = 0;
+}
+
+/* the ini key leash=0|1 (menu.c reads rev1_coop.ini); REV1_LEASH wins */
+void split_leash_enable(int on)
+{
+    char ev[8];
+    if (r1_env("REV1_LEASH", ev, sizeof ev) && ev[0]) return;
+    ls_g.on = on != 0;
+    r1_log("leash: rev1_coop.ini leash=%d: the partner gate's leash is %s", on != 0, ls_g.on ? "on" : "off");
+}
+
+static void leash_status(char *out, int size)
+{
+    unsigned n0 = 0, n1 = 0;
+    testmode_pad_damped(0, &n0), testmode_pad_damped(1, &n1);
+    snprintf(out, (size_t)size, "split leash %s: hint %.0f u, damping %.0f u (to %d/1000 at +%.0f), gate radius %.0f u; level %d, distance %.0f, scale %d/%d, pads damped now %d/%d, sticks changed %u/%u, hints %u, active passes %u of %u, damped passes %u, gate requests %u, gate moves %u",
+             ls_g.on ? "ON" : "off", (double)ls_g.n1, (double)ls_g.n2, LS_MIN_PERMILLE, (double)LS_RAMP, (double)ls_g.gate_r, ls_g.level, (double)ls_g.dist, ls_g.scale[0], ls_g.scale[1], testmode_pad_damped(0, NULL), testmode_pad_damped(1, NULL), n0, n1, ls_g.hints, ls_n_active, ls_n_pass, ls_g.damped_ms, ls_g.gates, ls_g.gate_moves);
+}
+
 void split_frame(void)
 {
     unsigned r = root();
@@ -843,6 +1049,7 @@ void split_frame(void)
         return;
     scene_log_pass();
     mm_screen(0, 0);
+    flash2_frame(0, 0);   /* (fix026f: switched on again below once two gameplay views are shown) */
     if (raid_active()) {
         if (active || have_saved || hud.cp || mx.on)
             teardown("Raid detected");
@@ -907,8 +1114,11 @@ void split_frame(void)
         int why = gui ? SPLIT_SUSP_GUI : cutscene ? SPLIT_SUSP_CAMERA : scene ? SPLIT_SUSP_SCENE : SPLIT_SUSP_SOLO;
         static DWORD why_logged;
         if (!suspended || (suspended != why && GetTickCount() - why_logged >= 2000)) {   /* (a reason that flickers is logged at most every 2 s) */
-            if (!suspended)
+            if (!suspended) {
                 n_susp++;
+                if (why == SPLIT_SUSP_CAMERA || why == SPLIT_SUSP_SCENE)
+                    split_gate_request(why == SPLIT_SUSP_SCENE ? "a scene starts (split)" : "a cutscene camera starts (split)");
+            }
             suspended = why, why_logged = GetTickCount();
             r1_log("split: whole view (%s%s)", gui ? "pause / game over / item menu" : cutscene ? "cutscene or other camera on viewport 0" : scene ? "scene: " : "the other human has no character (solo part)",
                    scene && !gui && !cutscene ? scene_why : "");
@@ -929,6 +1139,7 @@ void split_frame(void)
         r1_log("split: gameplay view again, split resumes");
     }
     capture_set_interact(1, VP_SECOND);   /* fix022 (interact1.h): both humans are local and in play: the second one operates the objects he is nearest to */
+    fall_rescue(unit_by_slot((unsigned)capture_own_effective()), other_unit);
     int fix = 0;
     if (rd32(v2 + 4) != mgr1)
         wr32(v2 + 4, mgr1), fix++;
@@ -961,6 +1172,7 @@ void split_frame(void)
         wrf(mgr1 + 0x3C, fov_req);
     }
     mm_screen(1, vertical);
+    flash2_frame(1, other_unit);   /* fix026f: the second human's torch */
     aim_view(1, r, mgr1);   /* fix023: the second human's weapons aim through manager 1 / viewport 2 (aimray1.h) */
     if (hud_req)
         hud_frame(mgr0, mgr1);
@@ -975,7 +1187,13 @@ int split_init(void)
         return 1;
     inited = 1;
     lt_add_frame_cb(split_frame);
+    ls_init(&ls_g);
+    lt_add_frame_cb(leash_frame);
     char ev[16];
+    if (r1_env("REV1_LEASH", ev, sizeof ev) && ev[0]) {   /* REV1_LEASH=0: off; the ini key leash=0|1 is read by menu.c (split_leash_enable) */
+        ls_g.on = ev[0] != '0';
+        r1_log("leash: REV1_LEASH=%s: the partner gate's leash is %s", ev, ls_g.on ? "on" : "off");
+    }
     ar1_init(&ar1_g, AD.camroot_ptr, !(r1_env("REV1_SPLIT_AIM", ev, sizeof ev) && ev[0] == '0'));   /* fix023: REV1_SPLIT_AIM=0 = the stock aim ray (lab A / B) */
     if (!ar1_g.enabled)
         r1_log("split: REV1_SPLIT_AIM=0: the second human's shots follow the first human's view (the stock aim ray, lab)");
@@ -1196,6 +1414,10 @@ void split_cmd(const char *arg, char *out, int size)
         split_status_text(out, size);
     } else if (!strcmp(sub, "probe")) {
         probe(out, size);
+    } else if (!strcmp(sub, "hudfit")) {   /* fix026h LAB: split hudfit [0|1] = the HUD of each half in a centred 16:9 box (1, default) or squeezed to the half like the stock split (0, the old behaviour) */
+        if (a1[0])
+            d3d_hudfit_set(atoi(a1));
+        snprintf(out, (size_t)size, "HUD fit %s (%u GUI projections adjusted so far)", d3d_hudfit_is_on() ? "ON" : "OFF (old behaviour)", d3d_hudfit_count());
     } else if (!strcmp(sub, "mmscreen")) {   /* LAB: split mmscreen 0|1 (minimap1): the split minimaps computed with the half's size (1, default) or the whole screen's (0, old) */
         if (a1[0])
             mm_screen_on = atoi(a1) != 0;
@@ -1215,6 +1437,12 @@ void split_cmd(const char *arg, char *out, int size)
                  (unsigned)ar1_g.n_second, (unsigned)ar1_g.last_weapon, (unsigned)ar1_g.last_owner);
     } else if (!strcmp(sub, "scene")) {   /* fix023 LAB (read-only): the engine's scene state (split scene) / its change log (split scenelog 0|1) */
         scene_line(out, size, 0);
+    } else if (!strcmp(sub, "ambient")) {   /* fix026 LAB: split ambient [0|1 [debounce ms]]: 0 = the old scene rule (every demo + event camera takes the whole view at once) */
+        if (a1[0])
+            scene_ambient = atoi(a1) ? 1 : 0, memset(sc_hist, 0, sizeof sc_hist);
+        if (a2[0])
+            scene_debounce_ms = (unsigned)atoi(a2);
+        snprintf(out, (size_t)size, "ambient demos %s, debounce %u ms, ambient demos seen %u", sc_ambient_on() ? "stay split" : "take the whole view (old rule)", scene_debounce_ms, n_sc_ambient);
     } else if (!strcmp(sub, "scenerule")) {   /* fix023 LAB: split scenerule [<mask> [<hold ms> [<cap s>]]]: 1 movie, 2 cutscene slot, 4 event camera, 8 cutscene slot and event camera */
         if (a1[0])
             scene_mask = (unsigned)strtoul(a1, NULL, 0);
@@ -1230,9 +1458,28 @@ void split_cmd(const char *arg, char *out, int size)
         snprintf(out, (size_t)size, "scene log %s (%u lines)", scene_log_on ? "ON" : "off", scene_log_n);
     } else if (!strcmp(sub, "aimprobe")) {   /* fix023 LAB (read-only): both managers' eye / target and each human's current weapon's rays */
         aim_probe(out, size);
+    } else if (!strcmp(sub, "fall")) {   /* fix026m: split fall rescue on / off / status */
+        if (a1[0])
+            fall_on = atoi(a1) != 0;
+        snprintf(out, (size_t)size, "split fall rescue %s: rescues %u, no-ground passes %u (the second human is put next to the first one after %u ms without ground; falling too)", fall_on ? "ON" : "off", fall_frs.rescues, fall_n_ng, FRS_SPLIT_MS);
+    } else if (!strcmp(sub, "leash")) {   /* fix026g: split leash [0|1 | n1 <u> | n2 <u> | gate <u> | gate now] */
+        if (!strcmp(a1, "n1") || !strcmp(a1, "n2") || !strcmp(a1, "gate")) {
+            const char *v = a2;
+            if (!strcmp(a1, "gate") && !strcmp(v, "now")) split_gate_request("console");
+            else if (*v) {
+                float x = (float)atof(v);
+                if (x > 100.0f) *(!strcmp(a1, "n1") ? &ls_g.n1 : !strcmp(a1, "n2") ? &ls_g.n2 : &ls_g.gate_r) = x;
+            }
+        } else if (a1[0])
+            ls_g.on = atoi(a1) != 0;
+        leash_status(out, size);
     } else if (!strcmp(sub, "fov")) {   /* split fov <degrees | 0>: experiment, see fov_req */
         fov_req = (float)atof(a1);
         snprintf(out, (size_t)size, fov_req > 1.0f ? "vertical FOV %.1f written into both camera managers every pass (stock: manager 0 %.1f, manager 1 %.1f)" : "FOV left to the engine (stock now: manager 0 %.1f, manager 1 %.1f)", fov_req > 1.0f ? fov_req : rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE0) + 0x3C), rdf(rd32(root() + 0xCE4) + 0x3C));
+    } else if (!strcmp(sub, "flash")) {   /* fix026f: split flash [0|1]: the second human's flashlight (flash2.c) */
+        if (a1[0] >= '0' && a1[0] <= '9')
+            flash2_set(atoi(a1));
+        flash2_status(out, size);
     } else if (!strcmp(sub, "hud")) {
         if (!strcmp(a1, "on") || !strcmp(a1, "off")) {
             split_set_hud(!strcmp(a1, "on"));
