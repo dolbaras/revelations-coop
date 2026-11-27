@@ -149,15 +149,31 @@ static void t_enter_leave(void)
     CHECK(!sc_want_enter(&b));
     b = in, b.p1_busy = 1;   /* one scanner: the first human is using it */
     CHECK(!sc_want_enter(&b));
-    b = in, b.ever_ended = 1, b.last_end = 49500;   /* cooldown */
+    b = in, b.ever_ended = 1, b.last_end = 49900;   /* cooldown (rel027z: 200 ms) */
     CHECK(!sc_want_enter(&b));
     b.last_end = 49000;
     CHECK(sc_want_enter(&b));
-    b.ever_ended = 1, b.now = 10, b.last_end = 0xFFFFFF00u;   /* the tick wraps: 0x10A ms later = still the cooldown */
+    b.ever_ended = 1, b.now = 10, b.last_end = 0xFFFFFFC0u;   /* the tick wraps: 0x4A ms later = still the cooldown */
     CHECK(!sc_want_enter(&b));
     b.now = 0x400;
     CHECK(sc_want_enter(&b));
 
+    /* rel027z: while his button is held the exchange lives SC_X_START_MS at least, even with no Genesis state yet (the flapping of zq_2); once released it ends after the quiet passes */
+    {
+        sc_x_t y;
+        memset(&y, 0, sizeof y);
+        sc_leave_in k;
+        memset(&k, 0, sizeof k);
+        k.p2_present = 1, k.p2_hold = 1;
+        sc_x_begin(&y, 5000);
+        int ended = 0;
+        for (int i = 0; i < 90; i++) ended |= sc_x_want_leave(&y, &k, 5000u + (uint32_t)i * 16u);   /* 1.4 s */
+        CHECK(!ended);
+        k.p2_hold = 0;
+        int e2 = 0;
+        for (int i = 0; i < 12; i++) e2 |= sc_x_want_leave(&y, &k, 6500u + (uint32_t)i * 16u);
+        CHECK(e2);
+    }
     sc_x_t x;
     memset(&x, 0, sizeof x);
     sc_leave_in l;

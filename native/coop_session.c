@@ -1135,7 +1135,7 @@ int cs_set_session(cs_t *s, const cp_session *ss)
 {
     int ok = 0;
     EnterCriticalSection(&s->lock);
-    if (s->role == CN_ROLE_HOST && s->phase == CP_PHASE_LOBBY) {
+    if (s->role == CN_ROLE_HOST && (s->phase == CP_PHASE_LOBBY || s->phase == CP_PHASE_PLAYING)) {   /* pausenative: the host's rules (the downed flags) change while the game runs; the guest takes CP_SESSION in any phase */
         uint32_t id = s->session.id;
         s->session = *ss;
         s->session.id = id;

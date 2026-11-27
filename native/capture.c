@@ -312,12 +312,30 @@ static capu_t *cap_scope(unsigned unit)
 static volatile unsigned ia_view;   /* fix022: the viewport the other human's per-view units (prompts, icons) and his object events are made for (capture_set_interact) */
 static int ia_event_scope_begin(capu_t *c);   /* fix022: the other human in an object's event state runs with his own-slot answer */
 static void ia_event_scope_end(int prev);
+static volatile DWORD th_t0[MAXCAP];   /* rel027: tick of the story's ThinkOff start per captured unit (0 = none) */
+static volatile int thdiag_on;         /* rel027p LAB (`cap thdiag 0|1`): log what each swapped phase does to a captured human while the story's ThinkOff is on him */
+static volatile LONG thdiag_n;
+static float rdf_(unsigned a);
+static int pad_is_native(int pad);   /* defined after src[] */
+/* rel027t (Discord B10): the story marks the AI partner with unit+0xF44 bit 5 (0x20): the item pack then reloads him for free (FUN_005C3B20 / 5C3CB0 / 5C51E0 test it; live: Parker's reserve stayed 30
+ * through 3 reloads with it, 30 -> 23 after one reload with it cleared; the other flag bits 2 / 3 / 4 did not matter). A human on a real pad pays for his ammo like the first human: cleared in his sections.
+ * `cap freeammo 0|1` (default 1; 0 = stock, lab A/B). */
+static volatile int freeammo_fix = 1;
+static volatile LONG freeammo_n;
 static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
 {
     unsigned g = gp();
     if (!g) {
         fn(unit);
         return;
+    }
+    if (freeammo_fix && unit == c->unit && c->flip && !c->lost && pad_is_native(c->pad)) {
+        volatile unsigned *f44 = (volatile unsigned *)(c->unit + 0xF44);
+        if (*f44 & 0x20u) {
+            *f44 &= ~0x20u;
+            if (InterlockedIncrement(&freeammo_n) <= 3)
+                r1_log("capture: the free-ammo flag (unit+0xF44 bit 5) of the human on pad slot %d was set by the story: cleared, he pays for his ammo", c->pad);
+        }
     }
     int locked = lock_take();
     note_thread();
@@ -351,7 +369,33 @@ static void swap_call(void (FC *fn)(unsigned), unsigned unit, capu_t *c)
                 ag_last[c->role] = v;
         }
     }
+    int dg = thdiag_on && unit == c->unit && (th_t0[c - caps] != 0 || thdiag_on == 2) && thdiag_n < 200;
+    unsigned dpre[6] = {0};
+    if (dg) {
+        dpre[0] = rd32(unit + 0xF3C), dpre[1] = rd32(unit + 0xE1C), dpre[2] = rd32(unit + 0x1138), dpre[3] = rd32(unit + 0x113C);
+        unsigned m = rd32(unit + 0xE80);
+        dpre[4] = m && rd32(m + 0x14) ? rd32(m + 0x3C) : 99;
+        dpre[5] = rd32(unit + 0xF44);
+    }
     fn(unit);
+    if (dg) {   /* only while his pad is pushed (PadData stick != 0): a window of 12 phase calls once a second */
+        static DWORD win_t;
+        static int win_n;
+        float ps[2] = {rdf_(g + 0x628 + (unsigned)c->pad * 0x90u + 0x28), rdf_(g + 0x628 + (unsigned)c->pad * 0x90u + 0x2C)};
+        DWORD now = GetTickCount();
+        unsigned pb = g + 0x3C + 0x2CCu * (unsigned)c->pad;
+        int rlx = (int)rd32(pb + 0x17C), rly = (int)rd32(pb + 0x180);
+        if ((ps[0] != 0.0f || ps[1] != 0.0f || rlx || rly) && now - win_t >= 1000) win_t = now, win_n = 0;
+        if (win_t && now - win_t < 1000 && win_n < 12) {
+            unsigned m = rd32(unit + 0xE80);
+            win_n++;
+            if (InterlockedIncrement(&thdiag_n) <= 200)
+                r1_log("capture: THDIAG slot %u phase %s unit %08x pad %d (g+870 now %u): F3C %08x -> %08x, E1C %08x -> %08x, F44 %08x -> %08x, lower state %u -> %u, pad group (%.2f, %.2f) -> (%.2f, %.2f), PadData[%d] stick (%.2f, %.2f), Pad raw LX %d LY %d held %x (kind %u active %u assigned %u user %u), ctl %u kind %u",
+                       rd32(unit + 0xE2C), fn == orig_v8 ? "v8" : fn == orig_v9 ? "v9" : fn == orig_v10 ? "v10" : "think", unit, c->pad, rd32(g + 0x870), dpre[0], rd32(unit + 0xF3C), dpre[1], rd32(unit + 0xE1C), dpre[5],
+                       rd32(unit + 0xF44), dpre[4], m && rd32(m + 0x14) ? rd32(m + 0x3C) : 99u, (double)*(float *)&dpre[2], (double)*(float *)&dpre[3], (double)rdf_(unit + 0x1138), (double)rdf_(unit + 0x113C), c->pad,
+                       (double)ps[0], (double)ps[1], rlx, rly, rd32(pb + 0x15C), rd32(pb + 7) & 0xFFu, rd32(pb + 4) & 0xFFu, rd32(pb + 5) & 0xFFu, rd32(pb + 0x10), rd32(c->ctl_obj + 0x34), rd32(unit + 0xE30));
+        }
+    }
     ia_event_scope_end(ev_prev);
     if (ag_set)
         *(volatile unsigned char *)(g + AG1_FLAG_OFF) = ag_old;
@@ -669,8 +713,92 @@ static int ia_story_other_any(void)
     }
     return 0;
 }
+/* rel027h (owner 2026-11-25: the ledge / jump-down prompt of the second human showed in the first human's half and was the first human's to press): the player's OWN action
+ * commands (jump down, climb, ladder, grab ...: objects of game\chara\player\control and the unit's command slot +0x12A8) are neither world objects nor story prompts, so the story rule
+ * above found no anchor and gave them to the own human. A command that a human's unit holds in its command slot (unit + 0x12A8)
+ * belongs to THAT human. The product rule is the unit's command slot +0x12A8 only (a wider scan would also match stale "last target" pointers of the table's objects); `cap ia uptr 1` (LAB) scans
+ * the whole unit for the diagnostic dump. Cached per command for IA_UO_LIFE ms. `cap ia uown 0|1` (LAB) = off. */
+static volatile int ia_sw_uown = 1;
+static volatile int ia_diag_ptr;   /* LAB `cap ia uptr 1`: a pointer in the unit to an object that holds the command (+0x10 / +0x94) counts too (diagnostic; the product rule is the direct pointer only) */
+#define IA_UO_LIFE 150u
+#define IA_UO_N 16
+static struct { unsigned cmd; int own; DWORD t; signed char res; unsigned where; } ia_uo[IA_UO_N];
+static volatile LONG ia_n_uo_scans, ia_n_uo_other, ia_n_uo_own;
+static int ia_ptr_ok(unsigned p) { return p > 0x10000u && p < 0x7FF00000u && (p & 3u) == 0; }
+static int ia_cmd_in_unit(unsigned cmd, unsigned unit, unsigned *where, int via_pointer)
+{
+    if (rd32(unit + 0x12A8u) == cmd) {   /* the human unit's own command slot (FUN_006B41B0 registers [unit+0x12A8] while the unit is a human, kind 1) */
+        *where = 0x12A8u;
+        return 1;
+    }
+    for (unsigned off = 0; via_pointer && off < 0x1800u; off += 4) {   /* lab diagnostic only (`cap ia uptr 1`): any word of the unit that is the command */
+        unsigned v = rd32(unit + off);
+        if (v == cmd) {
+            *where = off;
+            return 1;
+        }
+    }
+    for (unsigned off = 0; via_pointer && off < 0x1800u; off += 4) {
+        unsigned v = rd32(unit + off);
+        if (ia_ptr_ok(v) && v != unit && (rd32(v + 0x10) == cmd || rd32(v + 0x94) == cmd)) {
+            *where = 0x10000u | off;
+            return 2;
+        }
+    }
+    return 0;
+}
+static int ia_unit_owner(unsigned cmd, unsigned *where)   /* 1 = the other human's unit holds it, 0 = the own human's, -1 = neither */
+{
+    if (!ia_sw_uown || cmd < 0x10000u)
+        return -1;
+    int own = capture_own_effective();
+    DWORD now = GetTickCount();
+    int slot = -1;
+    for (int i = 0; i < IA_UO_N; i++)
+        if (ia_uo[i].cmd == cmd && ia_uo[i].own == own && (DWORD)(now - ia_uo[i].t) < IA_UO_LIFE) {
+            if (where)
+                *where = ia_uo[i].where;
+            return ia_uo[i].res;
+        } else if (slot < 0 && (ia_uo[i].cmd == 0 || (DWORD)(now - ia_uo[i].t) >= IA_UO_LIFE))
+            slot = i;
+    unsigned ua = unit_by_slot((unsigned)own), ub = unit_by_slot((unsigned)(1 - own)), w = 0;
+    int res = -1;
+    if (ub && ia_cmd_in_unit(cmd, ub, &w, ia_diag_ptr))
+        res = 1;
+    else if (ua && ia_cmd_in_unit(cmd, ua, &w, ia_diag_ptr))
+        res = 0;
+    InterlockedIncrement(&ia_n_uo_scans);
+    if (slot < 0)
+        slot = (int)(now % IA_UO_N);
+    ia_uo[slot].cmd = cmd, ia_uo[slot].own = own, ia_uo[slot].t = now, ia_uo[slot].res = (signed char)res, ia_uo[slot].where = w;
+    if (where)
+        *where = w;
+    return res;
+}
+static int ia_unit_other_any(void)   /* a registered command is held by the other human's unit */
+{
+    if (!ia_sw_uown)
+        return 0;
+    unsigned m = rd32(0x1169390u);
+    if (!m)
+        return 0;
+    unsigned end = rd32(m + 0x3C), cur = rd32(m + 0x38);
+    for (unsigned guard = 0; cur && cur != end && guard < 64; guard++, cur = rd32(cur + 8)) {
+        unsigned cmd = rd32(cur + 0x10);
+        if (cmd > 0x10000 && ia_unit_owner(cmd, NULL) == 1)
+            return 1;
+    }
+    return 0;
+}
 static int ia_cmd_of_other(unsigned cmd, const ia_tab *t)
 {
+    {
+        int uo = ia_unit_owner(cmd, NULL);
+        if (uo >= 0) {
+            InterlockedIncrement(uo ? &ia_n_uo_other : &ia_n_uo_own);
+            return uo;
+        }
+    }
     if (ia_sw_zone && ia_is_story_cmd(cmd)) {
         int ow = ia_story_owner(cmd);
         if ((ow == 1 && ia_st_other_fresh()) || (ow < 0 && ia_story_other_now()))
@@ -713,7 +841,7 @@ static void ia_unhide(unsigned m, unsigned n, const unsigned *nodes, const unsig
 static void ia_act_call(unsigned self, capu_t *c, const ia_tab *t)
 {
     unsigned nodes[IA_HIDE_MAX], prevs[IA_HIDE_MAX], n = 0;
-    int on = ia_sw_own && ia_live && t && (t->n || ia_story_other_any()) && self == rd32(0x1169390u);
+    int on = ia_sw_own && ia_live && t && (t->n || ia_story_other_any() || ia_unit_other_any()) && self == rd32(0x1169390u);
     if (on)
         n = ia_hide(self, t, c != NULL, nodes, prevs);
     if (c)
@@ -737,7 +865,7 @@ static void FC hook_act(unsigned self)
     if (ia_live && ia_sw_central) {
         LONG cur = ia_cur;
         const ia_tab *t = &ia_tabs[cur & 1];
-        int story = ia_story_other_any();
+        int story = ia_story_other_any() || ia_unit_other_any();
         capu_t *o = t->n || story ? ia_other_cap(cur) : NULL;
         if (o) {
             int own = capture_own_effective();
@@ -855,7 +983,7 @@ static void ia_zone_alias(unsigned self, unsigned prm)
     }
 }
 /* fix026p LAB (`cap ia zones`): every distinct zone-check action seen (self, prm), dumped on request: the zone structures (id at +8, the shape data) and the result words */
-#define IA_ZN_MAX 40
+#define IA_ZN_MAX 160
 static volatile unsigned ia_zn_self[IA_ZN_MAX], ia_zn_prm[IA_ZN_MAX];
 static volatile LONG ia_zn_n;
 static void ia_zn_note(unsigned self, unsigned prm)
@@ -867,6 +995,25 @@ static void ia_zn_note(unsigned self, unsigned prm)
     if (n < IA_ZN_MAX) {
         ia_zn_self[n] = self, ia_zn_prm[n] = prm;
         ia_zn_n = n + 1;
+        /* rel027z LAB: the resource's name (inline at world + 8 like the demo slots' resources) and the zone ids of the check, once per check (the examine zones of 1-2 are found by name) */
+        unsigned world = rd32(self + 0x50), cnt = rd32(prm + 0x14), arr = rd32(prm + 0x20);
+        char nm[64] = "?";
+        if (world > 0x10000) {
+            char tmp[64];
+            memset(tmp, 0, sizeof tmp);
+            if (r1_safe_read((void *)(size_t)(world + 8), tmp, sizeof tmp - 1)) {
+                int k = 0;
+                while (k < 62 && tmp[k] >= 0x20 && tmp[k] < 0x7F)
+                    k++;
+                if (k >= 3) snprintf(nm, sizeof nm, "%.*s", k, tmp);
+            }
+        }
+        char ids[96] = "";
+        for (unsigned i = 0; i < cnt && i < 8 && arr > 0x10000; i++) {
+            unsigned z = rd32(arr + 4 * i);
+            snprintf(ids + strlen(ids), sizeof ids - strlen(ids), "%s%u", i ? "," : "", z > 0x10000 ? rd32(z + 8) : 9999u);
+        }
+        r1_log("zones: new check #%ld fsm %08x prm %08x world %08x name '%s' zones %u (ids %s)", (long)n, self, prm, world, nm, cnt, ids);
     }
 }
 static void ia_zn_dump(int want)   /* want >= 0: only the zones with that id (and their shape); -1 = every zone, short */
@@ -932,11 +1079,46 @@ static unsigned ia_zmask_widen(unsigned self, unsigned prm)
     }
     return n;
 }
+/* rel027z (owner item 4, chapter 2 start): the story's ledge zone of 1-2 (`game\scene\12\12_00\12_00_s200_obrevent`, zone data 1: the node "atari_check" of 12_00_event_s200_obr) puts the main character's TPS camera
+ * on the top-down offset set 1 (ChangeTPSCameraOffset, the camera of viewport 0 = the first human's) and starts the demo 12_020_0 (whole view, 30 s) as soon as anybody stands at the edge. With the zone mask
+ * widened for the second human, HIS arrival at the edge did that to the first human, who was still somewhere on the platform: strange camera for him, one whole view for 30 s, no view for the second human.
+ * That check is not widened (the second human's jump is his own action command, it does not need the story zone); the first human at the edge starts the scene as in the stock game. `cap ia ledge 0|1`. */
+static volatile int ia_sw_ledge = 1;
+static volatile LONG ia_n_ledge;
+static int ia_zone_is_ledge(unsigned self, unsigned prm)
+{
+    static unsigned c_self[16], c_prm[16];
+    static int c_val[16], c_n;
+    for (int i = 0; i < c_n; i++)
+        if (c_self[i] == self && c_prm[i] == prm)
+            return c_val[i];
+    int val = 0;
+    unsigned world = rd32(self + 0x50), cnt = rd32(prm + 0x14), arr = rd32(prm + 0x20);
+    if (world > 0x10000 && cnt > 0 && cnt <= 16 && arr > 0x10000) {
+        char tmp[96];
+        memset(tmp, 0, sizeof tmp);
+        if (r1_safe_read((void *)(size_t)(world + 8), tmp, sizeof tmp - 1) && strstr(tmp, "12_00_s200_obrevent"))
+            for (unsigned i = 0; i < cnt; i++) {
+                unsigned z = rd32(arr + 4 * i);
+                if (z > 0x10000 && rd32(z + 8) == 1)
+                    val = 1;
+            }
+    }
+    if (c_n < 16)
+        c_self[c_n] = self, c_prm[c_n] = prm, c_val[c_n] = val, c_n++;
+    if (val)
+        r1_log("interact: zone check %08x (params %08x) is the 1-2 ledge zone: the second human's class is not added to it", self, prm);
+    return val;
+}
 static unsigned FC hook_zone(unsigned self, unsigned edx, unsigned prm, unsigned prm2)
 {
     unsigned nw = 0;
-    if (ia_live && ia_sw_zone && ia_sw_zmask && prm > 0x10000)
-        nw = ia_zmask_widen(self, prm);
+    if (ia_live && ia_sw_zone && ia_sw_zmask && prm > 0x10000) {
+        if (ia_sw_ledge && ia_zone_is_ledge(self, prm))
+            InterlockedIncrement(&ia_n_ledge);
+        else
+            nw = ia_zmask_widen(self, prm);
+    }
     unsigned r = orig_zone(self, edx, prm, prm2);
     for (unsigned k = nw; k-- > 0;)
         wr32(ia_zm_addr[k], ia_zm_old[k]);
@@ -1131,6 +1313,11 @@ static void ia_list_cmds(char *out, int size)
     o += snprintf(out + o, (size_t)(size - o), " | A %08x (%.0f,%.0f,%.0f) B %08x (%.0f,%.0f,%.0f)", ua, (double)rdf_(ua + 0x40), (double)rdf_(ua + 0x44), (double)rdf_(ua + 0x48), ub, (double)rdf_(ub + 0x40), (double)rdf_(ub + 0x44), (double)rdf_(ub + 0x48));
     for (int k = 0; n && n != e && k < 10 && o < size - 900; k++, n = rd32(n + 8)) {
         unsigned c = rd32(n + 0x10), icon = c > 0x10000 ? rd32(c + 0xE0) : 0;
+        {
+            unsigned uw = 0;
+            int uo = ia_unit_owner(c, &uw);
+            o += snprintf(out + o, (size_t)(size - o), "\nunit-owner of %08x: %s (unit offset %x%s) | scans %ld other %ld own %ld", c, uo == 1 ? "the OTHER human" : uo == 0 ? "the own human" : "none", uw & 0xFFFFu, uw & 0x10000u ? " via a pointer" : "", (long)ia_n_uo_scans, (long)ia_n_uo_other, (long)ia_n_uo_own);
+        }
         o += snprintf(out + o, (size_t)(size - o), "\ncmd %08x (pcs %08x story %d) vt %08x mode %u pri %u icon %08x ivt %08x w:", c, rd32(0x116A34Cu), ia_is_story_cmd(c), c > 0x10000 ? rd32(c) : 0, c > 0x10000 ? rd32(c + 0xC) : 0, c > 0x10000 ? rd32(c + 0x18) : 0, icon, icon > 0x10000 ? rd32(icon) : 0);
         for (unsigned w = 4; c > 0x10000 && w < 0x40; w += 4)
             o += snprintf(out + o, (size_t)(size - o), " %x", rd32(c + w));
@@ -1149,6 +1336,119 @@ static void ia_list_cmds(char *out, int size)
             for (unsigned w = 4; w < 0x80; w += 4)
                 o += snprintf(out + o, (size_t)(size - o), " %x", rd32(icon + w));
         }
+    }
+}
+/* rel027u (B2): the action command of a human's unit (unit + 0x12A8) is set up by the unit's init (FUN_006C742D area, 0x6C7689) ONLY when the unit is a human (kind 1) at that moment: it binds five member
+ * functions of the unit to the command (+0x34 / +0x40 / +0x4C / +0x58 / +0x64: button read 0xF08370, execute 0x6A9AA0, 0x6B0480, gate 0x6BA0D0, 0x6BA170; each a std::function-like triple {pointer to an
+ * allocated {fn, unit}, invoker, manager 0x6820D0}). The second human's unit was created as the AI partner (kind 2): his command stays UNBOUND, the ledge / story zone still configures its type, id and
+ * icon (the prompt shows, A turns the mode to 2) but nothing executes it: the jump down of the chapter 2 start (B2). ia_unit_bind() makes the same five bindings for a unit whose command has none.
+ * The allocator is the engine's (global 0x11859D4, vtable +0x20 alloc(size, align); the manager frees with +0x30). Switch `cap ia ubind 0|1` (LAB), default 1. */
+static volatile int ia_sw_ubind = 1;
+static volatile LONG ia_n_ubind, ia_n_unbind;
+/* the bindings WE made (unit, command, the first pointer): taken off again when the unit is no human of ours any more (the AI partner of a solo part keeps the stock, unbound command) */
+#define UB_N 4
+static struct { unsigned unit, cmd, ptr; DWORD free_since; } ub_tab[UB_N];
+typedef void *(TC *eng_alloc_fn)(void *self, unsigned size, unsigned align);
+static int ia_unit_bind(unsigned unit)
+{
+    static const struct { unsigned fn, inv; } B[5] = {{0xF08370u, 0x753F50u}, {0x6A9AA0u, 0x778C90u}, {0x6B0480u, 0x778C90u}, {0x6BA0D0u, 0x753F50u}, {0x6BA170u, 0x753F50u}};
+    static int ok = -1;
+    if (!unit)
+        return -1;
+    unsigned c = rd32(unit + 0x12A8u);
+    if (c < 0x10000u || rd32(c) != 0xFEBBA8u)
+        return -1;
+    if (rd32(c + 0x34u) || rd32(c + 0x58u))
+        return 0;   /* already bound (stock human, or by us) */
+    if (ok < 0) {   /* the supported build only: the five functions begin as the stock ones and the manager is the std::function manager */
+        static const struct { unsigned va; unsigned char b[3]; } pro[] = {{0x6A9AA0u, {0x55, 0x8B, 0xEC}}, {0x6BA0D0u, {0x56, 0x8B, 0xF1}}, {0x6B0480u, {0xE8, 0xCB, 0xFE}}, {0x6820D0u, {0x8B, 0x44, 0x24}}, {0x753F50u, {0x8B, 0x44, 0x24}}, {0x778C90u, {0x8B, 0x44, 0x24}}};
+        ok = 1;
+        for (unsigned i = 0; i < sizeof pro / sizeof pro[0]; i++) {
+            unsigned char cur[3];
+            if (!r1_safe_read((const void *)(uintptr_t)pro[i].va, cur, 3) || memcmp(cur, pro[i].b, 3))
+                ok = 0;
+        }
+        if (!ok)
+            r1_log("capture: the unit command binders differ from the supported build: the second human's unit command is left unbound");
+    }
+    unsigned al = rd32(0x11859D4u);
+    if (!ok || al < 0x10000u)
+        return -1;
+    eng_alloc_fn alloc = (eng_alloc_fn)(uintptr_t)rd32(rd32(al) + 0x20u);
+    if (!alloc)
+        return -1;
+    unsigned ptrs[5];
+    for (int k = 0; k < 5; k++) {
+        unsigned *o = (unsigned *)alloc((void *)(uintptr_t)al, 8, 0x10);
+        if (!o)
+            return -1;   /* (the few already made are leaked, never bound) */
+        o[0] = B[k].fn, o[1] = unit;
+        ptrs[k] = (unsigned)(uintptr_t)o;
+    }
+    for (int k = 0; k < 5; k++) {   /* the cmd's functors: {pointer, invoker, manager}; the pointer last of the first so that a reader never sees a half-made one */
+        unsigned f = c + 0x34u + 0xCu * (unsigned)k;
+        wr32(f + 4, B[k].inv), wr32(f + 8, 0x6820D0u), wr32(f, ptrs[k]);
+    }
+    for (int k = 0; k < UB_N; k++)
+        if (!ub_tab[k].unit) {
+            ub_tab[k].unit = unit, ub_tab[k].cmd = c, ub_tab[k].ptr = ptrs[0], ub_tab[k].free_since = 0;
+            break;
+        }
+    InterlockedIncrement(&ia_n_ubind);
+    r1_log("capture: the action command %08x of unit %08x (slot field %u) had no bindings: the stock five were made for him (#%ld)", c, unit, rd32(unit + 0xE2C), (long)ia_n_ubind);
+    return 1;
+}
+/* every pass (the game thread, pass start): a human we control (a captured unit) whose command has no bindings gets them; cheap (two reads) once bound; at most every 100 ms */
+static void ubind_pass(void)
+{
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if ((int)(now - last) < 100)
+        return;
+    last = now;
+    for (int i = 0; ia_sw_ubind && hooks_on && i < MAXCAP; i++)
+        if (caps[i].active && caps[i].flip && !caps[i].lost && caps[i].unit && is_player_class(caps[i].unit))
+            ia_unit_bind(caps[i].unit);
+    for (int k = 0; k < UB_N; k++) {   /* our bindings of a unit that is no captured human any more: removed after 2 s (the stock AI partner has none) */
+        if (!ub_tab[k].unit)
+            continue;
+        int held = 0;
+        for (int i = 0; i < MAXCAP; i++)
+            if (caps[i].active && caps[i].flip && !caps[i].lost && caps[i].unit == ub_tab[k].unit)
+                held = 1;
+        if (held) {
+            ub_tab[k].free_since = 0;
+            continue;
+        }
+        if (!ub_tab[k].free_since)
+            ub_tab[k].free_since = now | 1u;
+        if ((DWORD)(now - ub_tab[k].free_since) < 2000u)
+            continue;
+        unsigned u = ub_tab[k].unit, c = ub_tab[k].cmd;
+        if (is_player_class(u) && rd32(u + 0x12A8u) == c && rd32(c) == 0xFEBBA8u && rd32(c + 0x34u) == ub_tab[k].ptr) {
+            for (unsigned f = c + 0x34u; f < c + 0x34u + 5u * 0xCu; f += 4)
+                wr32(f, 0);   /* (the five small objects are left to the allocator: 80 bytes) */
+            InterlockedIncrement(&ia_n_unbind);
+            r1_log("capture: unit %08x is no human of ours any more: the bindings we made for its action command %08x were taken off (#%ld)", u, c, (long)ia_n_unbind);
+        }
+        memset(&ub_tab[k], 0, sizeof ub_tab[k]);
+    }
+}
+/* LAB (rel027u B2): `cap ia ucmd <slot>`: the command in the unit slot +0x12A8 of the human of that unit slot (words +0..0x13C, the callbacks at +0x34 / +0x58, mode, target +0x70, flags +0x14) and the unit's state words */
+static void ia_ucmd(char *out, int size, unsigned slot)
+{
+    unsigned u = unit_by_slot(slot), c = u ? rd32(u + 0x12A8) : 0;
+    int o = snprintf(out, (size_t)size, "ucmd slot %u unit %08x pos (%.0f,%.0f,%.0f) E1C %08x F14 %08x F3C %08x F44 %08x low %u cmd %08x vt %08x mode %u", slot, u, (double)rdf_(u + 0x40), (double)rdf_(u + 0x44), (double)rdf_(u + 0x48), rd32(u + 0xE1C), rd32(u + 0xF14), rd32(u + 0xF3C), rd32(u + 0xF44),
+                     rd32(rd32(u + 0xE80) + 0x3C), c, c > 0x10000 ? rd32(c) : 0, c > 0x10000 ? rd32(c + 0xC) : 0);
+    for (unsigned w = 4; c > 0x10000 && w < 0x140 && o < size - 40; w += 4)
+        o += snprintf(out + o, (size_t)(size - o), "%s%x", (w & 0x1F) == 4 ? "\n +4:" : " ", rd32(c + w));
+    o += snprintf(out + o, (size_t)(size - o), "\n unit +12AC:");
+    for (unsigned w = 0x12ACu; u && w < 0x12E0u; w += 4)
+        o += snprintf(out + o, (size_t)(size - o), " %x", rd32(u + w));
+    /* the five std::function-like binders of the command (+0x34 / +0x40 / +0x4C / +0x58 / +0x64: pointer, invoker, manager): the bound member function and its object */
+    for (unsigned k = 0; c > 0x10000 && k < 5 && o < size - 120; k++) {
+        unsigned f = c + 0x34u + 0xCu * k, bp = rd32(f);
+        o += snprintf(out + o, (size_t)(size - o), "\n bind+%x: ptr %08x fn %08x this %08x [+8] %08x [+C] %08x", 0x34u + 0xCu * k, bp, bp > 0x10000 ? rd32(bp) : 0, bp > 0x10000 ? rd32(bp + 4) : 0, bp > 0x10000 ? rd32(bp + 8) : 0, bp > 0x10000 ? rd32(bp + 12) : 0);
     }
 }
 /* LAB: `cap ia packs [door unit]`: the motion pack manager (0x1169750: count +0x30, array +0x3C of packs with id +0x14, sub +0x18, state +0x24, 6 = loaded) and the motions of a door (its controller
@@ -1396,6 +1696,17 @@ static void FC hook_think(unsigned unit)
     }
 }
 
+/* rel027t (Discord B3): the engine's keyboard mode (sGamePad+0x874, ONE global) switches the right stick of EVERY pad slot to the keyboard / mouse response curve (table 0x114566c:
+ * output 1.0 at 0.3 deflection up to 4.0 at full deflection, against 0.0 / 1.0 on the pad curve 0x1145618), because the PadData builder FUN_0088A470 tests the global, not the slot. With the keyboard +
+ * mouse + one gamepad mode (kbpad) the keyboard mode is on for good (the neutral pad on user 0 never has a held bit to leave it), so the second human's aim stick was 3-4 times too fast, and the
+ * Options sensitivity (written for the current slot 0 only) could not change that. The keyboard feeds only the current slot 0, so the builder of the second human's pad (slot 1, a real pad here)
+ * runs with the mode word cleared and gets the mode back after it (`cap padcurve 0` = stock, lab A/B). Not for a remote puppet (its records are not a real pad's: net behaviour unchanged). */
+static volatile int padcurve_on = 1;
+static volatile LONG padcurve_n;
+static int pad1_is_real_human(void);   /* defined after src[] */
+static volatile int kbx_on = 1, kbx_req;   /* rel027z: the keyboard routing of a kbpad exchange (hook_kb below) */
+static volatile LONG kbx_n;
+
 /* PadData[k] is built from the raw pad of the current slot: build slot k from pad k */
 static void TC hook_padData(void *self, unsigned slot)
 {
@@ -1403,9 +1714,23 @@ static void TC hook_padData(void *self, unsigned slot)
     if (g && slot < 2) {
         int locked = lock_take();
         unsigned old = *(volatile unsigned *)(g + 0x870);
+        unsigned kbm = 0;
+        int kbx_slot0 = kbx_on && kbx_req && slot == 0;   /* rel027z: the real gamepad is slot 0 while a kbpad exchange runs */
+        if (padcurve_on && ((slot == 1 && pad1_is_real_human()) || kbx_slot0)) {
+            /* the Options "sensitivity" is written for the current slot 0 only (FUN_00888250): the second human's pad takes the same level (index 0..4 of table 0x11455c0, PadData+0x18) */
+            unsigned sens = *(volatile unsigned *)(g + 0x628 + 0x18);
+            if (sens < 5 && !kbx_slot0)
+                *(volatile unsigned *)(g + 0x628 + 0x90 + 0x18) = sens;
+            if ((kbm = *(volatile unsigned *)(g + KB1_MODE_OFF)) != 0) {
+                *(volatile unsigned *)(g + KB1_MODE_OFF) = 0;
+                InterlockedIncrement(&padcurve_n);
+            }
+        }
         *(volatile unsigned *)(g + 0x870) = slot;
         orig_padData(self, slot);
         *(volatile unsigned *)(g + 0x870) = old;
+        if (kbm)
+            *(volatile unsigned *)(g + KB1_MODE_OFF) = kbm;
         if (locked)
             LeaveCriticalSection(&swap_cs);
         return;
@@ -1415,12 +1740,27 @@ static void TC hook_padData(void *self, unsigned slot)
 
 /* the keyboard-mode function with the kept pads (kbskip1.h). Under the swap lock like the builder, so the current slot (+0x870) the keyboard goes to is the one of the pass (0), not a slot a
  * swapped section of another thread has set for a moment */
+/* rel027z (owner 2026-11-26, item 8): with keyboard + mouse for player 1 and ONE gamepad for player 2 (kbpad) the second human's exchange (Genesis, item menu, documents) swaps the XInput users, so the
+ * real gamepad is raw block 0 and the neutral pad is raw block 1; player 1's character is then bound to pad slot 1, but the engine's keyboard-mode function still ORs the keyboard / mouse into the
+ * CURRENT slot, which is 0 outside the swapped character sections: the mouse (and the keys) went to the other human's slot and player 1's camera froze. While the exchange runs in kbpad mode (kbx)
+ * the keyboard is routed to slot 1 (the current slot for the call of the keyboard-mode function) and the block of the real gamepad (slot 0) is the one kept through the wipe; the second human's
+ * pad (slot 0 then) is built with the pad curve, the keyboard's slot with the keyboard curve (padcurve below). `cap kbx 0|1` (default 1; 0 = stock, lab A/B). */
+void capture_set_kbx(int on) { kbx_req = on != 0; }
 static void FC __attribute__((force_align_arg_pointer)) hook_kb(unsigned self)
 {
-    unsigned mask = kbskip_req ? kbskip_mask : 0;
+    int kx = kbx_on && kbx_req;
+    unsigned mask = kx ? 1u : kbskip_req ? kbskip_mask : 0;
     int locked = mask ? lock_take() : 0;
+    unsigned old_cur = 0;
+    if (kx && locked) {
+        old_cur = *(volatile unsigned *)(self + KB1_CUR_OFF);
+        *(volatile unsigned *)(self + KB1_CUR_OFF) = 1;
+        InterlockedIncrement(&kbx_n);
+    }
     /* the trampoline itself: hook_install writes it before the jump goes live (a pointer set after hook_install returned could still be NULL in the first call) */
     kb1_call((kb1_fn)hk_kb.tramp, (uintptr_t)self, mask, &kb_st);
+    if (kx && locked)
+        *(volatile unsigned *)(self + KB1_CUR_OFF) = old_cur;
     if (locked)
         LeaveCriticalSection(&swap_cs);
 }
@@ -1553,6 +1893,84 @@ static void ia_diag_hooks(int on)
     }
 }
 
+/* rel027 (owner 2026-11-25): a captured human the story holds in a wait state is asked for MoveState (capkeep1.h ck_hold_release). The request call = cCharaStateManager request by
+ * index, FUN_0049C790 thiscall(mgr; index, arg, PointerArgs*) ret 0xC (the one pmot1 / objsync1 use; its prologue is checked once). */
+int split_is_active(void);
+static volatile int hold_on = 0;   /* rel027p: the MoveState request is off by default (th12: it changes nothing; the lock below is what holds him) */
+static volatile LONG hold_releases, hold_refused;
+static DWORD hold_since[MAXCAP], hold_req_t[MAXCAP];   /* tick the unit entered a hold state (0 = not in one), tick of the last request */
+static int hold_req_ok = -1;
+typedef unsigned (__attribute__((thiscall)) *hold_req_fn)(void *mgr, int index, int arg, void *args);
+static int hold_req_check(void)
+{
+    static const unsigned char sig[] = {0x81, 0xEC, 0x78, 0x03, 0x00, 0x00, 0x56, 0x8B, 0xF1, 0x80, 0x7E, 0x2D, 0x01, 0x75, 0x0C};
+    unsigned char cur[sizeof sig];
+    if (hold_req_ok < 0) {
+        hold_req_ok = r1_safe_read((void *)0x49C790u, cur, sizeof cur) && !memcmp(cur, sig, sizeof sig);
+        if (!hold_req_ok)
+            r1_log("capture: the state request 0x49C790 differs from the supported build: the story's hold of a captured human is not released");
+    }
+    return hold_req_ok;
+}
+/* one pass for the captured unit c (index i): while the story's ThinkOff is on him and he stands in a wait state in the plain play view, ask for MoveState */
+static void hold_pass(int i, capu_t *c, DWORD now)
+{
+    unsigned mgr = rd32(c->unit + 0xE80);
+    int idx = mgr && rd32(mgr + 0x14) ? (int)rd32(mgr + 0x3C) : -1;
+    int story = th_t0[i] != 0, play = split_is_active() && !blocked;
+    if (!ck_hold_state(idx) || !story) {
+        hold_since[i] = 0;
+        return;
+    }
+    if (!hold_since[i]) hold_since[i] = now | 1;
+    if (!ck_hold_release(hold_on, story, play, idx, now - hold_since[i], hold_req_t[i] ? now - hold_req_t[i] : 100000u) || !hold_req_check())
+        return;
+    hold_req_t[i] = now | 1;
+    if ((rd32(mgr + 0x2D) & 0xFFu) == 1) {
+        InterlockedIncrement(&hold_refused);
+        return;
+    }
+    unsigned r = ((hold_req_fn)(uintptr_t)0x49C790u)((void *)(uintptr_t)mgr, 5, 0, NULL);
+    LONG n = InterlockedIncrement(&hold_releases);
+    if (n <= 40)
+        r1_log("capture: the story holds captured unit %08x (slot field %u) in lower state %d for %lu ms (ThinkOff on him for %lu ms): asked for MoveState (%s) #%ld; F3C %08x, pos (%.0f, %.0f, %.0f)", c->unit,
+               rd32(c->unit + 0xE2C), idx, (unsigned long)(now - hold_since[i]), (unsigned long)(now - th_t0[i]), (r & 0xFF) ? "taken" : "REFUSED by the manager", (long)n, rd32(c->unit + 0xF3C),
+               (double)rdf_(c->unit + 0x40), (double)rdf_(c->unit + 0x44), (double)rdf_(c->unit + 0x48));
+}
+/* rel027p (owner decision 2026-11-25, GitHub issue #2): the story LOCKS the second human ("Parker waits": FsmLockPlayer / the lock of the story's event motions, FUN_006B3B80: unit+0xE1C |= 4, +0xF44 |= 8,
+ * lower state to 0 = Upper::FullMoveWaitState, no walk, no aim, a scan animation by itself). The lab reproduced it in section 1-3: Jill into cc_must00[10] -> Parker E1C 4000008e, lower state 0, F14 3, his pad 1
+ * moved him 22 u in 10 s (th13). In the split screen the second human is a real player, so in the plain play view he gets the stock unlock of the same story action (FUN_006AE390 = FsmLockPlayer
+ * mIsLock=0: clears E1C bit 2 / F44 bit 3, lower state back to Move) at most every 500 ms (the same call hunk_split_unlock makes for Hunk in 2-2). The story's scripts go on unchanged (their waits are on Jill's
+ * zones / flags, not on Parker's state). Not in a movie, a scene camera or a pause (split_is_active() false then), not for the dead (E1C bit 0), not for the own human. `cap unlock 0|1` (default 1). */
+#define UL_FN 0x6AE390u
+static volatile int unlock_on = 1;
+static volatile LONG unlock_n, unlock_refused;
+static DWORD unlock_t[MAXCAP];
+static int unlock_ok = -1;
+typedef void(__attribute__((thiscall)) *unlock_fn)(void *unit);
+static void lock_pass(int i, capu_t *c, DWORD now)
+{
+    static const unsigned char pro[10] = {0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x9E, 0x1C, 0x0E, 0x00, 0x00};
+    unsigned e = rd32(c->unit + 0xE1C);
+    if (!ck_unlock_wanted(unlock_on, e, rd32(c->unit + 0xE2C), capture_own_effective(), rd32(c->unit + 0xE30), split_is_active() && !blocked, unlock_t[i] ? now - unlock_t[i] : 100000u))
+        return;
+    unlock_t[i] = now | 1;
+    if (unlock_ok < 0) {
+        unsigned char cur[sizeof pro];
+        unlock_ok = r1_safe_read((const void *)(uintptr_t)UL_FN, cur, sizeof cur) && !memcmp(cur, pro, sizeof cur);
+        if (!unlock_ok) r1_log("capture: FUN_006AE390 differs from the supported build: the story's lock of the second human is not lifted");
+    }
+    if (!unlock_ok) {
+        InterlockedIncrement(&unlock_refused);
+        return;
+    }
+    unsigned f44 = rd32(c->unit + 0xF44), st = rd32(rd32(c->unit + 0xE80) + 0x3C);
+    ((unlock_fn)(uintptr_t)UL_FN)((void *)(uintptr_t)c->unit);
+    LONG n = InterlockedIncrement(&unlock_n);
+    if (n <= 12)
+        r1_log("capture: the story locked the second human (unit %08x, slot field %u): E1C %08x F44 %08x lower state %u (ThinkOff %s): the stock unlock -> E1C %08x F44 %08x lower state %u (#%ld)", c->unit, rd32(c->unit + 0xE2C), e, f44, st,
+               th_t0[i] ? "on" : "off", rd32(c->unit + 0xE1C), rd32(c->unit + 0xF44), rd32(rd32(c->unit + 0xE80) + 0x3C), (long)n);
+}
 static void __attribute__((thiscall)) hook_setkind(void *self, int v)
 {
     unsigned unit = (unsigned)(uintptr_t)self, caller = (unsigned)(uintptr_t)__builtin_return_address(0);
@@ -1562,11 +1980,18 @@ static void __attribute__((thiscall)) hook_setkind(void *self, int v)
         kind_last_caller = caller, kind_last_unit = unit, kind_last_v = v, kind_last_tick = GetTickCount();
         LONG n = InterlockedIncrement(d == CK_KEEP ? &kind_kept : &kind_allowed);
         if (d == CK_LOST) c->lost = 1;
+        if (d == CK_KEEP && caller == 0x007708e3u && c)   /* rel027: the story's PcsMain/SubCharacterThinkOff starts (the end is setKind(saved) from 0x770aef below): its length and the unit's state word go to the log */
+            th_t0[c - caps] = GetTickCount() | 1;
         if (n <= 40)
-            r1_log("capture: the game sets kind %d on captured unit %08x (slot field %u), caller %08x: %s (#%ld)", v, unit, rd32(unit + 0xE2C), caller,
-                   d == CK_KEEP ? "KEPT 1, the capture stays" : "ALLOWED (cap keep 0), the capture is LOST", (long)n);
+            r1_log("capture: the game sets kind %d on captured unit %08x (slot field %u), caller %08x: %s (#%ld); state word F3C %08x (bit 20 = input ban), pos (%.0f, %.0f, %.0f)", v, unit, rd32(unit + 0xE2C), caller,
+                   d == CK_KEEP ? "KEPT 1, the capture stays" : "ALLOWED (cap keep 0), the capture is LOST", (long)n, rd32(unit + 0xF3C), (double)rdf_(unit + 0x40), (double)rdf_(unit + 0x44), (double)rdf_(unit + 0x48));
         orig_setkind(self, pass_v);
         return;
+    }
+    if (c && caller == 0x00770aefu && th_t0[c - caps]) {   /* rel027: the story's ThinkOff of this captured human is over */
+        r1_log("capture: the story's ThinkOff on captured unit %08x (slot field %u) ended after %lu ms; state word F3C %08x, pos (%.0f, %.0f, %.0f)", unit, rd32(unit + 0xE2C),
+               (unsigned long)(GetTickCount() - th_t0[c - caps]), rd32(unit + 0xF3C), (double)rdf_(unit + 0x40), (double)rdf_(unit + 0x44), (double)rdf_(unit + 0x48));
+        th_t0[c - caps] = 0;
     }
     if (rd32(unit + 0xE2C) <= 1 && InterlockedIncrement(&kind_calls) <= 40)
         r1_log("capture: setKind(%d) on unit %08x (slot field %u, kind %u, %s), caller %08x", v, unit, rd32(unit + 0xE2C), rd32(unit + 0xE30), c ? "captured" : "not captured", caller);
@@ -1714,6 +2139,20 @@ typedef struct {
 } src_t;
 static src_t src[2];
 static volatile int latch_ms = 40;
+/* rel027t: slot 1 is a local human on a native (real) pad: not a remote puppet, not a script */
+static int pad_is_native(int pad)
+{
+    return pad >= 0 && pad < 2 && src[pad].kind == CAP_NATIVE && !blocked;
+}
+static int pad1_is_real_human(void)
+{
+    if (src[1].kind != CAP_NATIVE || blocked || (kbx_on && kbx_req))   /* (a kbpad exchange: pad slot 1 is the neutral pad of the keyboard, not a real gamepad) */
+        return 0;
+    for (int i = 0; i < MAXCAP; i++)
+        if (caps[i].active && caps[i].pad == 1)
+            return 1;
+    return 0;
+}
 
 static void publish(int slot, const r1_input_t *r) { testmode_pad_set(slot, 1, r); }
 
@@ -1971,6 +2410,46 @@ static void kbskip_apply(void)
     }
 }
 
+/* rel027y (owner finding C2: the second human walks through the NPC of the first Genesis hand-out, the first one is blocked). The story sets the collision values per CHARACTER TYPE: every
+ * shape of a unit has +0x120 (mType: 1 = "not pushed back") and +0x124 (mPrio) written by the Pcs SetCollisionPrio action (FUN_00770560 -> FUN_006E3340 / FUN_006E3480). For the stock AI partner
+ * (type 1) the 1-2 story sets (mType 1, prio 8) while the partner scans for the Genesis (12_110_0_main n7 "osarenai") and the NPC (type 3, O'Brien) gets (1, 8): two shapes that are both
+ * "not pushed" pass through each other. The first human (type 0) gets (0, 7), so he is pushed back by the NPC. A human second player is not an AI partner: he gets the first human's values,
+ * so the NPC blocks both. Mirrored every frame from the first human's shape 0 onto all shapes of the second human (not while either is dead). `cap collmirror 0` = stock (lab A/B). */
+static volatile int coll_mirror_on = 1;
+static volatile LONG coll_mirror_writes, coll_mirror_frames;
+static void coll_pass(void)
+{
+    if (!coll_mirror_on)
+        return;
+    unsigned ref = 0;
+    for (int j = 0; j < MAXCAP; j++)
+        if (caps[j].active && caps[j].flip && rd32(caps[j].unit + 0xE2C) == 0)
+            ref = caps[j].unit;
+    if (!ref || (rd32(ref + 0xE1C) & 1))
+        return;
+    unsigned co0 = rd32(ref + 0xE84), arr0 = co0 ? rd32(co0 + 0x2F8) : 0, cnt0 = co0 ? rd32(co0 + 0x304) : 0, sh0 = (arr0 && cnt0) ? rd32(arr0) : 0;
+    if (!sh0)
+        return;
+    int v120 = (int)rd32(sh0 + 0x120), v124 = (int)rd32(sh0 + 0x124);
+    for (int i = 0; i < MAXCAP; i++) {
+        if (!caps[i].active || !caps[i].flip || caps[i].lost || rd32(caps[i].unit + 0xE2C) == 0 || (rd32(caps[i].unit + 0xE1C) & 1))
+            continue;
+        unsigned co = rd32(caps[i].unit + 0xE84), arr = co ? rd32(co + 0x2F8) : 0, cnt = co ? rd32(co + 0x304) : 0;
+        for (unsigned k = 0; arr && k < cnt && k < 16; k++) {
+            unsigned sh = rd32(arr + 4 * k);
+            if (!sh)
+                continue;
+            if ((int)rd32(sh + 0x120) != v120 || (int)rd32(sh + 0x124) != v124) {
+                *(volatile int *)(sh + 0x120) = v120;
+                *(volatile int *)(sh + 0x124) = v124;
+                if (InterlockedIncrement(&coll_mirror_writes) <= 12)
+                    r1_log("capture: collision values of the second human %08x set to the first human's (+0x120 %d, +0x124 %d) [write #%ld]", caps[i].unit, v120, v124, (long)coll_mirror_writes);
+            }
+        }
+    }
+    coll_mirror_frames++;
+}
+
 void capture_frame(void)
 {
     kbskip_apply();
@@ -2000,6 +2479,7 @@ void capture_frame(void)
         if (src[s].kind == CAP_REMOTE && src[s].latched)
             publish_remote(s, now);
     apply();
+    ubind_pass();
     ia_scan();
     if (!hooks_on)
         return;
@@ -2026,11 +2506,16 @@ void capture_frame(void)
         if (caps[i].active && (!is_player_class(caps[i].unit) || ctl_obj_of(caps[i].unit) != caps[i].ctl_obj)) {
             r1_log("capture: unit %08x is gone (freed by a load / area change); the role stays bound", caps[i].unit);
             caps[i].active = 0;
+            th_t0[i] = 0, hold_since[i] = 0, hold_req_t[i] = 0;
         }
     /* a captured human whose control type / kind / upper mode is not 1 any more (a path that is not setKind, or setKind allowed): logged; written back while keep_capture */
     for (int i = 0; i < MAXCAP; i++) {
         capu_t *c = &caps[i];
         if (!c->active || !c->flip) continue;
+        hold_pass(i, c, GetTickCount());
+        lock_pass(i, c, GetTickCount());
+        if (i == 0)
+            coll_pass();
         unsigned th = rd32(c->unit + 0xFA4), ct = rd32(c->ctl_obj + 0x34), kd = rd32(c->unit + 0xE30), tm = th ? rd32(th + 0x34) : 1;
         int d = ck_fields(ct, kd, tm, th, c->think_obj, keep_capture);
         if (d == CK_PASS) {
@@ -2152,6 +2637,31 @@ int capture_own_effective(void)
         return (int)own_slot;
     unsigned cm = rd32(AD.coopmgr_ptr), pm = cm ? rd32(cm + 0xF4) : 0;
     return pm == 1 || pm == 2 ? (int)(rd32(cm + 0xF8) & 1) : 0;   /* what 0x87E1B0 answers without our override: pm - 1 <= 1 ? [+0xF8] : 0 */
+}
+
+/* rel027s (Discord B6, the rifle scope): the second human's scope camera is not a character phase, so the engine's per-slot pad state (PadData aim / zoom words, the zoom button) it
+ * reads and writes is the CURRENT slot (sGamePad+0x870 = 0 = the first human's). split.c runs its calls between these two: the same swap lock and thread note as a character's section. */
+int capture_slot_begin(int pad, unsigned *old)
+{
+    unsigned g = gp();
+    *old = 0;
+    if (!g || pad < 0 || pad > 1)
+        return -1;
+    int locked = lock_take();
+    note_thread();
+    *old = *(volatile unsigned *)(g + 0x870);
+    *(volatile unsigned *)(g + 0x870) = (unsigned)pad;
+    return locked;
+}
+void capture_slot_end(int token, unsigned old)
+{
+    if (token < 0)
+        return;
+    unsigned g = gp();
+    if (g)
+        *(volatile unsigned *)(g + 0x870) = old;
+    if (token)
+        LeaveCriticalSection(&swap_cs);
 }
 
 void capture_get_state(capture_state_t *st)
@@ -2288,11 +2798,89 @@ void capture_cmd(const char *arg, char *out, int size)
         int o = snprintf(out, size, "kbskip %d requested (state %d: 0 off, 1 wanted, 2 hooked, 3 unhooking); ", kbskip_req, capture_kbskip_state());
         if (o > 0 && o < size)
             capture_kbskip_text(out + o, size - o);
+    } else if (!strcmp(sub, "padcurve")) {   /* padcurve 0|1: rel027t B3, the second human's real pad is built with the keyboard-mode word cleared (default 1; 0 = stock, lab A/B) */
+        if (a[0]) padcurve_on = atoi(a) != 0;
+        snprintf(out, size, "padcurve %s: %ld builds of pad slot 1 with the keyboard mode cleared; second human on a real pad %d", padcurve_on ? "on" : "OFF (stock)", (long)padcurve_n, pad1_is_real_human());
+    } else if (!strcmp(sub, "kbx")) {   /* kbx [0|1 | test 0|1]: rel027z, the keyboard routing of a kbpad exchange (default on; `test` forces the exchange state without one: LAB) */
+        if (!strcmp(a, "test")) kbx_req = atoi(b) != 0;
+        else if (a[0]) kbx_on = atoi(a) != 0;
+        snprintf(out, size, "kbx %s: kbpad exchange routing %s now, hook passes with it %ld", kbx_on ? "on" : "OFF (stock)", kbx_req ? "ACTIVE" : "idle", (long)kbx_n);
+    } else if (!strcmp(sub, "freeammo")) {   /* freeammo 0|1: rel027t B10, the human on a real pad does not keep the story's free-ammo flag (unit+0xF44 bit 5); 0 = stock (lab A/B) */
+        if (a[0]) freeammo_fix = atoi(a) != 0;
+        snprintf(out, size, "freeammo fix %s: flag cleared %ld times", freeammo_fix ? "on" : "OFF (stock)", (long)freeammo_n);
     } else if (!strcmp(sub, "aimgate")) {   /* aimgate 1|0: the second human's own "aim allowed" byte in his sections (aimgate1.h, default 1); 0 = stock (lab A/B) */
         if (a[0])
             aimgate_on = atoi(a) != 0;
         snprintf(out, size, "aim gate %s (%s); sections %ld, allowed against the own human's value %ld", aimgate_on ? "on" : "OFF (stock: the own human's value for everybody)",
                  can_aim ? "FUN_006AD740 matched" : "FUN_006AD740 not matched or hooks not installed yet", (long)ag_sections, (long)ag_allowed);
+    } else if (!strcmp(sub, "thdiag")) {   /* thdiag 0|1|2: LAB, log the swapped phases of a captured human under the story's ThinkOff (2 = also without it; 120 lines at most, `thdiag N` again re-arms) */
+        if (a[0]) thdiag_on = atoi(a), thdiag_n = 0;
+        snprintf(out, size, "thdiag %s, lines %ld", thdiag_on ? "on" : "off", (long)thdiag_n);
+    } else if (!strcmp(sub, "unlock")) {   /* unlock 0|1: the story's lock of the second human is lifted in the plain play view (default 1; 0 = stock, lab A/B) */
+        if (a[0]) unlock_on = atoi(a) != 0;
+        snprintf(out, size, "unlock %s: %ld unlocks, %ld refused (prologue %s)", unlock_on ? "on" : "OFF", (long)unlock_n, (long)unlock_refused, unlock_ok < 0 ? "not checked" : unlock_ok ? "verified" : "DIFFERS");
+    } else if (!strcmp(sub, "hold")) {   /* hold 0|1: the story's hold of a captured human is released (default 1); 0 = lab A/B (the human stands where the story parks him) */
+        if (a[0]) hold_on = atoi(a) != 0;
+        snprintf(out, size, "hold release %s: requests %ld, refused %ld (request call %s)", hold_on ? "on" : "OFF", (long)hold_releases, (long)hold_refused, hold_req_ok < 0 ? "not checked" : hold_req_ok ? "verified" : "REFUSED");
+    } else if (!strcmp(sub, "coll")) {   /* rel027p LAB: `cap coll` lists the collision shapes (unit+0xE84 object: array +0x2F8, count +0x304; per shape +0x120 / +0x124 = the story's PcsSetCollisionPrio values) of every captured human;
+                                          * `cap coll set <slot> <v120> [v124]` writes them on that human's shapes (A/B for the NPC walk-through, owner finding C2) */
+        int o = 0;
+        char sl[16] = "", v1[24] = "", v2[24] = "";
+        sscanf(arg, "coll %15s %23s %23s", sl, v1, v2);
+        if (!strcmp(sl, "uset")) {   /* rel027y LAB: `cap coll uset <hexaddr> <v120> <v124>` writes the values on every shape of ANY unit (the NPC in the hand-out state: 1 8) */
+            unsigned u = (unsigned)strtoul(v1, NULL, 16), co = u ? rd32(u + 0xE84) : 0, arr = co ? rd32(co + 0x2F8) : 0, cnt = co ? rd32(co + 0x304) : 0, n = 0;
+            char w1[24] = "", w2[24] = "";
+            sscanf(arg, "coll uset %*s %23s %23s", w1, w2);
+            for (unsigned k = 0; arr && k < cnt && k < 16; k++) {
+                unsigned sh = rd32(arr + 4 * k);
+                if (!sh) continue;
+                if (w1[0]) *(volatile unsigned *)(sh + 0x120) = (unsigned)strtol(w1, NULL, 0);
+                if (w2[0]) *(volatile unsigned *)(sh + 0x124) = (unsigned)strtol(w2, NULL, 0);
+                n++;
+            }
+            snprintf(out, size, "coll uset: %u shapes of unit %08x written (+0x120 %s, +0x124 %s)", n, u, w1[0] ? w1 : "-", w2[0] ? w2 : "-");
+            return;
+        }
+        if (!strcmp(sl, "unit")) {   /* rel027y LAB: `cap coll unit <hexaddr>` lists the collision shapes of ANY unit (an NPC such as O'Brien) */
+            unsigned u = (unsigned)strtoul(v1, NULL, 16), co = u ? rd32(u + 0xE84) : 0, arr = co ? rd32(co + 0x2F8) : 0, cnt = co ? rd32(co + 0x304) : 0;
+            o += snprintf(out + o, (size_t)(size - o), "unit %08x collobj %08x shapes %u:", u, co, cnt);
+            for (unsigned k = 0; arr && k < cnt && k < 12 && o < size - 120; k++) {
+                unsigned sh = rd32(arr + 4 * k);
+                o += snprintf(out + o, (size_t)(size - o), " [%u] %08x 120=%d 124=%d 11C=%08x 128=%08x;", k, sh, (int)rd32(sh + 0x120), (int)rd32(sh + 0x124), rd32(sh + 0x11C), rd32(sh + 0x128));
+            }
+            return;
+        }
+        if (!strcmp(sl, "set")) {
+            sl[0] = v1[0] = v2[0] = 0;   /* (rel027y: the first sscanf above had put "set" / v1 / v2 of a different layout in them: v2 stayed stale and +0x124 was written by mistake in npc6) */
+            sscanf(arg, "coll set %15s %23s %23s", sl, v1, v2);
+            unsigned want = (unsigned)atoi(sl), n = 0;
+            for (int i = 0; i < MAXCAP; i++) {
+                if (!caps[i].active || rd32(caps[i].unit + 0xE2C) != want) continue;
+                unsigned co = rd32(caps[i].unit + 0xE84), arr = co ? rd32(co + 0x2F8) : 0, cnt = co ? rd32(co + 0x304) : 0;
+                for (unsigned k = 0; arr && k < cnt && k < 64; k++) {
+                    unsigned sh = rd32(arr + 4 * k);
+                    if (!sh) continue;
+                    if (v1[0]) *(volatile unsigned *)(sh + 0x120) = (unsigned)strtol(v1, NULL, 0);
+                    if (v2[0]) *(volatile unsigned *)(sh + 0x124) = (unsigned)strtol(v2, NULL, 0);
+                    n++;
+                }
+            }
+            snprintf(out, size, "coll set: %u shapes of slot %u written (+0x120 %s, +0x124 %s)", n, want, v1[0] ? v1 : "-", v2[0] ? v2 : "-");
+            return;
+        }
+        for (int i = 0; i < MAXCAP; i++) {
+            if (!caps[i].active) continue;
+            unsigned u = caps[i].unit, co = rd32(u + 0xE84), arr = co ? rd32(co + 0x2F8) : 0, cnt = co ? rd32(co + 0x304) : 0;
+            o += snprintf(out + o, (size_t)(size - o), "%sslot %u unit %08x kind %u collobj %08x shapes %u:", o ? "\n" : "", rd32(u + 0xE2C), u, rd32(u + 0xE30), co, cnt);
+            for (unsigned k = 0; arr && k < cnt && k < 12 && o < size - 120; k++) {
+                unsigned sh = rd32(arr + 4 * k);
+                o += snprintf(out + o, (size_t)(size - o), " [%u] %08x 120=%d 124=%d 11C=%08x 128=%08x;", k, sh, (int)rd32(sh + 0x120), (int)rd32(sh + 0x124), rd32(sh + 0x11C), rd32(sh + 0x128));
+            }
+        }
+        if (!o) snprintf(out, size, "coll: no captured human");
+    } else if (!strcmp(sub, "collmirror")) {   /* rel027y: collmirror 0|1: the second human's collision values follow the first human's (default 1; 0 = stock, lab A/B) */
+        if (a[0]) coll_mirror_on = atoi(a) != 0;
+        snprintf(out, size, "collision mirror %s: %ld writes, %ld passes", coll_mirror_on ? "on" : "OFF", (long)coll_mirror_writes, (long)coll_mirror_frames);
     } else if (!strcmp(sub, "keep")) {   /* keep 0|1: a setKind(!= 1) on a captured human is turned into 1 (default) / allowed (lab A/B) */
         if (a[0]) keep_capture = atoi(a) != 0;
         snprintf(out, size, "keep capture %d (setKind hook %s): setKind calls on slots 0/1 seen %ld, kept %ld, allowed %ld, field fixes %ld; last reset: unit %08x kind %d caller %08x at %lu (now %lu)",
@@ -2305,6 +2893,26 @@ void capture_cmd(const char *arg, char *out, int size)
         }
         if (!strcmp(a, "cmds")) {
             ia_list_cmds(out, size);
+            return;
+        }
+        if (!strcmp(a, "ubind") && !strcmp(b, "off")) {
+            ia_sw_ubind = 0;
+            snprintf(out, (size_t)size, "ubind pass off");
+            return;
+        }
+        if (!strcmp(a, "ubind") && !strcmp(b, "on")) {
+            ia_sw_ubind = 1;
+            snprintf(out, (size_t)size, "ubind pass on");
+            return;
+        }
+        if (!strcmp(a, "ubind")) {   /* LAB: ubind <slot>: bind that unit's command now; ubind 0|1 without a slot value 2+ : the switch */
+            int v = atoi(b);
+            unsigned u = unit_by_slot((unsigned)v);
+            snprintf(out, (size_t)size, "ubind slot %d unit %08x: %d (bound total %ld)", v, u, ia_unit_bind(u), (long)ia_n_ubind);
+            return;
+        }
+        if (!strcmp(a, "ucmd")) {
+            ia_ucmd(out, size, (unsigned)atoi(b));
             return;
         }
         if (!strcmp(a, "objs")) {   /* LAB: the world objects / items with class, position, ownership and state */
@@ -2326,6 +2934,12 @@ void capture_cmd(const char *arg, char *out, int size)
             return;
         } else if (!strcmp(a, "zmask") && b[0])   /* LAB (fix026p): class mask of the zone shapes widened by the other human's class during the check (0 = off) */
             ia_sw_zmask = atoi(b) != 0;
+        else if (!strcmp(a, "ledge") && b[0])   /* rel027z: the 1-2 ledge zone is not widened for the second human (default 1; 0 = stock split behaviour) */
+            ia_sw_ledge = atoi(b) != 0;
+        else if (!strcmp(a, "uptr") && b[0])
+            ia_diag_ptr = atoi(b) != 0;
+        else if (!strcmp(a, "uown") && b[0])   /* LAB (rel027h): commands held by a human's unit belong to that human (0 = the old story / anchor rule only) */
+            ia_sw_uown = atoi(b) != 0;
         else if (!strcmp(a, "zone") && b[0])   /* LAB (fix026i): the second human triggers the story prompts (0 = the engine's class rule) */
             ia_sw_zone = atoi(b) != 0;
         else if (!strcmp(a, "central") && b[0])

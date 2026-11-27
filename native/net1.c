@@ -255,7 +255,7 @@ void net1_frame(void)
         lk_poll(g_link);
         lk_info in;
         lk_get_info(g_link, &in);
-        if (lk_mode(g_link) == L1N_HOST && lk_active(g_link) && !in.started) {   /* E12: the host's choice into the session record (only before the START: cs_set_session) */
+        if (lk_mode(g_link) == L1N_HOST && lk_active(g_link)) {   /* E12: the host's choice into the session record (before the START; pausenative: also while it plays, the pause page's Downed / revive row) */
             int want = sess_want();
             unsigned now = GetTickCount();
             if ((in.set.flags & 0xFF) != want && (want != g_sess_tried || now - g_sess_try_t > 2000u)) {

@@ -86,10 +86,15 @@ void capture_own_scope(int slot)
     }
 }
 int capture_own_effective(void) { return c_own_on ? c_own_slot : 0; }
+int capture_slot_begin(int pad, unsigned *old) { (void)pad; *old = 0; return -1; }   /* rel027s: the scope camera wrappers are not run by this harness */
+void capture_slot_end(int token, unsigned old) { (void)token; (void)old; }
 /* pad stubs */
 static int pad_swapped;
 static unsigned short pad1_buttons;
 void testmode_pad_swap(int on) { pad_swapped = on; }
+int testmode_pad_kbpad_get(void) { return 0; }   /* rel027z: split.c asks whether the keyboard + mouse + one gamepad mode is on (menu_enter) */
+void capture_set_kbx(int on) { (void)on; }
+volatile long d3d_scanbars_on = 1;   /* rel027z: split.c's `split scanbars` switch lives in d3d.c */
 static int pad_merged;
 void testmode_pad_merge(int on) { pad_merged = on; }
 int testmode_pad_swapped(void) { return pad_swapped; }
@@ -339,8 +344,8 @@ int main(void)
     pad1_buttons = 0x0020;   /* BACK on physical pad 1 */
     passes(1);
     CHECK(mx.on && pad_swapped && c_own_on && c_own_slot == 1 && crole[0].pad == 1 && crole[1].pad == 0, "pad 1 BACK: pads exchanged, own slot 1, roles flipped");
-    CHECK(R8(v2 + 0x10) == 0, "whole view from the first pass of the exchange");
-    CHECK(ar1_g.snap.on == 0, "fix023: the second human's menu (own slot flipped): the aim view is off");
+    CHECK(R8(v2 + 0x10) == 1, "rel027h: the item menu opens in his half: the split stays up from the first pass of the exchange");
+    CHECK(ar1_g.snap.on == 1, "rel027h: the second human's item menu (own slot flipped, split stays up): the aim view stays up");
     pad1_buttons = 0;
     passes(2);
     CHECK(mx.on, "no menu seen yet: exchange still open");
@@ -463,6 +468,26 @@ int main(void)
         passes(2);
         CHECK(!suspended, "fix026: the scene ended: split again");
         W32(pcs + 0x284 + 3 * 4, 0);
+        /* rel027: the same demo name that took the whole view twice within 90 s stays in the split the third time (issue #2: 13_050_0 came back 9 times; one slot unit, only its "ended" byte toggles) */
+        strcpy((char *)(size_t)(res_demo + 8), "demo\\d0\\13_050_0\\13_050_0_0_main");
+        W32(pcs + 0x284 + 3 * 4, u_demo[3]), W8(pcs + 0x1EC + 3, 1), W32(g_mgr0 + 0xCC, 4);
+        passes(1);
+        for (int ep = 1; ep <= 3; ep++) {
+            W8(pcs + 0x1EC + 3, 0);
+            passes(1);
+            Sleep(450);
+            passes(1);
+            if (ep < 3)
+                CHECK(suspended == SPLIT_SUSP_SCENE, ep == 1 ? "rel027: the demo's 1st appearance takes the whole view" : "rel027: the demo's 2nd appearance takes the whole view");
+            else
+                CHECK(!suspended && n_sc_take_supp >= 1, "rel027: the demo's 3rd appearance within 90 s stays in the split");
+            W8(pcs + 0x1EC + 3, 1);
+            Sleep(450);
+            passes(2);
+            CHECK(!suspended, "rel027: the demo ended: split again");
+        }
+        W32(pcs + 0x284 + 3 * 4, 0);
+        strcpy((char *)(size_t)(res_demo + 8), "demo\\d0\\11_020_0\\11_020_0_main");
         split_cmd("ambient 0", out, sizeof out);
         /* a background scene script with the event camera: not a cutscene */
         W32(pcs + 0x284 + 5 * 4, u_bg), W8(pcs + 0x1EC + 5, 0);

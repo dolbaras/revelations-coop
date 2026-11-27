@@ -89,6 +89,7 @@ int capture_push_remote(int pad_slot, const r1_input_t *rec, unsigned seq, unsig
 void capture_set_latch(int ms);                   /* a newly pressed remote button / trigger stays pressed at least ms (default 40): a tap shorter than one game poll is not lost */
 /* kbskip (default off): in keyboard mode the engine (FUN_0088CB10) wipes the raw data of BOTH pads and refills the current slot from the keyboard; with kbskip on the raw data of the kept
  * pads (default pad slot 1 = the partner's) is put back after the call, so the partner's pad survives and the keyboard keeps working on the current slot (kbskip1.h) */
+void capture_set_kbx(int on);                     /* rel027z: a kbpad exchange runs (the keyboard goes to pad slot 1, the real gamepad's raw block is kept); split.c sets / clears it */
 void capture_set_kbskip(int on);
 int capture_kbskip_state(void);                   /* 0 off, 1 requested (not installed), 2 on, 3 removing */
 void capture_set_kbskip_pads(unsigned mask);      /* bit k = pad slot k is kept; 2 = pad slot 1 (default), 3 = both (= no keyboard on pad 0, lab only); 0 = back to the default */
@@ -110,6 +111,9 @@ void capture_ext_request(int on);
 int capture_hooks_ready(void);
 void capture_own_scope(int slot);
 int capture_own_effective(void);
+/* rel027s: sGamePad+0x870 = pad (0 / 1) for a call that is not a character phase (the second human's scope camera); token < 0 = nothing was changed. Always pair begin / end */
+int capture_slot_begin(int pad, unsigned *old);
+void capture_slot_end(int token, unsigned old);
 /* fix022 (interact1.h): the split screen's second human operates the objects he is nearest to (doors, items, switches ...): split.c says whether both humans are local (1) or not (0);
  * capture_interact_active() = the object table is being maintained (the pickup guard then lets both humans pick up) */
 void capture_set_interact(int on, unsigned view);   /* view = the viewport (index) the other human's prompts / icons are made for, 0 = the stock one */

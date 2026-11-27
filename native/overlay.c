@@ -1087,6 +1087,24 @@ static void draw_strip(const ov_scene *sc)
     text(sc->hint, k_sx + 28, k_sy + 6, k_sw - 56, k_sh - 12, 26, 1, 0xFF000000 | (warn ? 0xF0C46E : C_TEXT), TA_CENTER_, 0.02f, TF_WRAP);
 }
 
+/* pausenative: the mod's name line of the title, top-left, clear of the stock arc and titles (virtual y 14..50) */
+static const float k_nx = 24, k_ny = 12, k_nw = 1060, k_nh = 38;
+static void banner_rect(RECT *r)
+{
+    r->left = (LONG)(g_ox + k_nx * g_scale), r->top = (LONG)(g_oy + k_ny * g_scale), r->right = (LONG)(g_ox + (k_nx + k_nw) * g_scale + 0.5f), r->bottom = (LONG)(g_oy + (k_ny + k_nh) * g_scale + 0.5f);
+    if (r->left < 0) r->left = 0;
+    if (r->top < 0) r->top = 0;
+    if (r->right > G.w) r->right = G.w;
+    if (r->bottom > G.h) r->bottom = G.h;
+}
+static void draw_banner(const ov_scene *sc)
+{
+    rect_px(k_nx, k_ny, k_nw, k_nh, 0xFF071317);
+    frame_px(k_nx, k_ny, k_nw, k_nh, 1.2f, 0xFF2E6A72);
+    rect_px(k_nx, k_ny, 4, k_nh, 0xFF000000 | C_HI);
+    text(sc->banner, k_nx + 18, k_ny, k_nw - 32, k_nh, 21, 1, 0xFF000000 | C_INFO, TA_LEFT_, 0.02f, 0);
+}
+
 static void compose(const ov_scene *sc)
 {
     g_cls = face_class(sc->lang);
@@ -1099,6 +1117,7 @@ static void compose(const ov_scene *sc)
         draw_hint(sc);
     else if (sc->kind == OV_STRIP)
         draw_strip(sc);
+    if (sc->kind != OV_LOBBY && sc->kind != OV_STRIP && sc->banner[0]) draw_banner(sc);
 }
 
 static void set_metrics(int w, int h)
@@ -1214,27 +1233,33 @@ static void gdi_frame(IDirect3DDevice9 *dev, const ov_scene *sc, UINT W, UINT H,
         sig = (sig ^ (unsigned)G.bg_shots) * 16777619u;
     } else if (sc->kind == OV_HINT || sc->kind == OV_STRIP)
         for (const char *p = sc->hint; *p; p++) sig = (sig ^ (unsigned char)*p) * 16777619u;
+    for (const char *p = sc->banner; *p; p++) sig = (sig ^ (unsigned char)*p) * 16777619u;
     sig = (sig ^ (unsigned)sc->kind) * 16777619u, sig = (sig ^ (unsigned)sc->lang) * 16777619u, sig = (sig ^ (unsigned)W) * 16777619u, sig = (sig ^ (unsigned)H) * 16777619u;
     sig = (sig ^ (unsigned)sc->strip_kind) * 16777619u;
-    RECT strip = {0, 0, G.w, G.h};
-    if (sc->kind == OV_HINT) hint_strip_rect(&strip);
-    else if (sc->kind == OV_STRIP) strip_rect(&strip);
+    RECT rs[2] = {{0, 0, G.w, G.h}, {0, 0, 0, 0}};
+    int nrs = 1;
+    if (sc->kind == OV_HINT) hint_strip_rect(&rs[0]);
+    else if (sc->kind == OV_STRIP) strip_rect(&rs[0]);
+    else if (sc->kind == OV_BANNER) banner_rect(&rs[0]);
+    if (sc->banner[0] && (sc->kind == OV_HINT)) banner_rect(&rs[nrs++]);   /* pausenative: the hint strip and the name line are two places of one scene */
     if (!G.have_sig || sig != G.sig) {
         compose(sc);
         D3DLOCKED_RECT lr;
-        RECT lk = strip;
         if (SUCCEEDED(IDirect3DSurface9_LockRect(G.sys, &lr, NULL, 0))) {
-            for (int y = lk.top; y < lk.bottom; y++)
-                memcpy((unsigned char *)lr.pBits + (size_t)y * (size_t)lr.Pitch + (size_t)lk.left * 4, G.px + (size_t)y * (size_t)G.w + (size_t)lk.left, (size_t)(lk.right - lk.left) * 4);
+            for (int k = 0; k < nrs; k++)
+                for (int y = rs[k].top; y < rs[k].bottom; y++)
+                    memcpy((unsigned char *)lr.pBits + (size_t)y * (size_t)lr.Pitch + (size_t)rs[k].left * 4, G.px + (size_t)y * (size_t)G.w + (size_t)rs[k].left, (size_t)(rs[k].right - rs[k].left) * 4);
             IDirect3DSurface9_UnlockRect(G.sys);
-            POINT pt = {lk.left, lk.top};
-            IDirect3DDevice9_UpdateSurface(dev, G.sys, &lk, G.def, &pt);
+            for (int k = 0; k < nrs; k++) {
+                POINT pt = {rs[k].left, rs[k].top};
+                IDirect3DDevice9_UpdateSurface(dev, G.sys, &rs[k], G.def, &pt);
+            }
             G.sig = sig, G.have_sig = 1;
         }
     }
-    {
-        HRESULT hr = IDirect3DDevice9_StretchRect(dev, G.def, &strip, bb, &strip, D3DTEXF_NONE);
-        if (SUCCEEDED(hr)) g_frames++;
+    for (int k = 0; k < nrs; k++) {
+        HRESULT hr = IDirect3DDevice9_StretchRect(dev, G.def, &rs[k], bb, &rs[k], D3DTEXF_NONE);
+        if (SUCCEEDED(hr) && k == 0) g_frames++;
     }
     IDirect3DSurface9_Release(bb);
 }

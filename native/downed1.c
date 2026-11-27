@@ -373,6 +373,15 @@ static void d1_net_frame(lk_t *k, uint32_t now)
         lk_add_event_cb(k, d1_on_event, NULL);
         d1_reg_link = k;
     }
+    {   /* pausenative: the host changed the rule while the game runs (the pause page's Downed / revive row): the model starts again with it, once nobody lies */
+        static unsigned d1_net_sf = 0xFFu;
+        unsigned sf_now = (unsigned)in.set.flags & 7u;
+        if (d1_netmode && d1_net_me == me && sf_now != d1_net_sf && d1_net_sf != 0xFFu && dl_state(&d1_net.d, me) != DL_DOWN && dl_state(&d1_net.d, other) != DL_DOWN) {
+            r1_log("downed1: the host changed the rule (flags %u -> %u): the model starts again with it", d1_net_sf, sf_now);
+            d1_netmode = 0;
+        }
+        if (!d1_netmode || d1_net_me != me) d1_net_sf = sf_now;
+    }
     if (!d1_netmode || d1_net_me != me) {
         unsigned sf = (unsigned)in.set.flags & 7u;   /* ep1-flow E12: the host's choice from the session record (the same on both PCs) */
         EnterCriticalSection(&d1_cs);

@@ -1055,6 +1055,24 @@ static void t_puppet_credit(void)
     CHECK(ck_fields(1, 2, 1, 0x1000, 0x1000, 1) == CK_KEEP, "fields: one field is enough");
     CHECK(ck_fields(1, 1, 1, 0x2000, 0x1000, 1) == CK_KEEP, "fields: a new uCallThink is taken and set");
     CHECK(ck_fields(2, 2, 2, 0x1000, 0x1000, 0) == CK_LOST, "fields: keep 0 leaves them (lost)");
+    /* rel027: the story's hold of a captured human */
+    CHECK(ck_hold_release(1, 1, 1, 0, 500, 100000) == 1, "hold: EventWaitState during the story's ThinkOff in the play view, after the grace: MoveState is asked");
+    CHECK(ck_hold_release(1, 1, 1, 3, 500, 100000) == 1 && ck_hold_release(1, 1, 1, 2, 500, 100000) == 1 && ck_hold_release(1, 1, 1, 4, 500, 100000) == 1, "hold: the standing waits too");
+    CHECK(ck_hold_release(1, 1, 1, 0, 300, 100000) == 0, "hold: not before the grace time");
+    CHECK(ck_hold_release(1, 1, 1, 0, 500, 500) == 0 && ck_hold_release(1, 1, 1, 0, 500, 1000) == 1, "hold: a request at most every second");
+    CHECK(ck_hold_release(1, 1, 1, 5, 5000, 100000) == 0, "hold: MoveState is free already");
+    CHECK(ck_hold_release(1, 1, 1, 17, 5000, 100000) == 0 && ck_hold_release(1, 1, 1, -1, 5000, 100000) == 0, "hold: an interaction / hit / unknown state is never touched");
+    CHECK(ck_hold_release(1, 0, 1, 0, 5000, 100000) == 0, "hold: without the story's ThinkOff on him nothing is touched (the interactions' own waits)");
+    CHECK(ck_hold_release(1, 1, 0, 0, 5000, 100000) == 0, "hold: not in a movie / scene camera / pause view");
+    CHECK(ck_hold_release(0, 1, 1, 0, 5000, 100000) == 0, "hold: switched off (lab A/B)");
+    CHECK(ck_unlock_wanted(1, 0x4000008e, 1, 0, 1, 1, 100000) == 1, "unlock: the second human locked by the story (E1C bit 2) in the play view");
+    CHECK(ck_unlock_wanted(1, 0x4000008a, 1, 0, 1, 1, 100000) == 0, "unlock: no lock bit (the plain ThinkOff hold): nothing is touched");
+    CHECK(ck_unlock_wanted(1, 0x4000008e, 0, 0, 1, 1, 100000) == 0, "unlock: never the own human");
+    CHECK(ck_unlock_wanted(1, 0x4000008f, 1, 0, 1, 1, 100000) == 0, "unlock: never a dead one");
+    CHECK(ck_unlock_wanted(1, 0x4000008e, 1, 0, 2, 1, 100000) == 0, "unlock: only a human (kind 1)");
+    CHECK(ck_unlock_wanted(1, 0x4000008e, 1, 0, 1, 0, 100000) == 0, "unlock: not in a movie / scene camera / pause view");
+    CHECK(ck_unlock_wanted(1, 0x4000008e, 1, 0, 1, 1, 400) == 0 && ck_unlock_wanted(1, 0x4000008e, 1, 0, 1, 1, 500) == 1, "unlock: at most every 500 ms");
+    CHECK(ck_unlock_wanted(0, 0x4000008e, 1, 0, 1, 1, 100000) == 0, "unlock: switched off (lab A/B)");
 }
 
 /* rev1 live 10 (task 2): the barn key's SF 4864. AddItem calls FUN_00721F90(code, 1), which stores a key item's flag (rKeyItem table of game\episode\setup:

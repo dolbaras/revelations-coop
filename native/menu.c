@@ -157,6 +157,15 @@ void menu_test_set_native(unsigned sgui_ptr_va, void *additem) { g_sgui_ptr_va =
 
 static void open_lobby(void);
 static void close_lobby(const char *why);
+static volatile int g_pg;                  /* pausenative: the open page is the pause menu's Co-Op Play page (not the title lobby) */
+static volatile int g_np_req, g_np_active; /* rel027m: the native page (optpage.inc) is requested / open: the stock Options page shows the model's rows, the overlay stays off */
+static int np_begin(unsigned pause);
+static void np_end(const char *why);
+static unsigned g_np_mgr_tick;
+static void pz_fill_env(l1_env *env);
+static void pz_request(int req, const char *why);
+static void pz_sync(unsigned now);
+static void pz_frame(unsigned now);
 static int detect_lang(void);
 
 static int wr32m(unsigned a, unsigned v)
@@ -474,6 +483,24 @@ static void kbpad_apply(int on)
     }
 }
 
+/* kbpad: the game gives Pad[k] the first connected XInput user and KEEPS it (sPad_ScanPad: only a Pad that was released scans again). With the pad exchange on and one real gamepad (the owner's ini
+ * had pads=swapped before the lobby changed it to the keyboard row, 2026-11-24 00:18..00:30) the real pad showed up as game user 1, so Pad[0] (= player 1 = the keyboard's slot) took user 1. When the mapping
+ * then turned kbpad on (user 0 = neutral, user 1 = the real pad) both users stayed connected, nothing was released: Pad[0] kept user 1 = the REAL pad and the neutral user went to Pad[1]: the gamepad
+ * drove player 1 together with the keyboard, player 2 had no input. While kbpad is on every XInput Pad must stand on its own index (Pad[k].user = k, kind byte +7 = 4). */
+static unsigned g_kbfix_n;
+static void kbpad_users_fix(void)
+{
+    unsigned gp = rd32(R1_GAMEPAD_PTR);
+    if (!gp || !testmode_pad_kbpad_get()) return;
+    for (unsigned k = 0; k < 2; k++) {
+        unsigned pb = gp + 0x3C + 0x2CCu * k;
+        unsigned kind = (rd32(pb + 4) >> 24) & 0xFFu, user = rd32(pb + 0x10);
+        if (kind == 4 && user != k && wr32m(pb + 0x10, k)) {
+            if (++g_kbfix_n <= 6) r1_log("kbpad: Pad[%u] (XInput) stood on game user %u (a pad exchange before): set to user %u, so the neutral user 0 is player 1's and the real gamepad is player 2's", k, user, k);
+        }
+    }
+}
+
 /* ---------------------------------------------------------------- applying the settings to the engines */
 static void menu_apply(const char *why)
 {
@@ -667,6 +694,7 @@ static void lobby_request(const char *why)
 {
     int req = l1_take_request(g_lobby);
     if (req == L1R_CLOSE) close_lobby(why);
+    else if (req == L1R_P_RESTART || req == L1R_P_END || req == L1R_P_LEAVE || req == L1R_P_P2) pz_request(req, why);
     else if (req == L1R_NET_START || req == L1R_NET_STOP || req == L1R_NET_KICK || req == L1R_NET_INVITE) net_request(req);
 }
 
@@ -761,6 +789,7 @@ static void fill_env(l1_env *env, int pads)
         snprintf(env->friend_name[i], sizeof env->friend_name[i], "%s", g_fr_name[i]);
         snprintf(env->friend_id[i], sizeof env->friend_id[i], "%s", g_fr_id[i]);
     }
+    if (g_pg) pz_fill_env(env);
     capture_state_t cs;
     capture_get_state(&cs);
     char cn[2][80];
@@ -803,12 +832,19 @@ static void close_lobby(const char *why)
     l1_settings s;
     l1_settings_get(g_lobby, &s);
     int changed = memcmp(&s, &g_set, sizeof s) != 0;
+    int native = g_np_req || g_np_active;
     g_set = s;
-    g_closing = 1;
+    g_closing = native ? 0 : 1;   /* (the native page's keys were read by the stock handler: nothing of them reaches the panel) */
     g_close_ms = GetTickCount();
     g_quiet = 0;
     g_open = 0;
     publish(NULL);
+    if (g_pg) {   /* pausenative: the pause page applied its changes live (pz_sync, pz_request); only the file is written */
+        if (changed) l1_ini_save(g_ini_path, &g_set, g_lang_override);
+        g_pg = 0;
+        r1_log("menu: pause page closed (%s)%s", why, changed ? ", settings saved" : "");
+        return;
+    }
     if (changed || g_applied_armed < 0 || g_applied_armed != g_set.armed) {
         l1_ini_save(g_ini_path, &g_set, g_lang_override);
         menu_apply(why);
@@ -1110,11 +1146,13 @@ static void menu_frame(void)
         return;
     }
     if (g_open) {
-        if (!seen && now - g_gm_tick > 1500 && now - g_opened_ms > 1500) {   /* the title menu is gone (a test opened the lobby elsewhere is left alone for a while) */
+        if (!g_pg && !seen && now - g_gm_tick > 1500 && now - g_opened_ms > 1500) {   /* the title menu is gone (a test opened the lobby elsewhere is left alone for a while) */
             if (g_gm_this) close_lobby("title menu gone");
         }
+        if (g_pg) pz_sync(now);
         l1_event mev[4];
-        int mn = mouse_events(mev, 4, now);
+        int mn = g_np_req || g_np_active ? 0 : mouse_events(mev, 4, now);
+        if (g_np_req || g_np_active) n = 0;   /* the native page reads the pad and the mouse itself (np_handler) */
         for (int i = 0; i < n; i++) {
             l1_event_in(g_lobby, &ev[i]);
             g_events++;
@@ -1148,6 +1186,7 @@ static void menu_frame(void)
             l1_net_set_host_flags(g_lobby, hf);
         }
     }
+    pz_frame(now);
     /* what to draw */
     l1_strip_in strip;
     session_watch(idle, &strip);
@@ -1155,7 +1194,9 @@ static void menu_frame(void)
         r1_log("menu: a network session runs while the split screen was armed: the split is switched off");
         menu_apply("network session");
     }
-    if (g_open) {
+    if (g_open && (g_np_req || g_np_active)) {
+        publish(NULL);   /* the native page is drawn by the game itself */
+    } else if (g_open) {
         static ov_scene sc;
         memset(&sc, 0, sizeof sc);
         sc.kind = OV_LOBBY;
@@ -1181,6 +1222,14 @@ static void menu_frame(void)
         sc.kind = OV_HINT;
         sc.lang = env.lang;
         l1_hint_text(&g_set, &env, sc.hint, sizeof sc.hint);
+        snprintf(sc.banner, sizeof sc.banner, "%s %s - %s", R1_PRODUCT, R1_VERSION, R1_URL);   /* pausenative: the mod's name, version and address at the title */
+        publish(&sc);
+    } else if (title_area()) {   /* the press-start screen of the title: the name line alone */
+        static ov_scene sc;
+        memset(&sc, 0, sizeof sc);
+        sc.kind = OV_BANNER;
+        sc.lang = detect_lang();
+        snprintf(sc.banner, sizeof sc.banner, "%s %s - %s", R1_PRODUCT, R1_VERSION, R1_URL);
         publish(&sc);
     } else
         publish(NULL);
@@ -1190,8 +1239,223 @@ static void menu_frame(void)
     split_state_t ss;
     split_get_state(&ss);
     kbpad_apply(g_applied_armed == 1 && g_set.armed && g_set.pads_kb && !(cs.blocked || ss.blocked));   /* kbpad: like the exchange, never outside the campaign (Raid) */
+    kbpad_users_fix();
     if (g_set.armed && g_set.pads_swapped && (cs.blocked || ss.blocked)) testmode_pad_swap_base(0);
     else if (g_set.armed && g_set.pads_swapped && !testmode_pad_swap_base_get()) testmode_pad_swap_base(1);
+}
+
+/* ---------------------------------------------------------------- the pause menu's native "Co-Op Play" row (pausenative; notes\pause-native.md)
+ * The stock pause panel is uGUI_PauseHD (vtable 0x10896C0, update = slot 8 0x80E1E0) with three authored row nodes (Restart / Options / Quit = kinds 0 / 1 / 2): a fourth row does not
+ * exist in its GUI file. While a co-op game is on (a started network session, or the local split screen), the FIRST row is the game's own node with our label and help (the message
+ * table of bank 3 = cockpit_<lang>.gmd, ids 13 / 17: the same trick as the title row) and its decide opens our page instead of the stock "Restart?" popup; the page has the restart
+ * (the stock popup, state 8) as a row of its own. The stock update is not run while the page is open. */
+#define PZ_VTABLE 0x10896C0u
+#define PZ_VF8_ORIG 0x80E1E0u
+#define PZ_VF8_BYTES 8
+#define PZ_OPEN 0x148               /* bit 0: the panel is open */
+#define PZ_STATE 0x288              /* state machine: 3 = idle, 7 -> 8 = the Restart row was decided, 0xE = Quit popup */
+#define PZ_CLOSE_REQ 0x28C
+#define PZ_CANCEL_PEND 0x28F
+#define PZ_CURSOR 0x294
+#define PZ_KINDS 0x298
+#define PZ_COUNT 0x2A4
+#define PZ_BANK 3
+#define PZ_MSG_LABEL 13             /* cockpit message "restart" */
+#define PZ_MSG_HELP 17              /* cockpit message "restart_txt" */
+static unsigned g_pz_vt = PZ_VTABLE, g_pz_expect = PZ_VF8_ORIG;
+void menu_test_set_pause(unsigned vtable, unsigned expect_orig) { g_pz_vt = vtable, g_pz_expect = expect_orig; }
+static vf8_t orig_pz_vf8;
+static int g_pz_installed;
+static volatile unsigned g_pz_this, g_pz_tick;
+static unsigned g_pz_calls, g_pz_decides, g_pz_opens, g_pz_texts;
+static int g_pz_split_seen;                /* the local split screen was on in this game run (the row stays after Player 2 is switched off, so that he can be switched on again) */
+static unsigned g_pz_tab, g_pz_orig_label, g_pz_orig_help;   /* the message table and the stock pointers we replaced */
+static char g_pz_label[128], g_pz_help[192];
+static int g_pz_goto;                      /* after the page closed: 8 = the stock Restart popup, 0xE = the stock Quit popup (0 none) */
+static unsigned g_pz_p2_wait;              /* Player 2 on: waits for a safe moment (tick | 1, 0 none) */
+static int g_pz_row_on;
+
+/* a co-op game is on: the row is wanted */
+static int pz_row_wanted(void)
+{
+    if (net1_session_active()) return 1;
+    if (g_applied_armed == 1) g_pz_split_seen = 1;
+    return g_pz_split_seen != 0;
+}
+
+static void pz_texts(int on)
+{
+    unsigned sg = rd32(g_sgui_ptr_va), res = sg ? rd32(sg + 0x108 + 4 * PZ_BANK) : 0, tab = res ? rd32(res + 0x98) : 0, n = res ? rd32(res + 0x88) : 0;
+    if (!tab || n <= PZ_MSG_HELP) return;
+    if (on) {
+        int lang = detect_lang();
+        snprintf(g_pz_label, sizeof g_pz_label, "%s", l1_text(L1T_ROW_LABEL, lang));
+        snprintf(g_pz_help, sizeof g_pz_help, "%s", l1_text(L1T_PA_ROWHELP, lang));
+        if (g_pz_tab != tab) g_pz_tab = tab, g_pz_orig_label = rd32(tab + 4 * PZ_MSG_LABEL), g_pz_orig_help = rd32(tab + 4 * PZ_MSG_HELP);
+        if (rd32(tab + 4 * PZ_MSG_LABEL) != (unsigned)(size_t)g_pz_label || rd32(tab + 4 * PZ_MSG_HELP) != (unsigned)(size_t)g_pz_help) {
+            wr32m(tab + 4 * PZ_MSG_LABEL, (unsigned)(size_t)g_pz_label), wr32m(tab + 4 * PZ_MSG_HELP, (unsigned)(size_t)g_pz_help);
+            g_pz_texts++;
+            r1_log("menu: pause row texts set (table %08x): \"%s\" / \"%s\" (the stock pointers were %08x / %08x)", tab, g_pz_label, g_pz_help, g_pz_orig_label, g_pz_orig_help);
+        }
+    } else if (g_pz_tab == tab && g_pz_orig_label) {
+        if (rd32(tab + 4 * PZ_MSG_LABEL) == (unsigned)(size_t)g_pz_label) wr32m(tab + 4 * PZ_MSG_LABEL, g_pz_orig_label);
+        if (rd32(tab + 4 * PZ_MSG_HELP) == (unsigned)(size_t)g_pz_help) wr32m(tab + 4 * PZ_MSG_HELP, g_pz_orig_help);
+    }
+}
+
+static void open_pause_page(unsigned s)
+{
+    if (g_open) return;
+    l1_env env;
+    l1_raw raw;
+    int pads;
+    g_pg = 1;
+    read_raw(&raw, &pads, 1);
+    fill_env(&env, pads);
+    load_stock(env.lang);
+    if (!g_lobby) g_lobby = l1_new();
+    l1_open(g_lobby, &g_set, &env);
+    if (g_net_rows) net1_attach_lobby(g_lobby);
+    l1_input_reset(&g_in);   /* the decide that opened the page is still down: the first poll only learns what is held */
+    g_opened_ms = GetTickCount();
+    g_open = 1;
+    g_pz_opens++;
+    r1_log("menu: pause page opened (pause object %08x state %d cursor %d)", s, (int)rd32(s + PZ_STATE), (int)rd32(s + PZ_CURSOR));
+}
+
+/* the pause update: the stock one, except while the page is open (frozen) and for the decide of the first row */
+static void __attribute__((fastcall)) hook_pz_vf8(void *self)
+{
+    unsigned s = (unsigned)(size_t)self;
+    g_pz_calls++;
+    g_pz_this = s, g_pz_tick = GetTickCount();
+    int open = (rd32(s + PZ_OPEN) & 1) != 0, count = (int)rd32(s + PZ_COUNT);
+    int wanted = open && count == 3 && rd32(s + PZ_KINDS) == 0 && pz_row_wanted();
+    if (wanted != g_pz_row_on) {
+        g_pz_row_on = wanted;
+        r1_log("menu: pause row %s (open %d, rows %d, kind0 %u, session %d, split seen %d)", wanted ? "ON" : "off", open, count, rd32(s + PZ_KINDS), net1_session_active(), g_pz_split_seen);
+    }
+    pz_texts(wanted);
+    if (g_np_active && GetTickCount() - g_np_mgr_tick > 2500) np_end("the options manager is gone");
+    if (g_open && g_pg && !(g_np_req || g_np_active)) return;       /* the page is open: the stock panel stays as it is under it (the native page IS the stock Options flow: the panel runs on) */
+    if (g_closing) return;            /* the page was just closed: the closing key must not reach the panel */
+    if (g_pz_goto && open && (int)rd32(s + PZ_STATE) == 3) {   /* the page's Restart / Leave: the stock popup */
+        *(volatile unsigned char *)(s + PZ_CLOSE_REQ) = 0;      /* (the close request and the cancel flag of the closing key stay clear) */
+        *(volatile unsigned char *)(s + PZ_CANCEL_PEND) = 0;
+        wr32m(s + PZ_STATE, (unsigned)g_pz_goto);
+        r1_log("menu: pause page: the stock %s popup (state %d)", g_pz_goto == 8 ? "Restart" : "Quit", g_pz_goto);
+        g_pz_goto = 0;
+    }
+    unsigned st0 = rd32(s + PZ_STATE);
+    orig_pz_vf8(self);
+    if (!wanted) return;
+    unsigned st1 = rd32(s + PZ_STATE);
+    int cur = (int)rd32(s + PZ_CURSOR);
+    if (st0 == 7 && st1 == 8 && cur >= 0 && cur < 3 && rd32(s + PZ_KINDS + 4 * (unsigned)cur) == 0) {   /* the first row (kind 0 = Restart) was decided: it is Co-Op Play now */
+        g_pz_decides++;
+        if (np_begin(s)) return;      /* rel027m: the stock Options page with the model's rows (optpage.inc) */
+        wr32m(s + PZ_STATE, 2);       /* state 2 sets the row animations again and goes back to idle (3) by itself */
+        open_pause_page(s);
+    }
+}
+
+static void pz_fill_env(l1_env *env)
+{
+    env->in_game = 1;
+    env->p_native = g_np_req || g_np_active;
+    snprintf(env->url, sizeof env->url, "%s", R1_URL);
+    snprintf(env->version, sizeof env->version, "%s", R1_VERSION);
+    snprintf(env->product, sizeof env->product, "%s", R1_PRODUCT);
+    lk_t *k = net1_link_peek();
+    lk_info in;
+    memset(&in, 0, sizeof in);
+    int net = k && lk_mode(k) != L1N_OFF && net1_session_active();
+    if (net) {
+        lk_get_info(k, &in);
+        env->p_net = in.host ? 1 : 2;
+        env->p_connected = lk_state(k) == L1NS_CONNECTED;
+        snprintf(env->p_peer, sizeof env->p_peer, "%s", in.peer_name[0] ? in.peer_name : in.last_peer);
+    }
+    split_state_t ss;
+    split_get_state(&ss);
+    env->p_split_on = ss.requested && ss.active;
+    env->p_split_ok = !net && (g_applied_armed == 1 || g_pz_split_seen);
+    env->p_safe = ss.suspended == SPLIT_SUSP_NONE;
+}
+
+/* the page's changes act at once: layout, pads and the downed rule are read each frame from the model (the same calls the title lobby makes when it closes) */
+static void pz_sync(unsigned now)
+{
+    (void)now;
+    l1_settings cur;
+    l1_settings_get(g_lobby, &cur);
+    if (cur.layout != g_set.layout) split_set_layout(cur.layout == L1_LAYOUT_TOPBOTTOM ? SPLIT_TOP_BOTTOM : SPLIT_SIDE_BY_SIDE);
+    g_set.layout = cur.layout, g_set.pads_swapped = cur.pads_swapped, g_set.pads_kb = cur.pads_kb, g_set.downed = cur.downed;
+}
+
+static void pz_request(int req, const char *why)
+{
+    (void)why;
+    if (req == L1R_P_RESTART) {
+        g_pz_goto = 8;
+        close_lobby("pause page: restart");
+    } else if (req == L1R_P_LEAVE) {
+        g_pz_goto = 0xE;
+        close_lobby("pause page: leave");
+    } else if (req == L1R_P_END) {
+        r1_log("menu: pause page: the host ends co-op (the link is stopped, the game goes on alone)");
+        net1_stop();
+        close_lobby("pause page: end co-op");
+    } else if (req == L1R_P_P2) {
+        l1_settings cur;
+        l1_settings_get(g_lobby, &cur);
+        g_set.armed = cur.armed;
+        if (!cur.armed) {   /* off: at once (the AI takes his character back) */
+            g_pz_p2_wait = 0;
+            menu_apply("pause page: second player off");
+        } else
+            g_pz_p2_wait = GetTickCount() | 1;   /* on: at the next safe moment (pz_frame) */
+        l1_ini_save(g_ini_path, &g_set, g_lang_override);
+    }
+}
+
+/* once per pass: the pending Player 2 (page closed, pause closed, a level; the split module itself keeps the whole view in a scene / solo part) */
+static void pz_frame(unsigned now)
+{
+    if (g_pz_p2_wait && !g_open && !g_closing && level_present() && !(rd32(g_pz_this + PZ_OPEN) & 1)) {
+        split_state_t ss;
+        split_get_state(&ss);
+        if (!ss.blocked && now - g_pz_p2_wait > 1000) {
+            g_pz_p2_wait = 0;
+            menu_apply("pause page: second player on");
+        }
+    }
+}
+
+#include "optpage.inc"
+
+static int install_pause(void)
+{
+    unsigned cur = rd32(g_pz_vt + 4 * GM_VF8_SLOT);
+    unsigned char b[PZ_VF8_BYTES];
+    static const unsigned char expect[PZ_VF8_BYTES] = {0x51, 0x53, 0x55, 0x56, 0x57, 0x8B, 0xF1, 0xE8};
+    if (cur != g_pz_expect) {
+        r1_log("menu: pause row: uGUI_PauseHD vtable slot 8 is %08x, expected %08x: the pause row stays off", cur, g_pz_expect);
+        return 0;
+    }
+    if (g_pz_expect == PZ_VF8_ORIG && (!r1_safe_read((void *)(uintptr_t)cur, b, sizeof b) || memcmp(b, expect, sizeof b))) {
+        r1_log("menu: pause row: the first bytes of the pause update %08x are not the expected ones: the pause row stays off", cur);
+        return 0;
+    }
+    orig_pz_vf8 = (vf8_t)cur;
+    void *fake = (void *)g_pz_vt;
+    if (!r1_patch_vtable(&fake, GM_VF8_SLOT, (void *)hook_pz_vf8)) {
+        r1_log("menu: pause row: cannot patch the vtable slot");
+        return 0;
+    }
+    g_pz_installed = 1;
+    r1_log("menu: pause row ready (uGUI_PauseHD update %08x wrapped)", cur);
+    return 1;
 }
 
 /* ---------------------------------------------------------------- install */
@@ -1259,6 +1523,8 @@ void menu_install(void)
     } else if (!install_act_detour()) {
         g_row_enabled = 0;   /* never add a row whose decide nobody catches */
     }
+    if (r1_env("REV1_PAUSEROW", v, sizeof v) && v[0] == '0') r1_log("menu: pause row disabled by REV1_PAUSEROW=0");
+    else if (install_pause()) np_install();
     lt_add_frame_cb(menu_frame);
     g_installed = 1;
     r1_log("menu: ready (settings file %s%s; armed %d role %s layout %s pads %s)", g_ini_path, ini_found ? "" : " - not there yet", g_set.armed, g_set.role == L1_PARTNER ? "partner" : "lead",
@@ -1307,6 +1573,21 @@ void menu_cmd(const char *arg, char *out, int size)
     } else if (!strcmp(sub, "close")) {
         close_lobby("console");
         snprintf(out, (size_t)size, "lobby closed");
+    } else if (!strcmp(sub, "pause")) {   /* pausenative: the pause row's state */
+        unsigned o = g_pz_this;
+        snprintf(out, (size_t)size, "pause row: %s, wanted %d, update calls %u (last %d ms ago), object %08x open %u state %d cursor %d rows %d kind0 %d, decides %u, pages opened %u, texts set %u, page %s, goto %d, player 2 wait %u, split seen %d, session %d",
+                 g_pz_installed ? "installed" : "NOT installed", g_pz_row_on, g_pz_calls, o ? (int)(GetTickCount() - g_pz_tick) : -1, o, o ? rd32(o + PZ_OPEN) & 1 : 0, o ? (int)rd32(o + PZ_STATE) : -1,
+                 o ? (int)rd32(o + PZ_CURSOR) : -9, o ? (int)rd32(o + PZ_COUNT) : -1, o ? (int)rd32(o + PZ_KINDS) : -1, g_pz_decides, g_pz_opens, g_pz_texts, g_open && g_pg ? "OPEN" : "closed", g_pz_goto,
+                 g_pz_p2_wait, g_pz_split_seen, net1_session_active());
+    } else if (!strcmp(sub, "np")) {   /* rel027m: the native page's state */
+        unsigned mg = g_np_last_mgr, me = g_np_last_menu;
+        snprintf(out, (size_t)size, "native page: %s, requested %d, open %d, kind %d, manager %08x (calls %u) state %d, menu %08x active %d kind %d cursor %d count %d, handler calls %u, opens %u, closes %u, slot %08x was %08x, leaving %d, texts age %u, handler %08x",
+                 g_np_installed ? "installed" : "NOT installed", g_np_req, g_np_active, g_np_kind, mg, g_np_mgr_calls, mg ? (int)rd32(mg + OM_STATE) : -1, me, me ? rd8m(me + OP_ACTIVE) : -1, me ? (int)rd32(me + OP_KIND) : -1,
+                 me ? (int)rd32(me + OP_CURSOR) : -1, me ? (int)rd32(me + OP_COUNT) : -1, g_np_calls, g_np_opens, g_np_closes, g_np_slot, g_np_old_fn, g_np_leaving, g_np_age, (unsigned)(uintptr_t)np_handler);
+    } else if (!strcmp(sub, "npkind")) {   /* rel027m LAB: the page kind of the next native page (0 Controls layout, six rows; 2 Game layout, four rows) */
+        int k = atoi(rest);
+        if (k == 0 || k == 2) g_np_kind = k;
+        snprintf(out, (size_t)size, "native page kind %d", g_np_kind);
     } else if (!strcmp(sub, "view")) {
         view_text(out, size);
     } else if (!strcmp(sub, "ev")) {

@@ -31,7 +31,8 @@
 #define SC_GIVE_POLL_MS 500u
 #define SC_X_QUIET 8                  /* passes without any Genesis use before the exchange ends */
 #define SC_X_GUARD_MS 600000u         /* a safety net only: a player may walk around with the scanner for minutes (sc1s4: 2 min ended a scan in use) */
-#define SC_X_COOLDOWN_MS 1000u        /* after an exchange ended, the next one may start */
+#define SC_X_START_MS 1500u           /* rel027z: the shortest exchange while the Genesis button is held */
+#define SC_X_COOLDOWN_MS 200u         /* after an exchange ended, the next one may start (rel027z: was 1000: a second press inside that second ran his Genesis in the stock mode, no exchange, and the exchange then began in the middle of it) */
 
 /* ---------------------------------------------------------------- G: who gets a Genesis */
 typedef struct {
@@ -108,6 +109,7 @@ typedef struct {
     int p2_view;        /* his scan view flag (+0xF44 bit 0x20000) */
     int gui_open;       /* the scanner GUI runs */
     int story_camera;   /* a cutscene / event camera holds viewport 0: the story takes over, the normal layout comes back at once */
+    int p2_hold;        /* rel027z: his Genesis button is still held (the exchange does not end during the start-up of the Genesis state) */
 } sc_leave_in;
 
 static inline void sc_x_begin(sc_x_t *x, uint32_t now)
@@ -120,6 +122,13 @@ static inline int sc_x_want_leave(sc_x_t *x, const sc_leave_in *in, uint32_t now
     if (!x->on) return 0;
     if (!in->p2_present || in->story_camera) return 1;
     if (now - x->t_begin > SC_X_GUARD_MS) return 1;
+    /* rel027z (zq_2 live, 01:42:12: three exchanges of 140 ms each within 0.7 s, own slot and layout bytes flipping back and forth): the Genesis state of the second human needs about 0.7 s after the
+     * press to show (his F44 / aim flag are up, the upper state is not the Genesis one yet), the quiet counter ended the exchange after 8 passes and the held button started it again. While the button is
+     * held the exchange lives for SC_X_START_MS at least. */
+    if (in->p2_hold && now - x->t_begin < SC_X_START_MS) {
+        x->quiet = 0;
+        return 0;
+    }
     if (in->p2_genesis || in->p2_view || in->gui_open) {
         x->quiet = 0;
         return 0;

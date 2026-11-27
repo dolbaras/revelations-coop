@@ -2,7 +2,9 @@
 #define R1_H
 #include <windows.h>
 
-#define R1_VERSION "0.2.6"
+#define R1_VERSION "0.2.7"
+#define R1_PRODUCT "Resident Evil Revelations Co-op"   /* pausenative: the mod's name, shown with the version at the title and on the pause page */
+#define R1_URL "github.com/dolbaras/revelations-coop"
 
 /* The Steam build 13298487 exe (SHA-256 of rerev.exe on disk, lower case). Any other exe: the proxy only forwards DirectInput8Create. */
 #if defined(__has_include)

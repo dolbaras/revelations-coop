@@ -62,6 +62,19 @@ enum l1_text {
     L1T_DOWN_PARTNER,       /* the partner is down: how to help */
     L1T_LEASH_FAR,          /* fix026g: "Wait for your partner: you are too far apart." */
     L1T_LEASH_GATE,         /* fix026g: "Your partner was brought to you before the next scene." */
+    /* pausenative (2026-11-24): the page behind the native "Co-Op Play" row of the stock pause menu (our wording, not read by native speakers) */
+    L1T_PA_ROWHELP,         /* the one-line help under the pause menu row */
+    L1T_PA_PLAYERS,         /* "Players" */
+    L1T_PA_P2,              /* "Second player" (split screen: on / off) */
+    L1T_PA_END,             /* host: "End co-op and play on alone" */
+    L1T_PA_LEAVE,           /* guest: "Leave the session" */
+    L1T_PA_SAFE,            /* status: the second player joins at a safe moment (no scene, no menu, no solo part) */
+    L1T_PA_NOGUESTRULE,     /* status of a guest: the rules are the host's */
+    L1T_PA_INPUT,           /* "Input device" */
+    /* rel027m: the three values of the Input device row in the stock Options page's value cell (short; our wording) */
+    L1T_NP_PADS_NORMAL,     /* two gamepads */
+    L1T_NP_PADS_SWAPPED,    /* the two gamepads exchanged */
+    L1T_NP_PADS_KB,         /* keyboard + mouse for player 1, one gamepad for player 2 */
     L1T_COUNT
 };
 /* the game's own strings (Coop_<lang>.gmd, the Raid mode's online texts, in all 13 languages) that the network lobby quotes: menu.c loads them for the running language
@@ -82,6 +95,9 @@ enum l1_stock {
     /* ep1-flow: from other banks of the game (l1_stock_banks) */
     L1K_OFF,           /* option_<lang>.gmd game_setting_menu_01_02 "Off" (the options menu's word): the Downed / revive row's "rule off" */
     L1K_EPISODE1,      /* campaign_<lang>.gmd episode_01 "Episode 1": the strip at the end of Episode 1 */
+    /* pausenative: the stock pause menu's own words (cockpit_<lang>.gmd): the restart row of the page */
+    L1K_RESTART,       /* restart "Restart" */
+    L1K_RESTART_TXT,   /* restart_txt "Restart game from last checkpoint." */
     L1K_COUNT
 };
 extern const char *const l1_stock_labels[L1K_COUNT];    /* the GMD labels */
@@ -149,6 +165,17 @@ typedef struct {
     int n_friends;          /* rel010: Steam friends in the game with a lobby right now (the Join + Steam friends row), filled by the glue about once a second */
     char friend_name[L1_FRIENDS][40];
     char friend_id[L1_FRIENDS][24];   /* SteamID64 as digits: what the row puts into join_addr */
+    /* pausenative: the page of the pause menu (in_game = 1) */
+    char version[24];       /* the mod's version (r1.h R1_VERSION, one constant): the page's first line */
+    char product[48];       /* the mod's name (r1.h R1_PRODUCT) */
+    char url[64];           /* rel027m: the mod's GitHub address (r1.h R1_URL), the help line of the version row of the native page */
+    int p_native;           /* rel027m: the page is the stock Options page (menu.c np_*): no Players row, no Done row (B leaves), at most 6 rows */
+    int p_net;              /* 0 no network session, 1 this PC hosts, 2 this PC joined */
+    int p_connected;        /* the partner is connected right now */
+    char p_peer[40];        /* the partner's name ("" unknown) */
+    int p_split_on;         /* the local split screen is requested (Player 2 is on) */
+    int p_safe;             /* 1 = a safe moment for switching Player 2 on now (gameplay, no scene / menu / solo part) */
+    int p_split_ok;         /* 1 = the split screen can be offered (a campaign section with two humans possible) */
     int coop_role1;         /* rev1 live 16: the role recorded with this PC's co-op save + 1 (1 lead, 2 partner; 0 = no co-op save of a network game): a host's room says
                              * that Continue plays these characters */
 } l1_env;
@@ -192,7 +219,8 @@ typedef struct {
     int net_status_kind;             /* L1S_* */
 } l1_view;
 
-enum { L1R_NONE = 0, L1R_CLOSE, L1R_NET_START, L1R_NET_STOP, L1R_NET_KICK, L1R_NET_INVITE };   /* INVITE: the Steam way's "Invite a friend" */   /* NET_*: the glue starts / stops the link with the settings (settings.net_mode, join_addr), KICK removes the partner */
+enum { L1R_NONE = 0, L1R_CLOSE, L1R_NET_START, L1R_NET_STOP, L1R_NET_KICK, L1R_NET_INVITE,
+       L1R_P_RESTART, L1R_P_END, L1R_P_LEAVE, L1R_P_P2 /* pausenative: the pause page's requests: the stock restart, host ends co-op, guest leaves, Player 2 on / off (settings.armed) */ };   /* INVITE: the Steam way's "Invite a friend" */   /* NET_*: the glue starts / stops the link with the settings (settings.net_mode, join_addr), KICK removes the partner */
 
 /* the exclusive mode of the Mode row (lobby-must): Off, local split screen, or one human per PC over the network. Stored as settings.armed (split) and settings.net_mode. */
 enum { L1M_OFF = 0, L1M_SPLIT = 1, L1M_HOST = 2, L1M_JOIN = 3 };

@@ -12,12 +12,13 @@
 
 #include "lobby1.h"
 
-enum { OV_NONE = 0, OV_LOBBY = 1, OV_HINT = 2, OV_STRIP = 3 };
+enum { OV_NONE = 0, OV_LOBBY = 1, OV_HINT = 2, OV_STRIP = 3, OV_BANNER = 4 /* pausenative: only the mod's name line at the top-left (the title's press-start screen) */ };
 
 typedef struct {
     int kind;            /* OV_* */
     l1_view v;           /* OV_LOBBY */
     char hint[400];      /* OV_HINT: one line at the bottom edge; OV_STRIP (lobby-must): the in-game strip at the top edge (two lines at most, in levels and at the title) */
+    char banner[200];    /* pausenative: the mod's name, version and address, a small line at the top-left of the title (OV_HINT, OV_BANNER); "" = none */
     int strip_kind;      /* OV_STRIP: L1S_INFO / L1S_WARN (the colour) */
     int lang;            /* 0..12, picks the font face */
     unsigned tick_ms;    /* animation clock */

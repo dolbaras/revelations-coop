@@ -53,7 +53,7 @@ static int wr(unsigned a, const void *p, unsigned n)
 static int wr32(unsigned a, unsigned v) { return wr(a, &v, 4); }
 static int rdn(unsigned a, void *p, unsigned n) { return r1_safe_read((void *)(size_t)a, p, n); }
 
-static volatile int f_on = 0, f_env_done;   /* build 12: OFF by default (the picture proof failed, F23R KILL missed with it on); env REV1_FLASH2=1 or console `split flash 1` turns it on */
+static volatile int f_on = 0, f_env_done;   /* rel027y: ON by default (set at the first frame from env REV1_FLASH2: 0 = off); build 12 had it OFF because the picture proof failed in the lit cp5 room (the dark 1-1 start proves it) */
 static volatile int f_dark;   /* LAB `split flash 4|5`: the scene's pooled lights switched off every pass (flags bits 0xC00), so the torch is the only light: 4 = torch on, 5 = torch off too (picture of the beam) */
 static volatile int f_diag;   /* LAB `split flash 2|3`: 2 = the first human's view gets a torch moved 100000 units away, 3 = the second human's (does the per-viewport write reach the picture?) */
 static unsigned *vt_copy_store, vt_for;
@@ -406,8 +406,7 @@ void flash2_frame(int active, unsigned p2_unit)
     if (!f_env_done) {
         const char *e = getenv("REV1_FLASH2");
         f_env_done = 1;
-        if (e && e[0] == '1')
-            f_on = 1;
+        f_on = !(e && e[0] == '0');   /* rel027y: ON by default (proven in the dark 1-1 start, notes/rel027y.md); REV1_FLASH2=0 or console `split flash 0` turns it off */
     }
     unsigned sl = lights_addr();
     if (sl && f_dark)

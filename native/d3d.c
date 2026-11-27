@@ -387,6 +387,49 @@ static volatile LONG hf_have;
 static float hf_gui_w, hf_gui_h;   /* the whole screen's GUI size seen last in a GUI projection (2 / x scale, -2 / y scale) */
 static void *hf_real_vp, *hf_real_vsc;
 int split_is_active(void);
+int scan1_view_open(void);
+/* rel027z (owner img 8 / 9: the scan view of a half has the filtered world in strips above / below the scanner frame): while the scanner GUI is open, the part of the current viewport outside the centred
+ * 16:9 box of the HUD fit is cleared to black once per frame, at the first GUI draw of the viewport of the scanning human (viewport 0: the own human's, also the second human's while he scans in his half).
+ * `split scanbars 0|1` (default 1) */
+volatile LONG d3d_scanbars_on = 1;
+static unsigned hf_bars_frame, hf_bars_key;
+static volatile LONG hf_bars_n;
+static void hf_scanbars(IDirect3DDevice9 *d, float bw, float bh)
+{
+    unsigned vi = 0xFFFFFFFFu;
+    if (!d3d_scanbars_on || !r1_safe_read((void *)(size_t)0x116C3E4u, &vi, 4) || vi != 0 || !scan1_view_open())
+        return;
+    unsigned key = hf_vp.X | (hf_vp.Y << 16) | 0x80000000u;
+    if (hf_bars_frame == frames && hf_bars_key == key)
+        return;
+    hf_bars_frame = frames, hf_bars_key = key;
+    int ox = (int)((hf_vp.Width - bw) * 0.5f), oy = (int)((hf_vp.Height - bh) * 0.5f), n = 0;
+    D3DRECT r[4];
+    if (oy > 1) {
+        r[n].x1 = (LONG)hf_vp.X, r[n].y1 = (LONG)hf_vp.Y, r[n].x2 = (LONG)(hf_vp.X + hf_vp.Width), r[n].y2 = (LONG)(hf_vp.Y + oy), n++;
+        r[n].x1 = (LONG)hf_vp.X, r[n].y1 = (LONG)(hf_vp.Y + hf_vp.Height - oy), r[n].x2 = (LONG)(hf_vp.X + hf_vp.Width), r[n].y2 = (LONG)(hf_vp.Y + hf_vp.Height), n++;
+    }
+    if (ox > 1) {
+        r[n].x1 = (LONG)hf_vp.X, r[n].y1 = (LONG)hf_vp.Y, r[n].x2 = (LONG)(hf_vp.X + ox), r[n].y2 = (LONG)(hf_vp.Y + hf_vp.Height), n++;
+        r[n].x1 = (LONG)(hf_vp.X + hf_vp.Width - ox), r[n].y1 = (LONG)hf_vp.Y, r[n].x2 = (LONG)(hf_vp.X + hf_vp.Width), r[n].y2 = (LONG)(hf_vp.Y + hf_vp.Height), n++;
+    }
+    if (n) {
+        IDirect3DDevice9_Clear(d, (DWORD)n, r, D3DCLEAR_TARGET, 0xFF000000u, 1.0f, 0);
+        if (InterlockedIncrement(&hf_bars_n) <= 4)
+            r1_log("hudfit: scan view: %d strip(s) of the viewport (%u,%u %ux%u) outside the %.0fx%.0f box cleared to black", n, (unsigned)hf_vp.X, (unsigned)hf_vp.Y, (unsigned)hf_vp.Width, (unsigned)hf_vp.Height, (double)bw, (double)bh);
+    }
+}
+/* rel027h: the whole screen's size as the engine holds it (screen object [0x11E1B9C], ints at +0xB8 / +0xBC): the GUI space of every GUI unit is exactly that size, whatever the aspect */
+static int hf_screen(float *w, float *h)
+{
+    unsigned p = 0, a = 0, b = 0;
+    if (!r1_safe_read((void *)(size_t)0x11E1B9Cu, &p, 4) || !p || !r1_safe_read((void *)(size_t)(p + 0xB8u), &a, 4) || !r1_safe_read((void *)(size_t)(p + 0xBCu), &b, 4))
+        return 0;
+    if (a < 64 || b < 64 || a > 16384 || b > 16384)
+        return 0;
+    *w = (float)a, *h = (float)b;
+    return 1;
+}
 static HRESULT WINAPI hf_SetViewport(IDirect3DDevice9 *d, const D3DVIEWPORT9 *v)
 {
     if (v) {
@@ -411,7 +454,10 @@ static HRESULT WINAPI hf_SetVSC(IDirect3DDevice9 *d, UINT s, const float *p, UIN
     if (s == 10 && c == 1 && p && d3d_hudfit_on && hf_have && p[0] > 0.0f && p[1] < 0.0f) {
         float W = 2.0f / p[0], H = -2.0f / p[1], vw = (float)hf_vp.Width, vh = (float)hf_vp.Height;
         float asp = W / H;
+        float sw = 0.0f, sh = 0.0f;
         int gui = W >= 320.0f && H >= 180.0f && asp > 1.75f && asp < 1.80f;   /* the whole screen's GUI space (every GUI unit) */
+        if (!gui && W >= 320.0f && H >= 180.0f && hf_screen(&sw, &sh) && fabsf(W - sw) < 1.5f && fabsf(H - sh) < 1.5f)
+            gui = 1;   /* rel027h: any other aspect (ultrawide, 16:10, 4:3): the GUI space equals the screen's size */
         /* the minimap icons (uMapIcon) are drawn with a projection of the VIEWPORT's pixel space (W = vpW, H = vpH, positions computed with the half's size cell of 0.2.x): the same
          * fit, taken with the whole screen's size remembered from the GUI draws, lands them on the map */
         int icon = !gui && hf_gui_w > 0.0f && fabsf(W - vw) < 1.5f && fabsf(H - vh) < 1.5f;
@@ -422,7 +468,13 @@ static HRESULT WINAPI hf_SetVSC(IDirect3DDevice9 *d, UINT s, const float *p, UIN
             W = hf_gui_w;
             H = hf_gui_h;
         }
-        if ((gui || icon) && vw >= 64.0f && vh >= 64.0f && vw <= W + 1.0f && vh <= H + 1.0f &&
+        /* rel027h (owner 2026-11-25, 1920x1080 live trace h27e): the GUI space is the FIXED 1280 x 720 whatever the screen is (register 10 = 0.001563, -0.002778, -1, 1 at 1920x1080 too), so
+         * a half of a 1080p screen (1920 x 540) is BIGGER than the GUI space and the old "viewport not bigger than the GUI space" test never passed: the 1080p HUD stayed stretched. The viewport is
+         * recognised as a half of the whole screen by the screen object's size instead (top/bottom: w = screen, h = screen / 2; side by side: w = screen / 2, h = screen). */
+        float shw = 0.0f, shh = 0.0f;
+        int half = hf_screen(&shw, &shh) ? ((fabsf(vw - shw) < 2.0f && fabsf(vh - shh * 0.5f) < 2.0f) || (fabsf(vw - shw * 0.5f) < 2.0f && fabsf(vh - shh) < 2.0f))
+                                         : (vw <= W + 1.0f && vh <= H + 1.0f);
+        if ((gui || icon) && vw >= 64.0f && vh >= 64.0f && half &&
             (vw * H - vh * W > 0.01f * vw * H || vh * W - vw * H > 0.01f * vw * H) && split_is_active()) {
             float k = vw / W < vh / H ? vw / W : vh / H;
             float ax = W * k / vw, ay = H * k / vh;
@@ -431,6 +483,8 @@ static HRESULT WINAPI hf_SetVSC(IDirect3DDevice9 *d, UINT s, const float *p, UIN
             f[2] = p[2] * ax;
             f[3] = p[3] * ay;
             InterlockedIncrement(&hf_fixed);
+            if (gui)
+                hf_scanbars(d, W * k, H * k);
             if (tr_frames_left > 0) {
                 tr_ev *e = tr_get(TR_VSCONST);
                 if (e) { e->a = 10; e->b = 1; e->n = 1; for (int i = 0; i < 4; i++) { e->f[i] = p[i]; e->f[4 + i] = f[i]; } }

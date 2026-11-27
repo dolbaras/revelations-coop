@@ -9,7 +9,8 @@
 #include "lobby1.h"
 #include "secids1.h"
 
-enum { A_NONE = 0, A_ARMED, A_ROLE, A_P2, A_LAYOUT, A_PADS, A_PADINFO, A_DONE, A_NET_MODE, A_NET_ADDR, A_NET_GO, A_NET_READY, A_MODE, A_KICK, A_NET_WAY, A_NET_INVITE, A_DOWNED, A_NET_FRIEND };
+enum { A_NONE = 0, A_ARMED, A_ROLE, A_P2, A_LAYOUT, A_PADS, A_PADINFO, A_DONE, A_NET_MODE, A_NET_ADDR, A_NET_GO, A_NET_READY, A_MODE, A_KICK, A_NET_WAY, A_NET_INVITE, A_DOWNED, A_NET_FRIEND,
+       A_P_INFO, A_P_P2, A_P_RESTART, A_P_END, A_P_LEAVE /* pausenative: the pause page */ };
 
 struct l1 {
     l1_settings s;
@@ -27,6 +28,7 @@ struct l1 {
     char peer[40];      /* the other player's name */
     int started;        /* the session START came */
     int kick_ask;       /* the Remove partner row asks for its confirmation */
+    int ask2;           /* pausenative: A_P_END / A_P_LEAVE ask for their confirmation (the action id, 0 = none) */
     int host_flags;     /* ep1-flow E12, a guest: the host's session flags byte (-1 = not known) */
     int friend_sel;     /* rel010: the friend the friend row shows (index into env.friend_*) */
     int evt_ok;         /* rel010: the change() in progress comes from OK / click (confirm), not from left / right */
@@ -257,6 +259,7 @@ void l1_open(l1_t *l, const l1_settings *s, const l1_env *env)
     l->changed = 0;
     l->open = 1;
     l->kick_ask = 0;
+    l->ask2 = 0;
 }
 
 void l1_set_env(l1_t *l, const l1_env *env)
@@ -317,11 +320,69 @@ static int build_rows_local(const l1_t *l, l1_row *rows)
     return n;
 }
 
+/* pausenative: the page behind the stock pause menu's Co-Op Play row (env.in_game): what can be changed while the game runs, only the rows that apply */
+static int build_rows_pause(const l1_t *l, l1_row *rows)
+{
+    const l1_env *e = &l->env;
+    int lang = e->lang, n = 0, host = e->p_net == 1, guest = e->p_net == 2, split = !e->p_net && e->p_split_ok;
+    char v[200];
+    ROW(A_P_INFO, L1V_INFO, e->product[0] ? e->product : "Co-op", e->version[0] ? e->version : "-");
+    if (!e->p_native) {   /* (the native page has six rows at most: the version row stands for the page, B leaves) */
+        if (e->p_net) snprintf(v, sizeof v, e->p_connected ? "2 (%s)" : "1", e->p_peer[0] ? e->p_peer : "?");
+        else snprintf(v, sizeof v, "%d", l->s.armed && e->p_split_on ? 2 : 1);
+        ROW(A_P_INFO, L1V_INFO, l1_text(L1T_PA_PLAYERS, lang), v);
+    }
+    if (split) {
+        snprintf(v, sizeof v, "< %s >", l1_text(l->s.armed ? L1T_ON : L1T_OFF, lang));
+        ROW(A_P_P2, L1V_NORMAL, l1_text(L1T_PA_P2, lang), v);
+        if (l->s.armed) {
+            snprintf(v, sizeof v, "< %s >", l1_text(l->s.layout == L1_LAYOUT_TOPBOTTOM ? L1T_TOPBOTTOM : L1T_SIDE, lang));
+            ROW(A_LAYOUT, L1V_NORMAL, l1_text(L1T_LAYOUT, lang), v);
+            snprintf(v, sizeof v, "< %s >", l1_text(e->p_native ? (l->s.pads_kb ? L1T_NP_PADS_KB : l->s.pads_swapped ? L1T_NP_PADS_SWAPPED : L1T_NP_PADS_NORMAL) : pads_word(&l->s), lang));
+            ROW(A_PADS, L1V_NORMAL, l1_text(L1T_PA_INPUT, lang), v);
+            char dv[96];
+            l1_downed_text(l->s.downed, lang, dv, sizeof dv);
+            snprintf(v, sizeof v, "< %s >", dv);
+            ROW(A_DOWNED, L1V_NORMAL, l1_text(L1T_DOWNED, lang), v);
+        }
+    } else if (host) {
+        char dv[96];
+        l1_downed_text(l->s.downed, lang, dv, sizeof dv);
+        snprintf(v, sizeof v, "< %s >", dv);
+        ROW(A_DOWNED, L1V_NORMAL, l1_text(L1T_DOWNED, lang), v);
+    } else if (guest) {
+        char dv[96];
+        int known = l->host_flags >= 0;
+        if (known) l1_downed_text(l1_downed_from_flags((unsigned)l->host_flags), lang, dv, sizeof dv);
+        ROW(A_NONE, known ? L1V_INFO : L1V_GREY, l1_text(L1T_DOWNED, lang), known ? dv : "-");   /* the host decides */
+    }
+    if (host && e->p_connected) {
+        char q[160];
+        if (l->kick_ask) {
+            l1_fmt(q, sizeof q, l1_stock(L1K_KICK_ASK), e->p_peer[0] ? e->p_peer : l1_text(L1T_PLAYER2, lang), NULL);
+            ROW(A_KICK, L1V_NORMAL, q, l1_text(L1T_LEG_OK, lang));
+        } else {
+            snprintf(q, sizeof q, "%s", l1_text(L1T_KICK, lang));
+            ROW(A_KICK, L1V_NORMAL, q, "");
+        }
+    }
+    if (host || guest) {
+        int act = host ? A_P_END : A_P_LEAVE;
+        char q[200];
+        snprintf(q, sizeof q, l->ask2 == act ? "%s ?" : "%s", l1_text(host ? L1T_PA_END : L1T_PA_LEAVE, lang));
+        ROW(act, L1V_NORMAL, q, l->ask2 == act ? l1_text(L1T_LEG_OK, lang) : "");
+    }
+    ROW(A_P_RESTART, L1V_NORMAL, l1_stock(L1K_RESTART), "");
+    if (!e->p_native) ROW(A_DONE, L1V_NORMAL, l1_text(L1T_DONE, lang), "");
+    return n;
+}
+
 static const int k_mode_word[4] = {L1T_OFF, L1T_MODE_SPLIT, L1T_MODE_HOST, L1T_MODE_JOIN};
 
 /* the product screen: one exclusive Mode row (Off / Split screen / Network: host / Network: join), then only the rows of that mode */
 static int build_rows(const l1_t *l, l1_row *rows)
 {
+    if (l->env.in_game) return build_rows_pause(l, rows);
     if (!l->env.net_rows) return build_rows_local(l, rows);
     int lang = l->env.lang, n = 0;
     int mode = l1_mode_of(&l->s), busy = link_active(l), connected = l->net_state == L1NS_CONNECTED, started = l->started && connected;
@@ -407,7 +468,8 @@ static int build_rows(const l1_t *l, l1_row *rows)
 static int selectable(int action)
 {
     return action == A_ARMED || action == A_ROLE || action == A_LAYOUT || action == A_PADS || action == A_DONE || action == A_NET_MODE || action == A_NET_ADDR ||
-           action == A_NET_GO || action == A_NET_READY || action == A_MODE || action == A_KICK || action == A_NET_WAY || action == A_NET_INVITE || action == A_DOWNED || action == A_NET_FRIEND;
+           action == A_NET_GO || action == A_NET_READY || action == A_MODE || action == A_KICK || action == A_NET_WAY || action == A_NET_INVITE || action == A_DOWNED || action == A_NET_FRIEND ||
+           action == A_P_P2 || action == A_P_RESTART || action == A_P_END || action == A_P_LEAVE;
 }
 
 static void step(l1_t *l, int dir)
@@ -471,6 +533,14 @@ static void change(l1_t *l, int action, int dir)   /* dir: -1 left, +1 right or 
         if (!l->kick_ask) l->kick_ask = 1;
         else l->kick_ask = 0, l->request = L1R_NET_KICK;
         break;
+    case A_P_P2: l->s.armed = !l->s.armed; l->changed = 1; l->request = L1R_P_P2; break;   /* pausenative: Player 2 on / off while the game runs */
+    case A_P_RESTART: if (l->evt_ok) l->request = L1R_P_RESTART; break;
+    case A_P_LEAVE: if (l->evt_ok) l->request = L1R_P_LEAVE; break;   /* the stock Quit popup that follows is the confirmation */
+    case A_P_END:
+        if (!l->evt_ok) break;
+        if (l->ask2 != action) l->ask2 = action;
+        else l->ask2 = 0, l->request = L1R_P_END;
+        break;
     default: break;
     }
 }
@@ -485,17 +555,17 @@ void l1_event_in(l1_t *l, const l1_event *e)
     case L1E_UP: step(l, -1); break;
     case L1E_DOWN: step(l, 1); break;
     case L1E_LEFT:
-        if (rows[l->sel].action != A_NET_GO && rows[l->sel].action != A_NET_ADDR && rows[l->sel].action != A_KICK) change(l, rows[l->sel].action, -1);   /* Start and the address are not toggles */
+        if (rows[l->sel].action != A_NET_GO && rows[l->sel].action != A_NET_ADDR && rows[l->sel].action != A_KICK && rows[l->sel].action < A_P_RESTART) change(l, rows[l->sel].action, -1);   /* Start and the address are not toggles */
         break;
     case L1E_RIGHT:
-        if (rows[l->sel].action != A_NET_GO && rows[l->sel].action != A_NET_ADDR && rows[l->sel].action != A_KICK) change(l, rows[l->sel].action, 1);
+        if (rows[l->sel].action != A_NET_GO && rows[l->sel].action != A_NET_ADDR && rows[l->sel].action != A_KICK && rows[l->sel].action < A_P_RESTART) change(l, rows[l->sel].action, 1);
         break;
     case L1E_OK:
         if (rows[l->sel].action == A_DONE) l->request = L1R_CLOSE;
         else l->evt_ok = 1, change(l, rows[l->sel].action, 1), l->evt_ok = 0;
         break;
     case L1E_BACK:
-        if (l->kick_ask) l->kick_ask = 0;   /* Back takes the question back first */
+        if (l->kick_ask || l->ask2) l->kick_ask = 0, l->ask2 = 0;   /* Back takes the question back first */
         else l->request = L1R_CLOSE;
         break;
     case L1E_CHAR:   /* typing goes to the join address only */
@@ -533,6 +603,7 @@ void l1_event_in(l1_t *l, const l1_event *e)
     default: break;
     }
     if (l->kick_ask && (l->sel >= n || rows[l->sel].action != A_KICK)) l->kick_ask = 0;   /* moving away takes the question back */
+    if (l->ask2 && (l->sel >= n || rows[l->sel].action != l->ask2)) l->ask2 = 0;
     (void)before;
 }
 
@@ -656,6 +727,20 @@ void l1_view_get(l1_t *l, l1_view *v)
 {
     int lang = l->env.lang, mode = l1_mode_of(&l->s), net = l->env.net_rows && (mode == L1M_HOST || mode == L1M_JOIN);
     memset(v, 0, sizeof *v);
+    if (l->env.in_game) {   /* pausenative: the page of the pause menu */
+        snprintf(v->title, sizeof v->title, "%s", l1_text(L1T_ROW_LABEL, lang));
+        snprintf(v->subtitle, sizeof v->subtitle, "%s", l1_text(L1T_PA_ROWHELP, lang));
+        v->nrows = build_rows_pause(l, v->rows);
+        sel_fix(l, v->rows, v->nrows);
+        v->sel = l->sel;
+        snprintf(v->leg_ok, sizeof v->leg_ok, "%s", l1_text(L1T_LEG_OK, lang));
+        snprintf(v->leg_back, sizeof v->leg_back, "%s", l1_text(L1T_LEG_BACK, lang));
+        v->pads = l->env.pads_connected;
+        if (!l->env.p_net && l->s.armed && !l->env.p_split_on) snprintf(v->status, sizeof v->status, "%s", l1_text(L1T_PA_SAFE, lang)), v->status_kind = L1S_INFO;
+        else if (l->env.p_net == 2) snprintf(v->status, sizeof v->status, "%s", l1_text(L1T_PA_NOGUESTRULE, lang)), v->status_kind = L1S_INFO;
+        snprintf(v->note, sizeof v->note, "%s", l1_stock(L1K_RESTART_TXT));
+        return;
+    }
     snprintf(v->title, sizeof v->title, "%s", l1_text(L1T_TITLE, lang));
     snprintf(v->subtitle, sizeof v->subtitle, "%s", l1_text(!l->env.net_rows || mode == L1M_SPLIT ? L1T_SUBTITLE : net ? L1T_SUBTITLE_NET : L1T_ROW_HELP, lang));
     v->nrows = build_rows(l, v->rows);

@@ -1520,6 +1520,161 @@ static void test_sharing(void)
     }
 }
 
+
+static int selectable_first_not_info(const l1_view *v) { return v->sel >= 0 && v->sel < v->nrows && v->rows[v->sel].action != 0 && v->rows[v->sel].kind != L1V_INFO; }
+/* pausenative: the page behind the pause menu's Co-Op Play row */
+static int pzhas(const l1_view *v, const char *part) { for (int i = 0; i < v->nrows; i++) if (strstr(v->rows[i].label, part)) return 1; return 0; }
+static int pzrow(const l1_view *v, const char *part) { for (int i = 0; i < v->nrows; i++) if (strstr(v->rows[i].label, part)) return i; return -1; }
+static void test_pause_page(void)
+{
+    l1_view v;
+    l1_event e;
+    for (int lang = 0; lang < L1_LANGS; lang++) {   /* every language: no empty label, texts present */
+        l1_t *l = l1_new();
+        l1_settings s;
+        memset(&s, 0, sizeof s);
+        s.armed = 1, s.layout = L1_LAYOUT_SIDE;
+        l1_env env;
+        memset(&env, 0, sizeof env);
+        env.lang = lang, env.in_game = 1, env.p_split_ok = 1, env.p_split_on = 1, env.pads_connected = 2;
+        snprintf(env.version, sizeof env.version, "9.9.9"), snprintf(env.product, sizeof env.product, "Resident Evil Revelations Co-op");
+        l1_open(l, &s, &env);
+        l1_view_get(l, &v);
+        CHECK(v.nrows >= 7 && !strcmp(v.rows[0].label, "Resident Evil Revelations Co-op") && !strcmp(v.rows[0].value, "9.9.9"));   /* the version is the first info line */
+        for (int i = 0; i < v.nrows; i++) CHECK(v.rows[i].label[0] != 0);
+        CHECK(v.title[0] && v.subtitle[0] && v.cards_on == 0);
+        CHECK(selectable_first_not_info(&v));
+        l1_free(l);
+    }
+    /* split screen: Player 2 on / off, layout, input, downed, restart, done */
+    l1_t *l = l1_new();
+    l1_settings s;
+    memset(&s, 0, sizeof s);
+    s.armed = 1;
+    l1_env env;
+    memset(&env, 0, sizeof env);
+    env.lang = 0, env.in_game = 1, env.p_split_ok = 1, env.p_split_on = 1, env.pads_connected = 2;
+    l1_open(l, &s, &env);
+    l1_view_get(l, &v);
+    CHECK(pzhas(&v, "Second player") && pzhas(&v, "Screen layout") && pzhas(&v, "Input device") && pzhas(&v, "Downed") && pzhas(&v, "Restart") && pzhas(&v, "Done"));
+    CHECK(!pzhas(&v, "Remove") && !pzhas(&v, "Leave") && !pzhas(&v, "End co-op"));
+    CHECK(v.sel == pzrow(&v, "Second player"));   /* the selection starts on the first usable row, not on an info line */
+    e.kind = L1E_OK, e.row = 0;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_P_P2);
+    l1_settings_get(l, &s);
+    CHECK(s.armed == 0 && l1_changed(l));
+    l1_view_get(l, &v);
+    CHECK(!pzhas(&v, "Screen layout") && !pzhas(&v, "Input device") && pzhas(&v, "Second player"));   /* off: only the switch is left */
+    e.kind = L1E_OK;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_P_P2);
+    l1_settings_get(l, &s);
+    CHECK(s.armed == 1);
+    l1_view_get(l, &v);
+    int ri = pzrow(&v, "Screen layout");   /* layout / input / downed change at once */
+    e.kind = L1E_HOVER, e.row = ri;
+    l1_event_in(l, &e);
+    e.kind = L1E_RIGHT;
+    l1_event_in(l, &e);
+    l1_settings_get(l, &s);
+    CHECK(s.layout == L1_LAYOUT_TOPBOTTOM);
+    e.kind = L1E_HOVER, e.row = pzrow(&v, "Input device");
+    l1_event_in(l, &e);
+    e.kind = L1E_RIGHT;
+    l1_event_in(l, &e);
+    l1_settings_get(l, &s);
+    CHECK(s.pads_swapped == 1 && s.pads_kb == 0);
+    l1_event_in(l, &e);
+    l1_settings_get(l, &s);
+    CHECK(s.pads_kb == 1);
+    e.kind = L1E_HOVER, e.row = pzrow(&v, "Downed");
+    l1_event_in(l, &e);
+    e.kind = L1E_RIGHT;
+    l1_event_in(l, &e);
+    l1_settings_get(l, &s);
+    CHECK(s.downed == L1D_30 || s.downed != L1D_60);
+    e.kind = L1E_HOVER, e.row = pzrow(&v, "Restart");   /* left / right on the restart row do nothing; OK asks the glue for the stock popup */
+    l1_event_in(l, &e);
+    e.kind = L1E_RIGHT;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_NONE);
+    e.kind = L1E_OK;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_P_RESTART);
+    e.kind = L1E_BACK;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_CLOSE);
+    l1_free(l);
+    /* rel027m: the native page (the stock Options page has six rows at most): the version row first, no Players / Done rows, every case fits in six rows */
+    for (int variant = 0; variant < 3; variant++) {
+        l = l1_new();
+        memset(&s, 0, sizeof s);
+        memset(&env, 0, sizeof env);
+        s.armed = variant == 0;
+        env.lang = 0, env.in_game = 1, env.p_native = 1, env.pads_connected = 2;
+        snprintf(env.version, sizeof env.version, "0.2.7"), snprintf(env.product, sizeof env.product, "Resident Evil Revelations Co-op"), snprintf(env.url, sizeof env.url, "github.com/dolbaras/revelations-coop");
+        if (variant == 0) env.p_split_ok = 1, env.p_split_on = 1;
+        else env.p_net = variant, env.p_connected = 1, snprintf(env.p_peer, sizeof env.p_peer, "Partner");
+        l1_open(l, &s, &env);
+        l1_view_get(l, &v);
+        CHECK(v.nrows >= 3 && v.nrows <= 6);
+        CHECK(!strcmp(v.rows[0].label, "Resident Evil Revelations Co-op") && !strcmp(v.rows[0].value, "0.2.7") && v.rows[0].kind == L1V_INFO);
+        CHECK(!pzhas(&v, "Players") && !pzhas(&v, "Done") && pzhas(&v, "Restart"));
+        CHECK(v.sel > 0 && v.rows[v.sel].kind != L1V_INFO);   /* the cursor never rests on the version row */
+        if (variant == 0) CHECK(v.nrows == 6 && pzhas(&v, "Second player") && pzhas(&v, "Screen layout") && pzhas(&v, "Input device") && pzhas(&v, "Downed"));
+        if (variant == 1) CHECK(pzhas(&v, "Remove") && pzhas(&v, "End co-op"));
+        if (variant == 2) CHECK(pzhas(&v, "Leave"));
+        l1_free(l);
+    }
+    /* network host with the partner: remove (asks first), end co-op (asks first), the downed rule, no split rows */
+    l = l1_new();
+    memset(&s, 0, sizeof s);
+    memset(&env, 0, sizeof env);
+    env.lang = 0, env.in_game = 1, env.p_net = 1, env.p_connected = 1;
+    snprintf(env.p_peer, sizeof env.p_peer, "Bob");
+    l1_open(l, &s, &env);
+    l1_view_get(l, &v);
+    CHECK(pzhas(&v, "Remove partner") && pzhas(&v, "End co-op") && pzhas(&v, "Downed") && !pzhas(&v, "Second player") && !pzhas(&v, "Leave"));
+    CHECK(strstr(v.rows[pzrow(&v, "Players")].value, "Bob") != NULL);
+    e.kind = L1E_HOVER, e.row = pzrow(&v, "Remove partner");
+    l1_event_in(l, &e);
+    e.kind = L1E_OK;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_NONE);
+    l1_view_get(l, &v);
+    CHECK(pzhas(&v, "kick Bob"));   /* the game's own question */
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_NET_KICK);
+    l1_view_get(l, &v);
+    e.kind = L1E_HOVER, e.row = pzrow(&v, "End co-op");
+    l1_event_in(l, &e);
+    e.kind = L1E_OK;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_NONE);
+    e.kind = L1E_BACK;
+    l1_event_in(l, &e);   /* Back takes the question back */
+    CHECK(l1_take_request(l) == L1R_NONE);
+    e.kind = L1E_OK;
+    l1_event_in(l, &e);
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_P_END);
+    l1_free(l);
+    /* network guest: leave (the stock Quit popup confirms), the host's rule read only */
+    l = l1_new();
+    memset(&env, 0, sizeof env);
+    env.lang = 0, env.in_game = 1, env.p_net = 2, env.p_connected = 1;
+    l1_open(l, &s, &env);
+    l1_view_get(l, &v);
+    CHECK(pzhas(&v, "Leave the session") && !pzhas(&v, "Remove") && !pzhas(&v, "End co-op") && v.status[0]);
+    e.kind = L1E_HOVER, e.row = pzrow(&v, "Leave the session");
+    l1_event_in(l, &e);
+    e.kind = L1E_OK;
+    l1_event_in(l, &e);
+    CHECK(l1_take_request(l) == L1R_P_LEAVE);
+    l1_free(l);
+}
+
 int main(void)
 {
     test_typed_queue();
@@ -1543,6 +1698,7 @@ int main(void)
     test_downed_row();
     test_friend_row();
     test_sharing();
+    test_pause_page();
     printf("%d checks, %d failed\n", checks, fails);
     printf(fails ? "FAILED\n" : "ALL OK\n");
     return fails ? 1 : 0;

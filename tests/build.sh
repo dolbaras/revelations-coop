@@ -246,3 +246,6 @@ else echo "(ual_test: no native/build/dinput8.dll; sh native/build.sh first, or 
 # fix026g: the partner gate's leash and scene gate (native/leash1.h)
 "$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_leash1.exe test_leash1.c
 ./build/test_leash1.exe
+# rel027u (B2): descent follow (native/descent1.h)
+"$ZIG" cc -target x86_64-windows-gnu -O1 -g -Wall -Wno-unused-function -o build/test_descent1.exe test_descent1.c
+./build/test_descent1.exe

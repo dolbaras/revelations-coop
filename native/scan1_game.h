@@ -12,6 +12,10 @@ int scan1_split_hook(int op);
 /* story1_game.inc (E2): 1 = the analysis rate is one team value here (1-2, or the module is off), 0 = each PC keeps its own human's rate. Game thread. */
 int scan1_rate_shared_now(void);
 
+/* rel027z (render thread, reads memory only): 1 while the scanner GUI of the own human runs (his scan view is on screen in viewport 0); d3d.c blacks the strips of a split half outside the
+ * 16:9 box of the scanner frame meanwhile */
+int scan1_view_open(void);
+
 /* console (logic thread): scan [status] | who | items | on | off | x 0|1 | give | p2rate <v> | reveal <item hex> */
 void scan_cmd(const char *arg, char *out, int size);
 

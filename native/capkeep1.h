@@ -32,4 +32,26 @@ static inline int ck_fields(unsigned ct, unsigned kd, unsigned tm, unsigned th, 
     return keep ? CK_KEEP : CK_LOST;
 }
 
+/* rel027 (owner 2026-11-25): the story's HOLD of a captured human. While the story's PcsMain/SubCharacterThinkOff runs on a human (th_t0 in capture.c) the scripted commands of the
+ * demo park his lower state machine in a wait state (EventWaitState [0] by the event motion / CharacterSetMotion; the standing waits ExWait [2], CustomWaitReady [3], CustomWait [4]),
+ * which ignores his pad: the second human stood still until the story let go (13_00 start: Parker at the sink for 75 s). In the plain play view (no movie, no scene camera, no
+ * pause) the human is asked for MoveState ([5], the state every event ends in: EventStateBase_vf9 -> ChangeState(MoveState, 0)) after a grace time; the story's own triggers
+ * (zones, flags) go on unchanged and its next command may park him again (retried at most every CK_HOLD_RETRY_MS). */
+#define CK_HOLD_GRACE_MS 400u
+#define CK_HOLD_RETRY_MS 1000u
+static inline int ck_hold_state(int idx) { return idx == 0 || idx == 2 || idx == 3 || idx == 4; }
+static inline int ck_hold_release(int on, int story_wait, int play_view, int idx, unsigned held_ms, unsigned since_req_ms)
+{
+    if (!on || !story_wait || !play_view || !ck_hold_state(idx)) return 0;
+    return held_ms >= CK_HOLD_GRACE_MS && since_req_ms >= CK_HOLD_RETRY_MS;
+}
+
+/* rel027p: the story's LOCK of the second human (FUN_006B3B80: E1C |= 4) is lifted in the plain play view. unlock_on = switch, e1c = unit+0xE1C, slot = unit slot field, own = the own slot, kind = unit+0xE30,
+ * play = the split view is drawing (no movie / scene camera / pause), since_ms = time since the last unlock call of this unit. Never the own human, never the dead (E1C bit 0), only a human (kind 1). */
+static inline int ck_unlock_wanted(int unlock_on, unsigned e1c, unsigned slot, int own, unsigned kind, int play, unsigned since_ms)
+{
+    if (!unlock_on || !play || !(e1c & 4u) || (e1c & 1u) || slot > 1 || (int)slot == own || kind != 1) return 0;
+    return since_ms >= 500u;
+}
+
 #endif

@@ -16,7 +16,7 @@ $tools = Join-Path $root "tools"
 $base = Join-Path ([IO.Path]::GetTempPath()) ("re1-installer-test-" + $PID)
 Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $base | Out-Null
-$cur = "0.2.6"   # the version of THIS tree (native\r1.h); the older releases below are the published ones
+$cur = "0.2.7"   # the version of THIS tree (native\r1.h); the older releases below are the published ones
 $script:fails = 0; $script:checks = 0
 function Check($cond, $name) { $script:checks++; if ($cond) { Write-Host "ok   $name" } else { Write-Host "FAIL $name"; $script:fails++ } }
 function Sha($p) { $fs = [IO.File]::OpenRead($p); try { [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)) -replace "-", "" } finally { $fs.Close() } }

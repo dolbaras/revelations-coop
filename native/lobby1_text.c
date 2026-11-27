@@ -570,16 +570,30 @@ static const char *const T[L1T_COUNT][L1_LANGS] = {
                          "Seu parceiro foi trazido para perto de você antes da próxima cena.",
                          "下一场景开始前，已将你的搭档移到你身边。",
                          "下一場景開始前，已將你的搭檔移到你身邊。"},
+    /* pausenative: the page behind the pause menu's Co-Op Play row (our wording, not read by native speakers) */
+    [L1T_PA_ROWHELP] = {"Players, screen layout, input device and rules; restart from the checkpoint.", "Joueurs, écran, périphérique de commande et règles ; redémarrage au point de contrôle.", "Giocatori, schermo, periferica di controllo e regole; riavvio dall'ultimo checkpoint.", "Spieler, Bildschirm, Eingabegerät und Regeln; Neustart vom Kontrollpunkt.", "Jugadores, pantalla, dispositivo de control y reglas; reinicio desde el punto de control.", "プレイヤー、画面、入力デバイス、ルール、チェックポイントからの再開。", "Игроки, экран, устройство управления и правила; перезапуск с контрольной точки.", "Gracze, ekran, urządzenie sterujące i zasady; restart od punktu kontrolnego.", "Spelers, scherm, invoerapparaat en regels; herstart vanaf het controlepunt.", "Jogadores, ecrã, dispositivo de controlo e regras; reiniciar a partir do ponto de controlo.", "Jogadores, tela, dispositivo de controle e regras; reiniciar do ponto de controle.", "玩家、画面、输入设备和规则；从检查点重新开始。", "玩家、畫面、輸入裝置和規則；從檢查點重新開始。"},
+    [L1T_PA_PLAYERS] = {"Players", "Joueurs", "Giocatori", "Spieler", "Jugadores", "プレイヤー", "Игроки", "Gracze", "Spelers", "Jogadores", "Jogadores", "玩家", "玩家"},
+    [L1T_PA_P2] = {"Second player", "Deuxième joueur", "Secondo giocatore", "Zweiter Spieler", "Segundo jugador", "2人目のプレイヤー", "Второй игрок", "Drugi gracz", "Tweede speler", "Segundo jogador", "Segundo jogador", "第二位玩家", "第二位玩家"},
+    [L1T_PA_END] = {"End co-op and play on alone", "Terminer le coop et continuer seul", "Termina la co-op e continua da solo", "Koop beenden und allein weiterspielen", "Terminar la cooperación y seguir solo", "協力プレイを終了して一人で続ける", "Закончить кооператив и играть дальше одному", "Zakończ współpracę i graj dalej sam", "Co-op beëindigen en alleen verder spelen", "Terminar o cooperativo e continuar sozinho", "Encerrar o cooperativo e continuar sozinho", "结束协力，单人继续", "結束協力，單人繼續"},
+    [L1T_PA_LEAVE] = {"Leave the session", "Quitter la session", "Lascia la sessione", "Sitzung verlassen", "Salir de la sesión", "セッションを抜ける", "Покинуть сессию", "Opuść sesję", "Sessie verlaten", "Sair da sessão", "Sair da sessão", "离开会话", "離開連線"},
+    [L1T_PA_SAFE] = {"Player 2 joins at the next safe moment (not in a scene or a menu).", "Le joueur 2 rejoint à un moment sûr (hors scène et hors menu).", "Il giocatore 2 entra al prossimo momento sicuro (non durante scene o menu).", "Spieler 2 steigt im nächsten sicheren Moment ein (nicht in Szenen oder Menüs).", "El jugador 2 se une en el próximo momento seguro (no en escenas ni menús).", "プレイヤー2は次の安全なタイミングで参加します（シーン中・メニュー中を除く）。", "Игрок 2 подключится в ближайший безопасный момент (не во время сцены или меню).", "Gracz 2 dołączy w najbliższym bezpiecznym momencie (nie podczas scen ani menu).", "Speler 2 doet mee op het volgende veilige moment (niet in een scène of menu).", "O jogador 2 entra no próximo momento seguro (não em cenas nem menus).", "O jogador 2 entra no próximo momento seguro (não em cenas nem menus).", "玩家2将在下一个安全时机加入（过场和菜单中除外）。", "玩家2將在下一個安全時機加入（過場和選單中除外）。"},
+    [L1T_PA_NOGUESTRULE] = {"The rules are set by the host.", "Les règles sont définies par l'hôte.", "Le regole sono decise dall'host.", "Die Regeln legt der Host fest.", "Las reglas las fija el anfitrión.", "ルールはホストが決めます。", "Правила задаёт хост.", "Zasady ustala gospodarz.", "De regels worden door de host bepaald.", "As regras são definidas pelo anfitrião.", "As regras são definidas pelo anfitrião.", "规则由主机决定。", "規則由主機決定。"},
+    [L1T_PA_INPUT] = {"Input device", "Périphérique de commande", "Periferica di controllo", "Eingabegerät", "Dispositivo de control", "入力デバイス", "Устройство управления", "Urządzenie sterujące", "Invoerapparaat", "Dispositivo de controlo", "Dispositivo de controle", "输入设备", "輸入裝置"},
+    [L1T_NP_PADS_NORMAL] = {"2 gamepads", "2 manettes", "2 controller", "2 Controller", "2 mandos", "パッド2台", "2 геймпада", "2 kontrolery", "Twee gamepads", "2 comandos", "2 controles", "2个手柄", "2個手把"},
+    [L1T_NP_PADS_SWAPPED] = {"Gamepads swapped", "Manettes inversées", "Controller invertiti", "Controller getauscht", "Mandos cambiados", "パッド入れ替え", "Геймпады наоборот", "Kontrolery zamienione", "Gamepads omgewisseld",
+                             "Comandos trocados", "Controles trocados", "手柄互换", "手把互換"},
+    [L1T_NP_PADS_KB] = {"Keyboard + gamepad", "Clavier + manette", "Tastiera + controller", "Tastatur + Controller", "Teclado + mando", "キーボード＋パッド", "Клавиатура + геймпад", "Klawiatura + kontroler",
+                        "Toetsenbord + gamepad", "Teclado + comando", "Teclado + controle", "键盘+手柄", "鍵盤＋手把"},
 };
 
 /* ---- the game's own texts (Coop_<lang>.gmd) ---- */
 const char *const l1_stock_labels[L1K_COUNT] = {"coop_error_mes_01", "coop_error_mes_09", "coop_error_mes_12", "coop_guide_mes_10", "coop_guide_mes_27",
                                                 "coop_join", "coop_ready", "coop_notice_kick", "partner_waiting_info", "partner_ready", "partner_recruit",
-                                                "game_setting_menu_01_02", "episode_01"};
-const char *const l1_stock_banks[L1K_COUNT] = {"Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "option", "campaign"};
+                                                "game_setting_menu_01_02", "episode_01", "restart", "restart_txt"};
+const char *const l1_stock_banks[L1K_COUNT] = {"Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "Coop", "option", "campaign", "cockpit", "cockpit"};
 static const char *const STOCK_EN[L1K_COUNT] = {"The session you are trying to join is already full.", "Connection to the other player has been terminated.", "Failed to join session.",
                                                 "%s has left.", "You have been removed from the Lobby by the host.", "%s has joined.", "%s is ready.", "Do you want to kick %s?",
-                                                "Waiting for other player.", "Ready", "Waiting", "Off", "Episode 1"};
+                                                "Waiting for other player.", "Ready", "Waiting", "Off", "Episode 1", "Restart", "Restart game from last checkpoint."};
 static char g_stock[L1K_COUNT][256];
 
 /* the end of a UTF-8 string cut at most at `max` bytes, never inside a character */

@@ -225,6 +225,7 @@ static uint32_t scanner_gui(void)
     return cp ? rd32(cp + 0x48) : 0;
 }
 static int gui_running(uint32_t gui) { return gui && (rd8(gui + SC_GUI_RUN) & 1); }
+int scan1_view_open(void) { return g_ok && gui_running(scanner_gui()); }   /* rel027z (see scan1_game.h) */
 static int rate_read(void)
 {
     uint32_t cs = rd32(SCA_CSYSTEM_PTR);
@@ -513,15 +514,16 @@ static int second_human_slot(void)   /* the character played on pad slot 1 (-1 =
     if (!st.role[0].enabled || !st.role[1].enabled || st.role[0].pad == st.role[1].pad) return -1;
     return st.role[0].pad == 1 ? 0 : st.role[1].pad == 1 ? 1 : -1;
 }
-static int p2_holds_genesis_button(void)
+static int p2_holds_genesis_button_on(unsigned slot)   /* slot = the game user his pad is (1 normally, 0 while the exchange runs) */
 {
-    uint32_t pd = pad_data(1);
+    uint32_t pd = pad_data(slot);
     unsigned scheme = pd ? rd32(pd + 0x10) : 99, mask = scheme == 0 ? 0x0100u : scheme == 1 ? 0x0200u : 0;   /* FUN_0088BA50: LB scheme 0, RB scheme 1 */
     unsigned char gp[12];
     memset(gp, 0, sizeof gp);
-    if (!mask || !testmode_pad_peek(1, gp)) return 0;
+    if (!mask || !testmode_pad_peek((int)slot, gp)) return 0;
     return (*(unsigned short *)gp & mask) != 0;
 }
+static int p2_holds_genesis_button(void) { return p2_holds_genesis_button_on(1); }
 int ALIGNED scan1_split_hook(int op)
 {
     uint32_t now = GetTickCount();
@@ -548,6 +550,16 @@ int ALIGNED scan1_split_hook(int op)
             S.x_refused_busy++;
             if (now - last_busy_log > 3000u) last_busy_log = now, slog("the second human holds the Genesis button, but the first human is using the scanner (one scanner): he waits");
         }
+        if (!want && in.p2_hold) {   /* rel027z: a held Genesis button that starts no exchange: why (rate limited) */
+            static uint32_t last_why;
+            static int nwhy;
+            if (nwhy < 80 && now - last_why > 400u) {
+                last_why = now, nwhy++;
+                slog("the second human holds the Genesis button, no exchange: split_ok %d present %d has %d allowed %d (pad1+8 %08x) p1_busy %d (gui run %d) cooldown %d (last_end %u ms ago, ever %d) upper %08x F44 %08x bag cur %u", in.split_ok, in.p2_present, in.p2_has,
+                     in.p2_allowed, pd ? rd32(pd + 8) : 0, in.p1_busy, gui_running(scanner_gui()), (int)(in.ever_ended && now - in.last_end < SC_X_COOLDOWN_MS), in.ever_ended ? (unsigned)(now - in.last_end) : 0, (int)in.ever_ended,
+                     rd32(u2 + SC_U_UPPER) ? rd32(rd32(u2 + SC_U_UPPER)) : 0, rd32(u2 + SC_U_F44), b2 ? rd32(b2 + SC_BAG_CUR) : 99);
+            }
+        }
         if (want) g_x_slot = s2;
         return want;
     }
@@ -562,7 +574,7 @@ int ALIGNED scan1_split_hook(int op)
             if (gui && nl != latch) wr8(gui + SC_GUI_LATCH, (uint8_t)nl);
         }
         S.x_enters++;
-        slog("split: the second human (character %d) uses the Genesis: whole view, he is the own human until he stops (rate %d -> %d%s, herb latch %d -> %d)", g_x_slot, rate, nr,
+        slog("split: the second human (character %d) uses the Genesis: in his half (the halves' layout bytes swapped; the whole view with `split halfmenu 0`), he is the own human until he stops (rate %d -> %d%s, herb latch %d -> %d)", g_x_slot, rate, nr,
              story ? ", 1-2: the team's rate" : ", his own rate", latch, nl);
         return 1;
     }
@@ -576,6 +588,7 @@ int ALIGNED scan1_split_hook(int op)
         in.gui_open = gui_running(scanner_gui());
         uint32_t root = rd32(SCA_CAMROOT_PTR), m0 = root ? rd32(root + 0xCE0) : 0, v0 = root ? rd32(root + 0x30 + 4) : 0;
         in.story_camera = root && m0 && v0 && v0 != m0;
+        in.p2_hold = p2_holds_genesis_button_on(0);   /* (the exchange runs: his pad is game user 0) */
         if (in.story_camera) slog("split: a cutscene / event camera took viewport 0 during the second human's Genesis use: the exchange ends now");
         return sc_x_want_leave(&X, &in, now);
     }
@@ -661,7 +674,7 @@ static void chg_guard_set(int on)
 static void fmask_pass(int mode)
 {
     uint32_t gui = scanner_gui();
-    int want = g_fmask && mode == SC_MODE_SPLIT && !X.on && gui && gui_running(gui) && split_is_active();
+    int want = g_fmask && mode == SC_MODE_SPLIT && gui && gui_running(gui) && split_is_active();   /* rel027h: also while the second human scans in HIS half (viewport 2 is then the first human's) */
     static const uint32_t offs[3] = {0x2D0u, 0x318u, 0x31Cu};
     for (int i = 0; i < 3; i++) {
         uint32_t u = gui ? rd32(gui + offs[i]) : 0;
@@ -745,6 +758,14 @@ void ALIGNED scan_cmd(const char *arg, char *out, int size)
                  S.rx_drop[SC_RX_DROP_EPOCH], S.rx_drop[SC_RX_DROP_SECT], S.rx_drop[SC_RX_DROP_DUP], S.rx_drop[SC_RX_DROP_MISSING], S.rx_drop[SC_RX_DROP_VISIBLE],
                  S.rx_drop[SC_RX_WAIT], g_chg_on ? "on" : "off", (long)g_chg_dropped, S.rate_asks, S.rate_shared, (unsigned)gui, gui_running(gui), gui ? rd8(gui + SC_GUI_STORY) : -1, gui ? rd8(gui + SC_GUI_LATCH) : -1,
                  rate_read(), (unsigned)current_section());
+        return;
+    }
+    if (!strcmp(w, "enterin")) {   /* rel027z LAB: the inputs of the exchange's enter rule right now */
+        int s2 = second_human_slot();
+        uint32_t u2 = s2 >= 0 ? unit_of_slot((unsigned)s2) : 0, u1 = s2 >= 0 ? unit_of_slot((unsigned)(1 - s2)) : 0, pd = pad_data(1), b2 = bag_of(u2);
+        snprintf(out, (size_t)size, "scan enterin: s2 %d u2 %08x in_play %d has %d allowed %d (pad1+8 %08x scheme %u) hold %d (bag cur %u genesis idx %u) p1 genesis %d gui run %d | exchange %s, last_end %u ago %u ms, g_ok %d on %d xon %d, u2 upper %08x F44 %08x",
+                 s2, (unsigned)u2, u2 && unit_in_play(u2), bag_has_genesis(b2), pd && (rd32(pd + 8) & 0x10u), pd ? rd32(pd + 8) : 0, pd ? rd32(pd + 0x10) : 99, p2_holds_genesis_button(), b2 ? rd32(b2 + SC_BAG_CUR) : 99, (unsigned)SC_GENESIS_INDEX,
+                 u1 && unit_in_genesis(u1), gui_running(scanner_gui()), X.on ? "ON" : "idle", g_x_last_end, g_x_last_end ? (unsigned)(GetTickCount() - g_x_last_end) : 0, g_ok, g_on, g_x_on, u2 ? rd32(rd32(u2 + SC_U_UPPER) ? rd32(u2 + SC_U_UPPER) : 0) : 0, u2 ? rd32(u2 + SC_U_F44) : 0);
         return;
     }
     if (!strcmp(w, "who")) {

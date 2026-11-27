@@ -156,6 +156,42 @@ int main(int argc, char **argv)
             }
             l1_free(l);
         }
+        /* pausenative: the page behind the pause menu's Co-Op Play row (split screen, network host, network guest) and the title's name line with the hint */
+        for (int kind = 0; kind < 3; kind++) {
+            l1_t *l = l1_new();
+            l1_settings ps;
+            memset(&ps, 0, sizeof ps);
+            ps.armed = kind == 0;
+            l1_env penv;
+            memset(&penv, 0, sizeof penv);
+            penv.lang = lang, penv.in_game = 1, penv.pads_connected = 2;
+            snprintf(penv.version, sizeof penv.version, "0.2.7"), snprintf(penv.product, sizeof penv.product, "Resident Evil Revelations Co-op");
+            if (kind == 0) penv.p_split_ok = 1, penv.p_split_on = 1;
+            else penv.p_net = kind, penv.p_connected = 1, snprintf(penv.p_peer, sizeof penv.p_peer, "Bob");
+            l1_open(l, &ps, &penv);
+            memset(&sc, 0, sizeof sc);
+            sc.kind = OV_LOBBY, sc.lang = lang;
+            l1_view_get(l, &sc.v);
+            unsigned *px = NULL;
+            char path[512];
+            if (overlay_render_to_bitmap(&sc, w, h, &px)) {
+                snprintf(path, sizeof path, "%s/pause_%s_%s.bmp", dir, kind == 0 ? "split" : kind == 1 ? "host" : "guest", l1_lang_codes[lang]);
+                write_bmp(path, px, w, h);
+            }
+            l1_free(l);
+        }
+        {
+            memset(&sc, 0, sizeof sc);
+            sc.kind = OV_HINT, sc.lang = lang;
+            snprintf(sc.hint, sizeof sc.hint, "F6 / Back button: Co-Op Play");
+            snprintf(sc.banner, sizeof sc.banner, "Resident Evil Revelations Co-op 0.2.7   github.com/dolbaras/revelations-coop");
+            unsigned *px = NULL;
+            char path[512];
+            if (overlay_render_to_bitmap(&sc, w, h, &px)) {
+                snprintf(path, sizeof path, "%s/banner_%s.bmp", dir, l1_lang_codes[lang]);
+                write_bmp(path, px, w, h);
+            }
+        }
     }
     /* the device Reset path of the game: everything is released and built again (a double free of the shared Japanese face crashed the live game on the first Reset) */
     for (int round = 0; round < 3; round++) {
